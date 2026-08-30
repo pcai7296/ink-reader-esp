@@ -107,3 +107,14 @@ const char* weekdayCn(int wday) {
     static const char* const names[7] = {"周日", "周一", "周二", "周三", "周四", "周五", "周六"};
     return names[((wday % 7) + 7) % 7];
 }
+
+void formatProgressPercent(uint64_t page, uint64_t total, char *out) {
+    if (total == 0) { snprintf(out, 12, "0%%"); return; }
+    uint32_t p10k = (uint32_t)((page * 10000ULL) / total);   // 万分位 0-10000 (0-100%)
+    if (p10k > 10000) p10k = 10000;
+    if (p10k < 10) {   // < 0.1%: 两位小数 (0.01~0.09)
+        snprintf(out, 12, "0.%02lu%%", (unsigned long)p10k);
+    } else {           // >= 0.1%: 一位小数
+        snprintf(out, 12, "%lu.%lu%%", (unsigned long)(p10k / 100), (unsigned long)((p10k % 100) / 10));
+    }
+}

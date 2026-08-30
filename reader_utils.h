@@ -29,3 +29,7 @@ void formatIndexNumber(uint32_t value, char *out);
 
 // tm_wday (0=周日) → 中文星期
 const char* weekdayCn(int wday);
+
+// 阅读进度百分比 (分级精度): 总进度 <0.1% 显示两位小数(如 0.05%), >=0.1% 显示一位小数(如 46.2%)
+// page/total → "XX.X%" 或 "0.XX%"; out 至少 12 字节缓冲
+void formatProgressPercent(uint64_t page, uint64_t total, char *out);

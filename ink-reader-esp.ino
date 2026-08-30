@@ -971,8 +971,8 @@ void renderHome(bool full) {
         drawRect(pbX, pbY, pbW, pbH, true);
         int fillW = (int)((uint64_t)pbW * pct / 100);
         if (fillW > 0) fillRect(pbX + 1, pbY + 1, fillW - 1, pbH - 2, true);
-        char pr[20];
-        snprintf(pr, sizeof(pr), "%lu%%", (unsigned long)pct);
+        char pr[12];
+        formatProgressPercent((uint64_t)recentReadPage, (uint64_t)recentReadTotalPages, pr);
         drawTextUTF8(pbX + pbW + 4, pbY - 5, pr, 40, true);
         char pg[20];
         snprintf(pg, sizeof(pg), "%lu/%lu页", (unsigned long)recentReadPage, (unsigned long)recentReadTotalPages);
@@ -3158,8 +3158,9 @@ void renderReaderMenu() {
         if (readerIsPortrait()) snprintf(line2, sizeof(line2), "已建%lu页", (unsigned long)txtIndexedPages);
         else snprintf(line2, sizeof(line2), "索引建立中 %lu页", (unsigned long)txtIndexedPages);
     } else {
-        uint32_t pct = txtTotalPages ? (uint32_t)((uint64_t)txtPage * 1000 / txtTotalPages) : 0;
-        snprintf(line2, sizeof(line2), "%lu.%lu%% %lu/%lu页", (unsigned long)(pct / 10), (unsigned long)(pct % 10),
+        char pr[12];
+        formatProgressPercent((uint64_t)txtPage, (uint64_t)txtTotalPages, pr);
+        snprintf(line2, sizeof(line2), "%s %lu/%lu页", pr,
                  (unsigned long)txtPage, (unsigned long)txtTotalPages);
     }
     if (readerMenuNote[0]) snprintf(line2, sizeof(line2), "%s", readerMenuNote);
