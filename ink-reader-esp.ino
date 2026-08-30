@@ -5125,6 +5125,26 @@ void loop() {
     if (r3 == 1) debugLine("KEY right short");
     else if (r3 == 2) debugLine("KEY right long");
 
+    // 组合键: 按 KEY2(中) 后 1 秒内按 KEY3(右) → 强制返回首页 (任何界面均可)
+    // ⚠️ 需先读两键: KEY2 短按记时刻, KEY3 短按且距上次 KEY2 短按 <=1s → 触发
+    static uint32_t lastK2ShortMs = 0;
+    bool comboHome = false;
+    if (r2 == 1) lastK2ShortMs = millis();
+    if (r3 == 1 && lastK2ShortMs && (millis() - lastK2ShortMs) <= 1000) {
+        comboHome = true;
+        lastK2ShortMs = 0;
+    }
+    if (comboHome) {
+        traceFmt("COMBO_HOME from mode=%d", appMode);
+        // 关闭阅读器会话(若有)加统计收尾, 再回首页
+        if (appMode == APP_READER) closeTxtReader();
+        appMode = APP_HOME;
+        renderHome(true);
+        saveSleepRecord();
+        delay(30);
+        return;
+    }
+
     if (appMode == APP_HOME) {
         if (r3 == 1) {
             homeSel = (homeSel + 1) % 7;
