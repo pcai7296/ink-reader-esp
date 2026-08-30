@@ -870,10 +870,9 @@ void loadRecentReadSummary() {
             ESP.wdtFeed();
             if (gBootKey3Window) {
                 if (readKey3() == 0) {
-                    if (gBootKey3PollLow >= 1) gBootKey3Held = true;   // 连续两次低 (块间隔≈10ms) 才算按下
-                    else gBootKey3PollLow++;
-                } else {
-                    gBootKey3PollLow = 0;
+                    // 任一 LOW 采样即计按下: 用户"1秒内点按/按住 KEY3"都能触发 (对齐官方宽松行为)。
+                    // 原"连续两次低采样"要求按住跨采样点, 快速点按会被清零错过。
+                    gBootKey3Held = true;
                 }
             }
         }
@@ -4905,10 +4904,7 @@ void setup() {
     while (millis() - keyWindow < 1000) {
         if (!gBootKey3Held) {
             if (readKey3() == 0) {
-                if (gBootKey3PollLow >= 1) gBootKey3Held = true;   // 连续两次低 (≈10ms) 才算按下
-                else gBootKey3PollLow++;
-            } else {
-                gBootKey3PollLow = 0;
+                gBootKey3Held = true;   // 任一 LOW 采样即计按下 (点按也能触发)
             }
         }
         delay(10);
