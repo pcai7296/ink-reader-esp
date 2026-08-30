@@ -1,0 +1,137 @@
+# AGENTS.md — ink-reader-esp
+
+**Active firmware workspace.** 复刻 V14 xz014 固件的文件管理器 + TXT 阅读器。
+
+## OVERVIEW
+ESP8266 Arduino 固件，主控 ESP‑12F，2.9" SSD1680 墨水屏横放（逻辑 296×128）。核心功能：SD 文件浏览、TXT 阅读（索引/翻页/记忆/章节）、电池、时钟（BL8025T）、配网。
+
+## STRUCTURE
+```
+ink-reader-esp/
+├── file_manager.ino          # 主固件 (3480+ 行)
+├── epd_290a.h / .cpp         # EPD 驱动 (296×128 SSD1680)
+├── rot_map.h                 # 四向旋转坐标规范 (mapFbRot 纯函数, 唯一权威, pc_tests 可测)
+├── wifi_manager.h / .cpp     # 时钟/配网/天气配置模块
+├── weather_data.h / .cpp     # 天气数据层 (心知天气 API 解析 + HTTP 获取)
+├── hitokoto.h / .cpp         # 一言数据层 (v1.hitokoto.cn 解析 + HTTP 获取)
+├── bmp_show.h / .cpp         # SD 卡 BMP 图片显示 (1/4/8/16/24 位深, 移植官方 A7)
+├── weather_icons.h           # 6 个 24×24 天气图标 (PIL 生成, 1=黑 MSB left)
+├── gb2312_unicode.h / .c     # (遗留, 固件已不再引用 — 渲染已全量迁至 u8g2)
+├── font16_cn.h               # (遗留, 未包含 — 中文渲染用 u8g2 内置 chinese_gb2312 字库)
+├── font16x16.h               # Tahoma 16px ASCII
+├── font8x8.h                 # 小 ASCII 8px
+├── make_font_cn.py           # 中文字体生成
+├── make_font16.py            # ASCII 字体生成
+├── make_weather_icons.py     # 天气图标生成 (PIL)
+├── pc_tests/                 # PC 测试源码 (weather_parse_test.cpp / hitokoto_parse_test.cpp; 不参与固件编译, 两个 main() 会冲突)
+└── ink-reader-esp-*.bin      # 编译产物
+```
+
+## WHERE TO LOOK
+| Task | File | Notes |
+|------|------|-------|
+| 主页/文件列表 | `file_manager.ino` §renderHome/renderAll/renderListRow | APP_HOME/APP_BROWSER |
+| TXT 阅读 | `file_manager.ino` §TXT 阅读实现 | buildTxtIndex / 排版 / 翻页 |
+| 章节目录 | `file_manager.ino` §章节 | chapterRows, ChapterRow |
+| 按键 | `file_manager.ino` §按键状态机 | KEY2=GPIO0/KEY3=GPIO3 长按机 |
+| 屏幕刷新 | `file_manager.ino` §refresh | display(displayPartial) |
+| 电池 | `file_manager.ino` §电池电量 | GPIO12 采样 + SD MISO 冲突 |
+| 时钟 | `file_manager.ino` §renderClockPage + `wifi_manager.cpp` | BL8025T 探测 |
+| 天气 | `file_manager.ino` §天气页面 + `weather_data.cpp` | APP_WEATHER; 心知天气 API |
+| 一言 | `file_manager.ino` §fetchHitokotoFlow + `hitokoto.cpp` | 时钟页; v1.hitokoto.cn, 2s 超时 |
+| 配网 | `wifi_manager.cpp` | wifiManagerBegin; 端点 / /status /info /settings /wifi /clear |
+| 天气配置 | `wifi_manager.cpp` §loadWeatherConfig/saveWeatherConfig | EEPROM 160-232 |
+| 设置页 | `file_manager.ino` §设置页面 + `wifi_manager.cpp` §设备设置 | APP_SETTINGS; EEPROM 232-244; 4 项: 时钟格式/时区/一言/恢复默认 |
+| BMP 图片 | `bmp_show.cpp` + `file_manager.ino` §showBmpFile | APP_BMP=9; 文件管理器打开 .bmp 全屏 |
+| OTA | `wifi_manager.cpp` (ESP8266HTTPUpdateServer) | /update 端点, admin/333333 |
+| 中文字体数据 | `u8g2Fonts` + `chinese_gb2312` 字库 | 253KB flash, UTF-8 输入 |
+| 索引格式 | `file_manager.ino` §formatIndexNumber | 8 字节 ASCII 补零 |
+| 调试 | `file_manager.ino` §diagLog/diagFlushSd | DIAG_SD=1 时写 debug_trace.log |
+
+## CONVENTIONS
+- **UTF-8 全链路**: 全文本 UTF-8 → U8g2_for_Adafruit_GFX + `u8g2Fonts` 渲染；不混用 GBK
+- **双缓冲**: fb 保持物理 128×296，`setPix(x,y)` → `(col=y, row=295−x)`
+- **部分刷新优先**: 局刷覆盖列表/菜单；全刷只用于进入新页面
+- **看门狗**: `ESP.wdtFeed()` 在索引循环、翻页循环、SD 遍历中必须调用
+- **SD/SPI 恢复**: 每次 SD 操作前 `SPI.begin()` + 恢复 CS 高
+- **文件名截断**: utf8Truncate 保扩展名（splitNameExt）
+- **目录排序**: 文件夹优先 + 名称升序 strcmp
+- **调试**: `traceFmt`/`traceFmtLevel` 走 diagLog；DIAG_SERIAL=1 时 Serial 输出
+
+## ANTI-PATTERNS (THIS PROJECT)
+- **长期禁用 WDT**: `ESP.wdtDisable()` 后必须 `ESP.wdtEnable(8000)`；否则每 9 秒重启
+- **KEY3 时开 Serial 监视**: GPIO3=RX，按下会往串口灌垃圾
+- **KEY2 直接 digitalRead**: 与 DC 共享，必须先 `pinMode(INPUT_PULLUP)` 读再恢复
+- **全刷做小交互**: 翻页/菜单/错误提示必须部分刷新
+- **忽略 SD CS 恢复**: SD 与 EPD 共享 SPI，CS 不恢复会导致 EPD 花屏
+- **`catch {}` 空捕获 / `@ts-ignore` / `as any`**: 禁用
+- **`String` 大循环分配**: TXT 索引循环内避免 String 拼接；用 `rows[line] +=` 谨慎
+
+## UNIQUE STYLES
+- `drawTextUTF8(x, y, s, maxW, black)` — y 是基线，实际显示 y+13
+- `utf8Truncate` 双边界 (容量 + 像素宽度)
+- `formatIndexNumber` 用 `%08lu` 写 8 字节十进制 ASCII
+- `KState` 结构 + `scanKey()` 实现短按/长按机
+- `isChapterTitle` 用 GB2312 字节对直接匹配（不依赖 UTF-8 解码）
+- `txtCharWidth` 查表 ASCII 字符宽度（不是等宽）
+
+## COMMANDS
+```bash
+# ⚠️ 必须 --build-path 指向项目 build 目录，否则 bin 输出到临时目录（曾烧录旧 bin 误判修复无效）
+arduino-cli compile --fqbn esp8266:esp8266:d1_mini --libraries libraries --build-path "J:\code\esp8266\ink-reader-esp\build" file_manager.ino
+# 烧录前核对 build\file_manager.ino.bin 时间戳（bin 名是 file_manager.ino.bin，不是 .d1_mini.bin）
+esptool.py --port COM20 --baud 460800 write_flash 0x0 "J:\code\esp8266\ink-reader-esp\build\file_manager.ino.bin"
+```
+
+## NOTES
+- IRAM ~60KB/64KB（当前 93%），慎用 IRAM 变量
+- RAM 70% 余量（56200/80192），避免大静态数组
+- `fb` 帧缓冲 4608 字节 (128×296/8)
+- `diagRing` 24 条环形日志
+- 小说索引构建参考 `J:\code\esp8266\archive\test\` 的 `.i1`/`.z1` 样例
+- 排版算法已 PC 端 Python 模拟验证 100%（`simulate_index.py`）
+- ✅ **UTF-8 全链路已修复**（原乱码根因：GB2312 分支拦截 UTF-8 首字节 + 2 字节查表）：`buildTxtIndex`/`readTxtPage`/`drawReaderLine`/`isChapterTitle`/`normalizeReaderLines` 全部对齐 PC 模拟器 `sim_engine.py`（b==0xE0 读 2 字节、ch_px=14）
+- **索引构建抗打断（官方 A7 同款）**：无 `.i1b` 断点文件——页表即断点。`记录[N-1]=txt大小` 是完整性标记；重启检测到末记录≠txt大小 → 从页表末条页首偏移续扫（`beginResumeIndexBuildFromPartial`），最多重扫一页；重扫页章节经 `resumeChapterSeed` 去重
+- **构建中实时保存进度（对齐官方 A7 边读边建可存进度）**：双句柄写 `.i1`（"r+" 写记录[0] + 追加句柄）有概率破坏 FAT 引发 SD 卸载（实测），所以构建中进度改写入**独立 sidecar** `<索引名>p`（如 `小说.i1p`，8 字节记录[0] 同格式）——不同文件，无双句柄冲突；`finishTxtIndexBuild` 合并回 `.i1` 记录[0] 后删除 sidecar；构建中断（掉电/休眠/重启）后 `startTxtReader` 优先读 sidecar 恢复阅读位置，`beginTxtIndexBuild`（全新构建）清旧 sidecar；**主页 `loadRecentReadSummary` 同样优先读 sidecar**（否则构建中断后主页显示第一页、阅读器却恢复正确进度——已修）；阅读菜单构建中显示"索引建立中 已建n页"（对齐 A7 菜单看构建进度）；重建入口带确认框"真的要重建吗！长按重建，短按退出"（对齐 A7）
+- **⛔ 时间链路（用户重要决策，必须遵守）**：时间持久化**优先写外挂 BL8025T**；**BL8025T 不在线时降级写 EEPROM**（flash，KEY1 复位不清——用户担心的"内部RTC/内存"是 rtcUserMemory 已避开）。**当前状态（2026-08-26 换机后）：本机外挂 BL8025T 正常（用户实测）**——开机 `CLOCK_8025T_READ` 从芯片恢复时间、NTP 成功后 `CLOCK_8025T_SAVE` 写芯片；探测已支持双引脚（13/14 V14 源码优先、4/5 ESP12F 默认），读法为先写寄存器地址 0x00（重复 START）再读（用户资料），写入含 Control Register=0x00（24 小时制）。**历史（旧机器 2026-08-23 实测）**：BL8025T 双引脚扫描（13/14 + 4/5）均无 I2C 设备（`CLOCK_8025T_DIAG reqN=0`）——当时芯片硬件离线（未供电/虚焊/损坏），软件无法解决；EEPROM 降级兜底（`CLOCK_EEPROM_SAVE epoch=.. savedAt=..` + 开机 `loadPersistedClock` 恢复），无 RTC 时时间靠 ESP8266 内部时钟漂移，长时间会不准。**EEPROM 降级逻辑保留为兜底：BL8025T 不在线时自动生效，无需人工干预**
+- **开机分流（KEY1 复位后 1 秒 KEY3 检测窗口 + 恢复免刷，2026-08-25 重构）**：①KEY3 窗口**并入最近阅读页表扫描**——窗口起点提前到 `loadRecentReadSummary` 之前，扫描（0~3.2s）期间每 512B 块轮询一次 `readKey3`，扫描后补足到最短 1s；2 次连续低 ≈10ms 防抖（对齐 `KEY_DEBOUNCE_MS`）；窗口内按过 KEY3 → **提前短路直接一次全刷回首页**（跳过恢复渲染，避免"先重刷阅读界面再全刷首页"的 2×刷新——用户实测冗余）；未按 → 按休眠记录恢复。②**启动恢复刷新策略（优化④）**：e-ink 面板双稳态，任意复位/断电都物理保留复位前画面——**不能按复位原因判定**：本机 KEY1 复位上报 `REASON_DEFAULT_RST`（"Power On"，硬件差异），按 EXT_SYS_RST/深睡唤醒判定的原因门会让优化永远不生效（实测踩坑）。判定改为：有记录且模式=首页/阅读/浏览 → **阅读恢复=免刷**（`renderTxtPageNoRefresh`：仅渲染进帧缓冲不写屏，面板已显示同页；`fixedRefreshCount` 保持 0 → 首次翻页局刷写屏、第 6 次定次全刷自愈残影）、**首页/浏览=局刷**；强制全刷例外：其他模式兜底回首页（内容不同）、章节目录双渲染（先阅读页后目录）、低电休眠唤醒（整屏"电量过低"通知局刷擦除留整屏残影，开机测压 ≤3300mV 强制全刷）
+- **文件管理器白名单（对齐 A7 过滤机制）**：A7 扩展名过滤表（RAM 0x3FFE8DB9：.i1/.i2/.z1/.z2）+ 文件 UI（"短按选择/长按确认"、"可用隐藏，共 N"、"文件过大>600K"）。复刻实现：`isWhitelistedFile`——文件只显示 `.txt`(阅读)/`.bmp`(图片)，其他格式一律不显示；目录始终显示；`isBlacklistedEntry` 补齐隐藏 `.i1/.i2/.z1/.z2/.v1/.vz1/.i1p/.v1p`（横/竖索引+章节+sidecar）+ 修正系统目录黑名单（`.tiemereader` 原来漏写为 `.timereader`）
+- **阅读菜单对齐 A7（反编译确认 7 项 + 功能全实现）**：菜单 = 字体选择/退出/自动翻页/全刷间隔：/旋转/跳转/休眠，每项行内显示当前值（A7 菜单项数组 0x3FFF0984、12B/项×7 循环、无"你读了百分之xx"——复刻原底部那行是自创已移除）。功能：①自动翻页（档位 0/1/2/5/10/25，超上限提示"换页倍率过高"对齐 A7）；②全刷间隔 1..10 次可调（`fixedRefreshEvery` 替代原固定 FIXED_REFRESH_EVERY=6）；③跳转=**数字键盘输入页码**（详见下方"跳转数字键盘"条目；原"右调大/中调小"逐页调整已废弃——用户嫌慢）；④字体选择=自带/外部（外部暂不可用回落自带，对齐 A7"外部字体初始化失败/已使用自带字体"）；⑤旋转=**四向 0°/90°/180°/270° 弹窗选择**（菜单项打开"旋转方向"弹窗：中短上移/右短下移/右长确认/中长取消回菜单，**选中方案才切换**，选当前方向确认=仅关弹窗回正文；当前方向行右缘实心方块标记；`renderRotSelOverlay`/`applyReaderRotation`；`readerRot` 为唯一语义, 存储走 `storedToRot/rotToStored` 兼容编码）——**排版参数化**（`txtLineCount`/`txtLineWidth`：横类 90/270 8 行×283px / 竖类 0/180 18 行×118px）、**索引按几何类别分离**（竖类 .v1/.vz1，横类 .i1/.z1；翻转共用同类别索引, 秒开零重建）、**fb 方向映射**（`fbRot`：经 `mapFbRot` 四分支, 仅阅读页渲染时临时置位, 非阅读页恒 90）、菜单/跳转/同步弹窗跟随方向；章节目录/倍速弹窗固定横屏；⑥退出/休眠
+- **跳转数字键盘（13 键, 2026-08-24 实现）**：`renderJumpOverlay`/`drawJumpKey`/`jumpCursor`/`jumpRejectMs`。①布局：横屏两行 6+6（`1-6` / `7 8 9 0 < 回车`）+ **取消**小键（回车正下方，36×22）；竖屏 3×3（`1-9`）+ 第 4 行 `0 < 回车` + 取消（竖屏键宽 36、弹窗 118×200 居中，逻辑高 296）。②交互：**光标移动设计（用户定稿）**：右键短按 = 下移 1 个、中键短按 = 上移 2 个（`+1` / `+11 mod 13`，与阅读菜单一致）；选中键下方画向下实心小三角；长按右键 = 执行（数字 0-9 末尾追加 / `<` 退格 / `回车` 跳转 / `取消` 回菜单）；长按中键 = 取消回菜单。③初始编辑值 = 当前页号；追加上限 = 总页数位数（如 140146 → 6 位），超位数拒绝并在页码行尾显示 `!` 1s（`jumpRejectMs`）；退格删空显示 `0/N页`，回车 `jumpToPage()` clamp 到 [1,总页数]（索引构建中 clamp 到已建页数）→ 写进度 → 全刷。④编辑/移光标全程局刷，仅回车全刷。⑤**坑：键宽必须 ≥ 文字宽 + 4px**（`drawTextUTF8` 的 maxW=键宽-4 经 `utf8Truncate` 按像素截断）——汉字 16px/字，"取消""回车" 32px → 键宽必须 ≥36px，否则只显示首字（实测 28px 键只显示"取"）；文字居中偏移 `(w-tw)/2` 可能为负 → 左对齐保护（`tx<x` 时 `tx=x`）
+- **时间校准页与天气页（UI+逻辑对齐 A7 反编译）**：①校准页文案=A7（获取NTP时间/:成功/:失败/获取NTP时间失败，改用天气时间/手动跳过校准/此时 按下按键3 可跳过校准）；**逻辑同步**：NTP 超时不再直接 FAILED，新增 `CLOCK_WEATHER` 降级状态——请求心知 now.json 解析 `last_update` 作为时钟基准（`clockManagerTryWeatherTime`，civilToEpoch−时区偏移），失败才 FAILED；右键短按跳过在降级阶段同样生效。②天气获取步骤提示：`fetchWeather` 加 `onStep` 回调（0=实况/1=未来/2=生活指数），每个端点 HTTP 成功后更新 `wFetchStep` 并局刷（对齐 A7"获取天气实况数据/获取未来天气数据/获取生活指数"）；超时显示"* 连接超时 *"。③**天气壁纸背景**：天气页从 SD 卡加载 `天气壁纸N.bmp`（N=2+weatherIconIndex：晴→2 多云→3 阴→4 雨→5 雪/雾→6），复用 bmpShowFromSd 画入帧缓冲（只写非白像素，先 fillRect 白底）；**文件不存在则留空白底**。④主页天气摘要：SD 缓存 `/.tiemereader/weather.dat`（"天气名|温度"），重启后主页仍显示（A7 主页简洁天气信息）。⑤充电灯珠核查结论：主板红灯=TP4054 CHRG 硬件驱动 LED，**A7 固件无充电状态读取**（无 GPIO 读充电/无充电字符串/无闪电位图），MCU 读不到；闪电标为复刻自创（电压迟滞 3950/4050mV）
+- **电量显示移植官方逻辑（A7 反编译 + V14 源码交叉验证）**：①采样对齐 A7——GPIO12 电池开关 + GPIO5 拉高 + **20 次** ADC 平均 + 关 + INPUT 防漏电（A7 反汇编 cc50 确认；原复刻 16 次）；换算 `sum×5607/(N×1024)` 与官方一致。②**百分比换官方 4 阶多项式**（V14 getBatVolBfb：`497.50976x⁴−7442.07254x³+41515.70648x²−102249.34377x+93770.99821`）+ A7 边界（<3.2V→0%、>4.2V→100%、负→3%）——原分段表 3.7V→40% 而官方曲线 3.7V→76.5%，整体偏低是"电量不准"根因。③**充电检测（闪电标）为复刻自创**：A7 固件反编译确认无充电检测（无闪电位图、无"充电"字符串、电池显示函数无充电分支）；isCharging 改为电压阈值+迟滞（≥4050mV 进入 / <3950mV 退出），TP4054 恒流充电早期电压低无法电压判定，如需插电即显示需硬件读 TP4054 CHRG 引脚
+- **5 分钟自动休眠在构建期间失效的根因（已修）**：`notePhysicalKeyActivity` 原把"持续按压态"（`k2.down||k3.down`）也算活跃 → **电源噪声**（EPD 刷新/SD 写卡等大电流脉冲经电源耦合到 GPIO3=RX / GPIO0=DC）误判"一直按住" → 休眠计时被永久刷新 → 构建期间永不自动休眠。修复：休眠计时只认按键事件（短按/长按边沿，真实场景无超过 5 分钟的按住）；KEY 串口调试行改为仅按键事件打印（去掉无条件 250ms 轮询，减少串口对 GPIO3 的噪声耦合）；自动休眠触发打印 `SLEEP_AUTO idle=.. building=.. mode=..` 便于验证
+- **按键电源噪声防抖（scanKey 内置）**：目标项目原无任何防抖（readKey2 仅 30µs 稳定延时、readKey3 直接读、scanKey 纯边沿）。已加 `KEY_DEBOUNCE_MS=10`：`KState` 增 `rawStable`/`rawChangeAt`，电平变化需持续 10ms 才进入状态机，瞬时噪声毛刺（EPD 大电流脉冲等）直接忽略；对交互无感（短按判定延迟 ≤10ms，长按 500ms 计时从确认按下起算）
+- **FixedRefresh 定次刷新（对齐官方 DisplaySetup.ino）**：阅读翻页每 6 次局刷做一次**单次全刷**（直接显示本页；官方"黑+白两次清屏再局刷"≈3s 太慢，已改单次≈1.5s），防局刷残影；进入阅读/章节跳转全刷归零
+- **索引页首偏移必须用真实字节计数**：`indexTaskStep` 块读缓冲（idxBuf 2048B）时 `File::position()` 只停在重填点（2048 对齐），用它记页首会把整张页表量化到 2048 边界 → 连续几条记录同偏移 → 翻页读同一内容"没反应"（串口 trace 实测：页2-6 全 offset=2048）。已改 `indexScanPos` 逐字节累计（`idxReadByte` 消费 +1，peek 不加），与 PC 模拟器/官方一致；`startTxtReader` 增页表单调性校验（记录[1..] 必须严格递增），旧对齐坏索引自动全量重建（不续建）
+- **翻页卡死已修复**：`readTxtPage` SD 读失败立即 `break`（原 `c<0` 只记日志不退出，`available()` 卡真时死循环且每圈喂狗 → 按键永不响应，仅 KEY1 硬复位可恢复）
+- **段首缩进**：2 个全角空格（28px=两字）；布局(索引)不含缩进，内容行 >264px 时不缩进防末字截断（原 7 半角空格=35px≈3字 且满行截断）
+- **渲染已对齐官方机制**：全文本走 `U8g2_for_Adafruit_GFX` + `u8g2Fonts`（`drawTextUTF8`/`utf8Width`/`drawReaderLine`），中文字库 = u8g2 内置 `chinese_gb2312`（UTF-8 输入）；`font16_cn.h`/`gb2312_unicode` 位图链路已弃用，死代码已删
+- **刷新断电策略（对齐官方"画完 display.powerOff()"）**：`epd.display`（全刷）末尾 `powerOff()`（SSD1680 0x02，保留 RAM 图像）；`displayPartial`（局刷）**先 `powerOn()` 再写 0x32 部分 LUT**（GxEPD2 时序）且**局刷后保持上电**——断电态写 LUT 不可靠，曾致连续翻页局刷无显示（只有紧跟全刷后的那次局刷有效）；休眠路径 `epd.sleep()` 断电，5 分钟自动休眠兜底省电
+- 启动 Soft WDT 复位已修复：`loadRecentReadSummary` 顺序连续读 + 每 64 页喂狗 + 批量 read（《武炼巅峰》.i1 1.1MB / 142417 页）；2026-08-25 再改 **512B 块读（64 条/次）**——逐条 8B 读以 VFS 调用开销为主（~23µs/次，102k 条 ≈2.35s），块读全表扫 <0.5s（优化①；独立静态缓冲 `recScanBuf`，不共用 indexTaskStep 的 `idxBuf`，防破坏后台构建残留位置）；**启动页号复用（优化②）**：`loadRecentReadSummary` 算出的页号经 `gBootHintPage` 传 `startTxtReader`（读走即清零），`parsePageRecord(hint)==saved` 校验通过则跳过 17 次 seek 二分（≈1.1s），横竖屏索引不同/页表变更自动回退二分
+- EEPROM 布局: WifiConfig 0-105 / CLOCK 112-125 / WeatherConfig 160-232 (magic 'WTHR') / SettingsConfig 232-244 (magic 'SET3', 含 portrait=阅读旋转兼容编码 0横/1竖/2横翻/3竖翻, checksum 后不参与校验, 旧数据 0/1 兼容) / WebdavConfig 256-470 (magic 'WDV2') / TargetConfig 470-508 (magic 'TGRT', 连接对象)
+- **阅读旋转方向全局持久**：`readerRot`（0/90/180/270）↔ SettingsConfig.portrait 兼容编码（`storedToRot` 非法值→90 旧默认横屏, `rotToStored` 保存）；开机 `setup` 恢复上次方向 → 文件管理器打开 TXT/主页最近阅读恢复/睡眠唤醒/重建索引全部按该方向（竖类 .v1 / 横类 .i1）；阅读菜单旋转后 `settingsSetPortrait(rotToStored(readerRot))` 保存；设置页"恢复默认"会清回横屏（下次开机生效）；`loadRecentReadSummary` 主页索引后缀按类别感知（修复前硬编码 .i1）
+- **四向旋转坐标规范（唯一权威, 见 rot_map.h）**：物理 fb 恒 128 列 × 296 行（非 296×128！）；逻辑画布 rot 0/180=128×296（竖类）、90/270=296×128（横类）。映射：0° `px=x,py=y`；90° `px=y,py=295−x`（既有产线公式, 未变）；180° `px=127−x,py=295−y`；270° `px=127−y,py=x`。`mapFbRot(rot,x,y,&px,&py)` 输入为当前 rot 的逻辑画布坐标、输出恒物理 fb 坐标, 越界/非法 rot 返回 false 且不写 px/py（防御保险丝, 先于任何 fb 数组索引计算）。**旋转角必须用 uint16_t（270 超 uint8_t 上限, 截断为 14 —— rot_map_test 42 断言实测踩坑）**。`setPix` 的 default 分支仅防御非法 rot, 正常路径不得依赖。**UI 显示度数约定（用户定稿）：默认横屏(内部90°)=0°，显示角=(内部角−90+360)%360，顺时针递增；弹窗选项按显示度数升序 `rotSelTable={90,180,270,0}` → "0° 横屏/90° 竖翻/180° 横翻/270° 竖屏"；内部 rot 与存储编码不受影响**
+- **标签系统（阅读菜单"标签"项，第7项/共10项）**：每书一份 `<书名>.bm`（txtPath 去扩展名+.bm，同目录同名，不同目录同名书互不影响），append-only 8字节ASCII**页首偏移**记录（同 .i1 记录[0] 格式，复用 formatIndexNumber），上限50，跨横竖屏方向共用；损坏(size%8!=0)读只认完整记录+trace BM_CORRUPT，追加前自愈重写。交互：菜单"标签"→子菜单弹窗 [标记本页][历史标记]（跟随 readerRot）；**标记本页**=追加 txtPageStart+局刷提示"已标记 标记N"/满50"标签已满"；**历史标记**=APP_MARKS 全屏列表（**固定横屏**，仿章节目录骨架：顶栏右上=选中序号/总条数(项维度)，底栏=p/P 页(页维度)），中短上移/右短下移跨页自动翻/中长回正文(局刷)/行内右长→操作框 [跳转][删除][取消]。跳转=offset<txtSize 校验(否则"标记失效")→findPageCeil(构建中 clamp txtIndexedPages)→写进度→全刷回正文——offset 恒来自 txtPageStart 必为 page-start，findPageCeil 仅复用既有定位。删除=两阶段防丢失：RAM 缓冲→.bmt 写+回读校验→rename 替换，兜底 RAM 直写+校验，全败提示"删除失败"；名称=位置编号删除后顺延，光标指顺延条+分页重算。睡眠降级：saveSleepRecord 将 APP_MARKS 快照为 APP_READER（唤醒回正文且方向/进度不变）。黑名单加 .bm/.bmt（仅浏览器展示受限）。数据函数 markPath/markCountRead/markAppend/markLoadPage/markDeleteOne/jumpToMark 位于 startTxtReader 之后。**坑（实测白屏根因）：列表/弹窗局刷后 SPI 总线在 EPD 侧，且 reinit 过总线后旧 File 句柄不可信 → 标签任何 SD 访问前必须先 `reinitSdBus`，并统一走 `markEnsureTxtFile()`（恢复总线+无条件重开 txtFile）；百分比用进入列表时的 markTxtSize 快照；跳转 findPageCeil==0 时提示"跳转失败"不静默兜底第1页（曾致 findPageCeil=0→兜底页1→读正文 TXT_READ_FAIL 全零行白屏）**
+- **UI 方向两层分类**：Reader-Direction UI（阅读菜单/跳转键盘/进度同步弹窗/旋转弹窗/标签子菜单 —— 渲染前置 `fbRot = readerRot`）vs Fixed-Landscape UI（章节目录/倍速弹窗/文件管理器/时钟/天气/设置/BMP/**历史标记列表** —— 恒 90° 不置 fbRot）。新增 UI 时先归类再实现
+- 天气夜间判断用 `localtime` 本地小时（configTime +8），勿用 UTC 公式
+- 天气 KEY 存 EEPROM 明文，禁止写入 Serial/trace 调试输出
+- **进度同步直连手机（LUMI1，阅读菜单"进度同步"项）**：手机=进度服务器（端口 8384 明文 HTTP），协议规范 `docs/progress-lumi1.md`——`GET /progress?file=<RFC3986>`→200+LUMI1/404；`PUT /progress`（body=LUMI1+`file=` 原始 UTF-8 文件名）→200/400；载荷必填 `ts/size/offset/pct`（offset=原始 TXT 字节偏移、编码无关；未知 key 忽略可扩展）。状态机 `progress_sync.cpp`：PREPARE→WIFI→[DISCOVER]→[WAIT_CLIENT]→CONNECT→GET→PARSE→COMPARE→[APPLY|UPLOAD]→FINISH（每阶段阻塞≤6s、循环喂狗）；比较页两键双方向=同步(手机→本地)/覆盖(本地→手机，二次确认)。手机端服务器=Legado 改造（`J:\code\Android\legado` 新包 `io.legado.app.esp`，自 Lumi_Books 移植）；**目标选择优先级：`/sync.cfg` 的 `ip=` → UDP 发现（LUMIDISC/LUMIACK :8390，≤2s 首合法 ACK）→ TargetConfig.staIp/apIp**；STA 模式走发现，AP 模式固定 192.168.0.100；跨版本文件（size 不同）按 pct 换算兜底。**⚠️ 两端 txt 必须字节一致（同名且内容相同）**：实测《武炼巅峰》手机文件头部多了 181 字节 zxcs 水印（`====…====` 更新提示块）→ 推送方向系统性偏一章（ESP offset 按手机文件解释 -181 落上一章末尾；拉取方向 +181 落章内故正常，方向不对称）。检测：对比两端文件 MD5（ESP 侧参考 `scripts/fix_wulian.py` 生成对齐版）；换文件后 ESP 索引需重建（.i1 末记录≠新文件大小自动触发）
+- **`/sync.cfg`（SD 根，可选）**：纯文本 `ssid=`/`password=`/`ip=`/`port=` 四行；存在且 ssid 非空 → 同步时直接 `WiFi.begin(ssid,pass)`（先 `WiFi.persistent(false)` 防写 flash 配网区），优先于 EEPROM 配网页凭据；`ip=` 时跳过 UDP 发现，`port=` 覆盖默认 8384（1..65535 纯数字，供联调/换端口，如 `port=38623`）；换网络（路由器/手机热点）改文件即可，不重烧、不动 EEPROM
+- **v3 文件指纹检测（2026-08）**：`docs/progress-lumi1.md §3.4`——`fs`+`h0/h1/h2`（头/中/尾各 1KB 的 SHA-1，纯 C 实现 `progress_lumi.cpp::lumiSha1`（RFC 3174 无依赖，pc_test 可测），区域公式 `lumiFingerprintRegions`；**发送方语义**：指纹永远描述发送方文件，接收方对比自己文件；**三态** MATCH/UNKNOWN/MISMATCH（4 位掩码 bit0=size bit1=head bit2=middle bit3=tail，仅 MISMATCH 有诊断意义）；**原子组**：四字段全存在且合法才有效（半组/非法/重复/溢出 → 整组视为不存在）；256B 编码预算硬上限（整组省略禁截断）。ESP 端：PREPARE 生成 SyncSnapshot（复用已开 `txtFile` 句柄：size→三处读 1KB→SHA-1→progress，**任一步失败整组省略**；`extern File txtFile` 在 progress_sync.cpp）；UPLOAD 用 `lumiMakeEx` 携带指纹；PARSE 后三态比较（`gFileFpState`/`gFileMismatch`）；比较页 MISMATCH 黑底白字警告（"！！文件不一致：大小/头部/中部/尾部"替换标题行，⚠ 不在 GB2312 字库用 !!）；手机端 GET 响应附指纹、PUT 弹窗按位警告。跨平台一致性由 pc_test（70 断言）与 Android `LumiProgressCodecTest`（Knuth 序列同预期）锚定
+- **UDP 发现细节（progress_sync.cpp）**：广播顺序=先子网定向广播再 255.255.255.255（部分热点/路由器对两类广播处理不同）；只接受 `LUMIACK <合法IPv4>` 前缀包；2s 超时回退 TargetConfig（无配置报"未配置手机地址"）；SYNC_DISCOVER 非阻塞轮询（100ms 间隔），每循环 `ESP.wdtFeed()`
+## 文件管理 HTTP API（2026-08 新增, 契约见 docs/file-api.md）
+
+- 统一 API: Web/Android/Legado 都是客户端; 服务器复用配网会话的 ESP8266WebServer
+- 模块: sd_path(纯函数路径安全/保护) → sd_file_ops(SD 操作层) → file_api(HTTP 路由)
+- 端点: /api/status capacity files stat search download upload(仅配网会话) mkdir delete rename move
+- 读开放; 变更必验 X-Admin-Pass(wifiManagerAdminPassValid); 错误枚举见 docs/file-api.md §1
+- 关键坑(已踩):
+  - File::name() 只返回 basename, 递归/完整路径必须用 fullName()(嵌套目录丢失路径)
+  - fullName() 根相对无前导 /, fillEntry 需规范化, 否则 isProtectedPath 判不了
+  - ESP8266 循环栈仅 4KB: HTTP 处理器内大缓冲必须 malloc; 递归回调(搜索)内禁止栈上大局部
+  - 传输循环不加 yield()(实测拖慢 2x); TCP 吞吐 ~0.2MB/s 是栈/链路瓶颈(非 SD)
+  - 上传断连残留 .uploading 的 FAT 目录项尺寸只在 close/flush 更新 → 每 64KB flush
+  - 删除打开的文件会失败 → 先关句柄
+- 性能基线(S4.5): SD 读写 ~1MB/s, 网络 ~0.2MB/s(P0 达标); 传输缓冲 4KB 动态
+- web_test(J:\code\esp8266\web_test 独立仓库) 是 PC 测试台(STA 连局域网 + /api + /bench)

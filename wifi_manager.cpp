@@ -1,0 +1,1866 @@
+#include "wifi_manager.h"
+#include "file_api.h"
+#include "file_api_fs.h"
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <ESP8266HTTPUpdateServer.h>
+#include <ESP8266HTTPClient.h>
+#include <EEPROM.h>
+#include <time.h>
+#include <user_interface.h>
+#include <WiFiUDP.h>
+#include <Wire.h>
+#include <SPI.h>
+
+// ---------- 板载 BL8025T/RX8025T 外部 RTC 芯片 (I2C, V14 官方方案) ----------
+// 芯片自带 32.768kHz 晶振 + VBAT (主板电池/电容), 断电后继续走时
+// 注意: I2C 用 GPIO13(SDA)/GPIO14(SCL), 与 SD/EPD 的 SPI 共用引脚, 需总线仲裁
+#define RTC8025_I2C_ADDR 0x32
+#define RTC8025_SDA_PIN 13
+#define RTC8025_SCL_PIN 14
+static bool rtc8025Present = false;      // 芯片存在且可读
+static bool rtc8025TimeValid = false;    // 芯片时间合法
+static bool rtc8025TypeRX = false;       // true=RX8025T(读取偏移8) false=BL8025T(顺序读)
+static time_t rtc8025NowEpoch = 0;       // 探测时读出的当前时间 (UTC epoch)
+
+// 日历年→天数 (Howard Hinnant civil_from_days 逆运算), 不依赖 mktime/localtime 时区
+static int64_t daysFromCivil(int y, unsigned m, unsigned d) {
+  y -= (int)(m <= 2);
+  const int era = (y >= 0 ? y : y - 399) / 400;
+  const unsigned yoe = (unsigned)(y - era * 400);
+  const unsigned doy = (153u * (m + (m > 2 ? -3u : 9u)) + 2u) / 5u + d - 1u;
+  const unsigned doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
+  return (int64_t)era * 146097LL + (int64_t)doe - 719468LL;
+}
+
+// 把“当作 UTC 的本地时间”转成 UTC epoch; BL8025T 存北京时间 → epoch = civilAsUtc - 8*3600
+static time_t civilToEpoch(int y, unsigned mo, unsigned d, unsigned h, unsigned mi, unsigned s) {
+  return (time_t)(daysFromCivil(y, mo, d) * 86400LL + h * 3600LL + mi * 60LL + s);
+}
+
+static uint8_t bcdToDec(uint8_t v) { return (uint8_t)(((v >> 4) & 0x0F) * 10 + (v & 0x0F)); }
+static uint8_t decToBcd(uint8_t v) { return (uint8_t)(((v / 10) << 4) | (v % 10)); }
+
+// 读 16 字节寄存器; 返回 true 表示 I2C 有应答
+static uint8_t rtc8025LastReqN = 0;   // 诊断: 最近一次 requestFrom 返回字节数
+static uint8_t rtc8025LastMode = 0;   // 诊断: 最近成功读法 0=restart 1=addr+stop 2=direct(官方)
+static int rtcI2C_SDA = RTC8025_SDA_PIN;   // 实际探测到的引脚 (默认 13, V14 源码)
+static int rtcI2C_SCL = RTC8025_SCL_PIN;   // 默认 14
+static bool rtc8025ReadRaw(uint8_t buf[16]) {
+  // 读法兼容: 官方 V14 (BL8025_RTC::_read) 是直接 requestFrom(addr,16), 不先写寄存器地址
+  // (芯片上电寄存器指针默认 0x00, 自动递增连续输出)。而"写地址+重复 START"读法在部分
+  // ESP8266 core 的 Wire 实现上有兼容问题 (endTransmission(false) 后 requestFrom 无应答)。
+  // 因此逐级尝试三种读法, 任一成功即算可读。
+  static const uint8_t modes[3] = {2, 1, 0};   // 尝试顺序: 官方 direct → addr+stop → addr+restart
+  for (uint8_t m = 0; m < 3; m++) {
+    if (modes[m] == 2) {
+      // 官方法: 直接 requestFrom (默认 stop=true, 总线释放)
+      uint8_t n = Wire.requestFrom((uint8_t)RTC8025_I2C_ADDR, (uint8_t)16);
+      rtc8025LastReqN = n;
+      if (n >= 7) {
+        for (int i = 0; i < 16; i++) {
+          if (Wire.available()) buf[i] = (uint8_t)Wire.read();
+          else buf[i] = 0xFF;
+        }
+        rtc8025LastMode = 2;
+        return true;
+      }
+    } else if (modes[m] == 1) {
+      // 先写寄存器地址 0x00 (带 STOP), 再读
+      Wire.beginTransmission(RTC8025_I2C_ADDR);
+      Wire.write(0x00);
+      Wire.endTransmission(true);
+      delay(2);
+      uint8_t n = Wire.requestFrom((uint8_t)RTC8025_I2C_ADDR, (uint8_t)16);
+      rtc8025LastReqN = n;
+      if (n >= 7) {
+        for (int i = 0; i < 16; i++) {
+          if (Wire.available()) buf[i] = (uint8_t)Wire.read();
+          else buf[i] = 0xFF;
+        }
+        rtc8025LastMode = 1;
+        return true;
+      }
+    } else {
+      // 先写寄存器地址 0x00 (重复 START, 原实现)
+      Wire.beginTransmission(RTC8025_I2C_ADDR);
+      Wire.write(0x00);
+      Wire.endTransmission(false);
+      delay(2);
+      uint8_t n = Wire.requestFrom((uint8_t)RTC8025_I2C_ADDR, (uint8_t)16);
+      rtc8025LastReqN = n;
+      if (n >= 7) {
+        for (int i = 0; i < 16; i++) {
+          if (Wire.available()) buf[i] = (uint8_t)Wire.read();
+          else buf[i] = 0xFF;
+        }
+        rtc8025LastMode = 0;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// 从寄存器 0x00 起写 7 字节 (秒/分/时/星期/日/月/年) + 配置寄存器 (对齐 V14 BL8025_RTC::_begin):
+// reg8-0x0F 全写 0, 其中 Control Register(0x0F)=0x00 强制 24 小时制 —— 否则芯片处于 12 小时制
+// 时, 小时 BCD 含 AM/PM 标志位, 读取解析失败(小时>23) → 时间读不到/回退旧值 (实测根因)。
+static bool rtc8025WriteRaw(const uint8_t data[7]) {
+  // 类型区分写入 (实测本机芯片为 RX 布局, 时钟寄存器在 0x08-0x0E):
+  //   BL: 时钟 0x00-0x06 + 0x08-0x0F 全 0 (0x0F Control=0x00 → 24 小时制)
+  //   RX: 时钟 0x08-0x0E, 只写这 7 字节; RX8025T 只支持 24H, 不动 0x0F 扩展/控制。
+  //       ⚠️ 绝不能对 RX 写 0x08-0x0F 全 0 — 会把正在走的时钟清零 (寄存器布局不同)。
+  uint8_t base = rtc8025TypeRX ? 0x08 : 0x00;
+  Wire.beginTransmission(RTC8025_I2C_ADDR);
+  Wire.write(base);
+  for (int i = 0; i < 7; i++) Wire.write(data[i]);
+  bool ok = (Wire.endTransmission() == 0);
+  delay(1);
+  if (!rtc8025TypeRX) {
+    // reg8-0x0F: 闹钟/定时器/扩展/标志/控制 全 0 (Control=0x00 → 24 小时制, 正常模式)
+    Wire.beginTransmission(RTC8025_I2C_ADDR);
+    Wire.write(0x08);
+    for (int i = 0; i < 8; i++) Wire.write(0x00);
+    bool ok2 = (Wire.endTransmission() == 0);
+    delay(1);
+    return ok && ok2;
+  }
+  return ok;
+}
+
+// 解析一组寄存器为 tm 字段; off 为秒寄存器偏移 (BL=0, RX=8); 返回是否合法
+static bool rtc8025Parse(const uint8_t buf[16], int off, time_t &epoch) {
+  if (off + 7 > 16) return false;
+  uint8_t sec = bcdToDec(buf[off + 0]);
+  uint8_t min = bcdToDec(buf[off + 1]);
+  uint8_t hour = bcdToDec(buf[off + 2]);
+  uint8_t day = bcdToDec(buf[off + 4]);
+  uint8_t mon = bcdToDec(buf[off + 5]);
+  uint8_t yr = bcdToDec(buf[off + 6]);
+  if (sec > 59 || min > 59 || hour > 23) return false;
+  if (day < 1 || day > 31 || mon < 1 || mon > 12) return false;
+  if (yr < 20 || yr > 99) return false;  // 2020-2099
+  epoch = civilToEpoch(2000 + yr, mon, day, hour, min, sec) - 8 * 3600;  // 北京时间→UTC
+  return true;
+}
+
+// 探测 BL8025T/RX8025T: 双引脚候选扫描 (13/14 = V14 源码; 4/5 = ESP12F 默认 I2C), 
+// 先写寄存器地址再读(用户资料), 找到设备后记录引脚供后续读写; 访问后恢复 SPI
+static bool rtc8025Init() {
+  rtc8025Present = false;
+  rtc8025TimeValid = false;
+  rtc8025TypeRX = false;
+  rtc8025NowEpoch = 0;
+  // 释放 SPI 外设: SD/EPD 初始化后 GPIO13/14 的 PIN_FUNC 被 SPI 占用, 软件 I2C (Wire)
+  // 无法驱动 → 实测: 干净环境 Wire(13,14) 能读到 0x32 芯片 (16 字节), SD 挂载后同一
+  // 代码 reqN=0。SPI.end() 释放引脚后 Wire 才正常; 探测结束 SPI.begin() 恢复,
+  // 主流程 reinitSdBus 重挂 SD。
+  SPI.end();
+  // 总线仲裁: 确保 SD/EPD 都不被选中
+  pinMode(15, OUTPUT); digitalWrite(15, HIGH);   // EPD CS
+  pinMode(5, OUTPUT); digitalWrite(5, HIGH);     // SD CS
+  const int pairs[2][2] = {{13, 14}, {4, 5}};    // 候选引脚对
+  for (int p = 0; p < 2 && !rtc8025TimeValid; p++) {
+    int sdaPin = pairs[p][0], sclPin = pairs[p][1];
+    // ⚠️ 不要在这里做"9 脉冲 SCL 解锁" — 实测 (probe2 vs probe3) 它会把 BL8025T 状态机
+    // 推进错误状态, 之后芯片不响应地址 (beginTransmission 返回 2/NACK, requestFrom 0 字节)。
+    // 正常启动总线无挂死, 直接 Wire.begin 即可 (干净环境/SD 挂载后均验证可读 0x32)。
+    Wire.begin(sdaPin, sclPin);
+    Wire.setClock(100000);
+    uint8_t buf[16];
+    memset(buf, 0xFF, sizeof(buf));
+    bool ok = rtc8025ReadRaw(buf);
+    if (ok) {
+      // I2C 有应答 (读到 ≥7 字节) 即认为芯片存在 — 即使时间字段非法 (出厂全 0 / 12 小时制),
+      // 也记录引脚供后续 24 小时制修复与 NTP 写入; 否则 present=false 会跳过修复 (实测月=0 解析失败)。
+      rtc8025Present = true;
+      rtcI2C_SDA = sdaPin;
+      rtcI2C_SCL = sclPin;
+      time_t t;
+      if (rtc8025Parse(buf, 0, t)) {          // BL 布局 (秒在 reg0)
+        rtc8025TypeRX = false;
+        rtc8025TimeValid = true;
+        rtc8025NowEpoch = t;
+      } else if (rtc8025Parse(buf, 8, t)) {   // RX 布局 (秒在 reg8)
+        rtc8025TypeRX = true;
+        rtc8025TimeValid = true;
+        rtc8025NowEpoch = t;
+      }
+      Serial.printf("CLOCK_8025T pin=%d/%d mode=%d type=%s valid=%d epoch=%lu raw=%02X %02X %02X %02X %02X %02X %02X\n",
+                    sdaPin, sclPin, rtc8025LastMode, rtc8025TypeRX ? "RX" : "BL",
+                    rtc8025TimeValid ? 1 : 0, (unsigned long)rtc8025NowEpoch,
+                    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6]);
+    } else {
+      // 诊断: 打印该引脚对的 SDA 状态 + 扫描 I2C 地址
+      int sdaLevel = digitalRead(sdaPin);
+      Serial.printf("CLOCK_8025T_DIAG pin=%d/%d reqN=%d mode=%d sda=%d", sdaPin, sclPin, rtc8025LastReqN, rtc8025LastMode, sdaLevel);
+      for (uint8_t addr = 0x30; addr <= 0x77; addr++) {
+        Wire.beginTransmission(addr);
+        uint8_t ack = Wire.endTransmission();
+        if (ack == 0) Serial.printf(" addr=0x%02X", addr);
+      }
+      Serial.println();
+    }
+  }
+  if (rtc8025Present && !rtc8025TimeValid) {
+    // 解析失败(常见: 芯片处于 12 小时制, 小时 BCD 带 AM/PM 标志位 >23) →
+    // 只写 0x0F (Control Register) = 0x00 强制 24 小时制后重读 (对齐 V14 BL8025_RTC::_begin)。
+    // ⚠️ 只写 0x0F 单字节: BL 的 Control 在 0x0F; RX 时钟在 0x08-0x0E 且只支持 24H,
+    //    0x0F 非时钟 — 写 0 对两种类型都安全, 绝不能写 0x08-0x0F 整段 (RX 会清时钟)。
+    Wire.beginTransmission(RTC8025_I2C_ADDR);
+    Wire.write(0x0F);
+    Wire.write(0x00);
+    Wire.endTransmission();
+    delay(2);
+    uint8_t buf[16];
+    memset(buf, 0xFF, sizeof(buf));
+    if (rtc8025ReadRaw(buf)) {
+      time_t t;
+      if (rtc8025Parse(buf, 0, t)) {
+        rtc8025TypeRX = false; rtc8025TimeValid = true; rtc8025NowEpoch = t;
+      } else if (rtc8025Parse(buf, 8, t)) {
+        rtc8025TypeRX = true; rtc8025TimeValid = true; rtc8025NowEpoch = t;
+      }
+    }
+    if (rtc8025TimeValid) Serial.println(F("CLOCK_8025T_FIXED_24H"));
+  }
+  // 恢复 SPI 总线 (GPIO13/14 归 SPI, 供 EPD/SD 使用)
+  SPI.begin();
+  Serial.printf("CLOCK_8025T present=%d type=%s valid=%d epoch=%lu\n",
+                rtc8025Present ? 1 : 0, rtc8025TypeRX ? "RX" : "BL",
+                rtc8025TimeValid ? 1 : 0, (unsigned long)rtc8025NowEpoch);
+  return rtc8025Present;
+}
+
+// 写入当前时间 (北京时间语义); 调用前需保证 Wire 已初始化
+static bool rtc8025WriteEpoch(time_t epochUtc) {
+  time_t local = epochUtc + 8 * 3600;  // UTC → 北京时间
+  struct tm tm;
+  gmtime_r(&local, &tm);
+  uint8_t data[7];
+  data[0] = decToBcd((uint8_t)tm.tm_sec);
+  data[1] = decToBcd((uint8_t)tm.tm_min);
+  data[2] = decToBcd((uint8_t)tm.tm_hour);
+  data[3] = 0x00;                                  // 星期 (未用)
+  data[4] = decToBcd((uint8_t)tm.tm_mday);
+  data[5] = decToBcd((uint8_t)(tm.tm_mon + 1));
+  data[6] = decToBcd((uint8_t)((tm.tm_year + 1900) % 100));
+  SPI.end();   // 释放 SPI 占用, 否则 Wire 无法驱动 GPIO13/14 (与探测同理)
+  pinMode(15, OUTPUT); digitalWrite(15, HIGH);
+  pinMode(5, OUTPUT); digitalWrite(5, HIGH);
+  Wire.begin(rtcI2C_SDA, rtcI2C_SCL);   // 用探测到的引脚 (13/14 或 4/5)
+  Wire.setClock(100000);
+  bool ok = rtc8025WriteRaw(data);
+  SPI.begin();  // 恢复 SPI
+  Serial.printf("CLOCK_8025T_SAVE ok=%d epoch=%lu\n", ok ? 1 : 0, (unsigned long)epochUtc);
+  return ok;
+}
+
+// 读取当前时间; 调用前需保证 Wire 已初始化; 返回是否有效
+static bool rtc8025ReadEpoch(time_t &epoch) {
+  if (!rtc8025Present) return false;
+  SPI.end();   // 释放 SPI 占用, 否则 Wire 无法驱动 GPIO13/14 (与探测同理)
+  pinMode(15, OUTPUT); digitalWrite(15, HIGH);
+  pinMode(5, OUTPUT); digitalWrite(5, HIGH);
+  Wire.begin(rtcI2C_SDA, rtcI2C_SCL);   // 用探测到的引脚 (13/14 或 4/5)
+  Wire.setClock(100000);
+  uint8_t buf[16];
+  memset(buf, 0xFF, sizeof(buf));
+  bool ok = rtc8025ReadRaw(buf) && rtc8025Parse(buf, rtc8025TypeRX ? 8 : 0, epoch);
+  SPI.begin();  // 恢复 SPI
+  return ok;
+}
+
+// A7 对齐: 同步时间后写入时钟芯片的结果提示。成功显示"读取数据正常",
+// 失败显示"数据出错或不存在，使用软件时钟"并降级写 EEPROM(软件时钟)。
+static char clockChipMessage[64] = "";
+static bool clockChipOk = false;
+
+namespace {
+const size_t EEPROM_SIZE = 1024;  // 512→1024: 原有 0-508 布局不变, 新增管理区(管理/OTA 密码) 520+
+                                  // ESP8266 EEPROM 模拟以 4KB flash 扇区承载, begin(1024) 不影响已有区域
+const int EEPROM_ADDR = 0;
+const uint32_t CONFIG_MAGIC = 0x57494649UL;
+const uint8_t CONFIG_VERSION = 1;
+const char AP_PASSWORD[] = "333333333";
+const uint32_t STA_TIMEOUT_MS = 15000UL;
+const uint32_t NTP_TIMEOUT_MS = 12000UL;
+const char NTP_SERVER[] = "cn.pool.ntp.org";
+const uint32_t RTC_CLOCK_MAGIC = 0x52544354UL;
+// ESP.rtcUserMemory 块号 (0-127, 每块4字节): 0 ↔ system_rtc_mem 字64 (用户区起始)
+// 注意: 若启用 OTA, eboot 会占用用户区前 128 字节 (块 0-31); 本机为串口烧录无 OTA
+const uint32_t RTC_CLOCK_OFFSET = 0;
+const uint32_t RTC_TICKS_PER_SECOND = 150000UL;
+const int CLOCK_EEPROM_ADDR = 112;
+const uint32_t CLOCK_EEPROM_MAGIC = 0x434C4B33UL;
+// 天气配置独立区（避开 WifiConfig 0-105 与 CLOCK 112-125; 160+72=232 <= 256）
+const int WEATHER_EEPROM_ADDR = 160;
+const uint32_t WEATHER_MAGIC = 0x57544852UL;
+
+struct WifiConfig {
+  uint32_t magic;
+  uint8_t version;
+  char ssid[33];
+  char password[65];
+  uint16_t checksum;
+};
+
+ESP8266WebServer server(80);
+ESP8266HTTPUpdateServer httpUpdater;   // Web 固件升级 (/update)
+WifiConfig config;
+String apSsid;
+String staIp;
+uint32_t deadline = 0;
+bool active = false;
+void (*renderPage)(bool) = nullptr;
+void (*exitPage)() = nullptr;
+void (*clockRender)(bool) = nullptr;
+void (*clockDone)() = nullptr;
+time_t syncedTime = 0;
+time_t lastCalibrationTime = 0;
+uint32_t syncedAtMs = 0;
+uint32_t syncedRtcTicks = 0;
+bool rtcBaseValid = false;
+bool clockSkippedSession = false;
+uint32_t clockSuccessDeadline = 0;
+struct RtcClockRecord {
+  uint32_t magic;
+  uint32_t epoch;
+  uint32_t rtcTicks;
+};
+struct PersistClockRecord {
+  uint32_t magic;
+  uint32_t epoch;      // 上次校准时刻（lastCalibrationTime 的持久化）
+  uint32_t savedAt;    // 最近一次已知墙钟时间（掉电兜底基准）
+  uint16_t checksum;
+};
+
+enum State { IDLE, CONNECTING, AP_ONLY, STA_AP, ERROR };
+State state = IDLE;
+enum ClockState { CLOCK_IDLE, CLOCK_STA, CLOCK_NTP, CLOCK_WEATHER, CLOCK_SUCCESS, CLOCK_SKIPPED, CLOCK_FAILED };
+ClockState clockState = CLOCK_IDLE;
+uint32_t clockDeadline = 0;
+
+uint16_t checksumBytes(const uint8_t *bytes, size_t len) {
+  uint16_t sum = 0x5A5A;
+  for (size_t i = 0; i < len; ++i) {
+    sum = static_cast<uint16_t>((sum << 5) ^ (sum >> 11) ^ bytes[i]);
+  }
+  return sum;
+}
+
+uint16_t checksum(const WifiConfig &value) {
+  return checksumBytes(reinterpret_cast<const uint8_t *>(&value),
+                       offsetof(WifiConfig, checksum));
+}
+
+uint16_t weatherChecksum(const WeatherConfig &value) {
+  return checksumBytes(reinterpret_cast<const uint8_t *>(&value),
+                       offsetof(WeatherConfig, checksum));
+}
+
+// ---- 管理配置（EEPROM 偏移 520, 'ADMN'; 独立区, 避开 WifiConfig/CLOCK/Weather/Settings/Webdav/Target）----
+// 分层原则: 普通配置(WiFi 凭据/热点) < 管理员(所有写端点) < OTA(/update)。
+// 管理密码与 OTA 密码相互独立、均不依赖 AP 密码; 两者都由用户在配网页设置, 设备无随机密码机制。
+const int ADMIN_EEPROM_ADDR = 520;
+const uint32_t ADMIN_MAGIC = 0x41444D4EUL;   // 'ADMN'
+const uint8_t ADMIN_VERSION = 1;
+struct AdminConfig {
+  uint32_t magic;
+  uint8_t version;
+  char password[32];    // 管理密码（空=未设置; 未设置时写端点 fail-closed 拒绝）
+  char otaPass[32];     // OTA 升级密码（空=未设置; 未设置时 /update 不可用）
+  uint16_t checksum;
+};
+static_assert(ADMIN_EEPROM_ADDR >= 508, "Admin region overlaps Target region (470-508)");
+static_assert(ADMIN_EEPROM_ADDR + sizeof(AdminConfig) <= EEPROM_SIZE,
+              "Admin region overflows EEPROM_SIZE");
+
+uint16_t adminChecksum(const AdminConfig &value) {
+  return checksumBytes(reinterpret_cast<const uint8_t *>(&value),
+                       offsetof(AdminConfig, checksum));
+}
+
+bool loadAdminConfig(AdminConfig &out) {
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.get(ADMIN_EEPROM_ADDR, out);
+  if (out.magic != ADMIN_MAGIC || out.version != ADMIN_VERSION ||
+      adminChecksum(out) != out.checksum) {
+    // 首次使用/损坏: 清空（未设置）, 内存标记 magic; 不写 EEPROM
+    memset(&out, 0, sizeof(out));
+    out.magic = ADMIN_MAGIC;
+    out.version = ADMIN_VERSION;
+    return false;
+  }
+  out.password[sizeof(out.password) - 1] = '\0';
+  out.otaPass[sizeof(out.otaPass) - 1] = '\0';
+  return true;
+}
+
+bool saveAdminConfig(const AdminConfig &in) {
+  AdminConfig cfg = in;
+  cfg.magic = ADMIN_MAGIC;
+  cfg.version = ADMIN_VERSION;
+  cfg.checksum = adminChecksum(cfg);
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.put(ADMIN_EEPROM_ADDR, cfg);
+  return EEPROM.commit();
+}
+
+// 取请求携带的管理密码: X-Admin-Pass 头优先, 其次 apass 表单字段
+static String adminPassFromRequest() {
+  if (server.hasHeader("X-Admin-Pass")) return server.header("X-Admin-Pass");
+  if (server.hasArg("apass")) return server.arg("apass");
+  return String("");
+}
+
+// 受保护 POST 端点统一认证入口: 未设置管理密码（提示先设置）或密码缺失/错误 → 401 并返回 false
+static bool requireAdminAuth() {
+  AdminConfig a;
+  loadAdminConfig(a);
+  if (a.password[0] == '\0') {
+    server.send(401, "text/plain; charset=utf-8",
+                "未设置管理密码：请先在配网页设置管理密码");
+    return false;
+  }
+  String given = adminPassFromRequest();
+  if (given.length() == 0 || given.length() >= sizeof(a.password) ||
+      strcmp(given.c_str(), a.password) != 0) {
+    server.send(401, "text/plain; charset=utf-8", "管理密码缺失或错误");
+    return false;
+  }
+  return true;
+}
+
+// 天气 KEY 掩码: 已配置显示 "****…****<尾4>", 未配置返回空; 配网页不回显明文
+static String maskWeatherKey(const char *key) {
+  size_t len = strlen(key);
+  if (len == 0) return String("");
+  String m;
+  m.reserve(len);
+  size_t keep = (len > 4) ? 4 : 0;
+  for (size_t i = 0; i < len - keep; i++) m += '*';
+  if (keep > 0) m += (key + (len - keep));
+  return m;
+}
+
+void savePersistedClock(time_t epoch, time_t savedAt);
+
+bool loadRtcClock() {
+  RtcClockRecord record;
+  if (!ESP.rtcUserMemoryRead(RTC_CLOCK_OFFSET, reinterpret_cast<uint32_t *>(&record), sizeof(record))) return false;
+  if (record.magic != RTC_CLOCK_MAGIC || record.epoch < 1600000000UL) return false;
+  uint32_t ticks = system_get_rtc_time();
+  if (ticks < record.rtcTicks) {
+    // RTC 计数器倒退 = 电池断开/完全掉电过 (计数器从0重新计数), 记录基准失效
+    Serial.println(F("CLOCK_RTC_TICKS_REGRESS"));
+    return false;
+  }
+  syncedTime = record.epoch + (ticks - record.rtcTicks) / RTC_TICKS_PER_SECOND;
+  lastCalibrationTime = record.epoch;
+  syncedRtcTicks = ticks;
+  rtcBaseValid = true;
+  syncedAtMs = millis();
+  Serial.printf("CLOCK_RTC_READ epoch=%lu ticks=%lu\n", (unsigned long)syncedTime, (unsigned long)ticks);
+  return true;
+}
+
+void saveRtcClock(time_t epoch) {
+  RtcClockRecord record = { RTC_CLOCK_MAGIC, static_cast<uint32_t>(epoch), system_get_rtc_time() };
+  bool rtcOk = ESP.rtcUserMemoryWrite(RTC_CLOCK_OFFSET, reinterpret_cast<uint32_t *>(&record), sizeof(record));
+  if (rtcOk) Serial.printf("CLOCK_RTC_SAVE epoch=%lu ticks=%lu\n", (unsigned long)epoch, (unsigned long)record.rtcTicks);
+  else Serial.println(F("CLOCK_RTC_SAVE_FAIL"));
+  syncedTime = epoch;
+  lastCalibrationTime = epoch;
+  syncedRtcTicks = record.rtcTicks;
+  rtcBaseValid = rtcOk;
+  syncedAtMs = millis();
+  savePersistedClock(epoch, epoch);
+}
+
+static uint16_t persistChecksum(const PersistClockRecord &record) {
+  uint32_t v = record.magic ^ record.epoch ^ record.savedAt;
+  return static_cast<uint16_t>(v ^ (v >> 16));
+}
+
+bool loadPersistedClock() {
+  PersistClockRecord record;
+  EEPROM.get(CLOCK_EEPROM_ADDR, record);
+  if (record.magic != CLOCK_EEPROM_MAGIC || record.epoch < 1600000000UL ||
+      persistChecksum(record) != record.checksum) return false;
+  lastCalibrationTime = record.epoch;
+  syncedTime = (record.savedAt > record.epoch) ? record.savedAt : record.epoch;
+  rtcBaseValid = false;
+  syncedAtMs = millis();
+  Serial.printf("CLOCK_EEPROM_READ epoch=%lu savedAt=%lu\n", (unsigned long)record.epoch, (unsigned long)record.savedAt);
+  return true;
+}
+
+void savePersistedClock(time_t epoch, time_t savedAt) {
+  PersistClockRecord record = { CLOCK_EEPROM_MAGIC, static_cast<uint32_t>(epoch), static_cast<uint32_t>(savedAt), 0 };
+  record.checksum = persistChecksum(record);
+  EEPROM.put(CLOCK_EEPROM_ADDR, record);
+  if (EEPROM.commit()) Serial.printf("CLOCK_EEPROM_SAVE epoch=%lu savedAt=%lu\n", (unsigned long)epoch, (unsigned long)savedAt);
+  else Serial.println(F("CLOCK_EEPROM_SAVE_FAIL"));
+}
+
+// A7 对齐: 同步时间(校时)后写入时钟芯片。写入成功 → 提示"时钟芯片：读取数据正常";
+// 写入失败/芯片不在线 → 提示"时钟芯片：数据出错或不存在，使用软件时钟"并降级写 EEPROM(软件时钟)。
+static void clockManagerPersistSync(time_t t) {
+  bool ok = rtc8025Present && rtc8025WriteEpoch(t);
+  clockChipOk = ok;
+  if (ok) {
+    strncpy(clockChipMessage, "时钟芯片：读取数据正常", sizeof(clockChipMessage) - 1);
+  } else {
+    strncpy(clockChipMessage, "时钟芯片：数据出错或不存在，使用软件时钟", sizeof(clockChipMessage) - 1);
+    savePersistedClock(t, t);
+  }
+}
+
+bool loadConfig() {
+  memset(&config, 0, sizeof(config));
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.get(EEPROM_ADDR, config);
+  config.ssid[sizeof(config.ssid) - 1] = '\0';
+  config.password[sizeof(config.password) - 1] = '\0';
+  return config.magic == CONFIG_MAGIC && config.version == CONFIG_VERSION &&
+         config.ssid[0] != '\0' && strlen(config.password) >= 8 &&
+         checksum(config) == config.checksum;
+}
+
+bool saveConfig(const String &ssid, const String &password) {
+  if (ssid.length() == 0 || ssid.length() >= sizeof(config.ssid) ||
+      password.length() < 8 || password.length() >= sizeof(config.password)) return false;
+  memset(&config, 0, sizeof(config));
+  config.magic = CONFIG_MAGIC;
+  config.version = CONFIG_VERSION;
+  ssid.toCharArray(config.ssid, sizeof(config.ssid));
+  password.toCharArray(config.password, sizeof(config.password));
+  config.checksum = checksum(config);
+  EEPROM.put(EEPROM_ADDR, config);
+  return EEPROM.commit();
+}
+
+void clearConfig() {
+  memset(&config, 0, sizeof(config));
+  EEPROM.put(EEPROM_ADDR, config);
+  EEPROM.commit();
+}
+
+// ---- 天气配置 ----
+
+const char *stateText() {
+  switch (state) {
+    case CONNECTING: return "正在连接 WiFi";
+    case AP_ONLY: return "热点配网模式";
+    case STA_AP: return "WiFi 已连接，热点保持开启";
+    case ERROR: return "WiFi 连接失败，热点保持开启";
+    default: return "网络管理未启动";
+  }
+}
+
+// HTML 转义（配网页预填值防注入/断标签）
+static String escapeHtml(const char *s) {
+  String out;
+  for (const char *p = s; *p; ++p) {
+    switch (*p) {
+      case '&': out += F("&amp;"); break;
+      case '<': out += F("&lt;"); break;
+      case '>': out += F("&gt;"); break;
+      case '"': out += F("&quot;"); break;
+      case '\'': out += F("&#39;"); break;
+      default: out += *p;
+    }
+  }
+  return out;
+}
+
+// JSON 字符串转义（管理 API 端点用；HTML 实体不是合法 JSON 转义）
+static String jsonEscape(const char *s) {
+  String out;
+  for (const char *p = s; *p; ++p) {
+    char c = *p;
+    switch (c) {
+      case '"': out += F("\\\""); break;
+      case '\\': out += F("\\\\"); break;
+      case '\n': out += F("\\n"); break;
+      case '\r': out += F("\\r"); break;
+      case '\t': out += F("\\t"); break;
+      default:
+        if ((uint8_t)c < 0x20) {
+          char buf[8];
+          snprintf(buf, sizeof(buf), "\\u%04X", (uint8_t)c);
+          out += buf;
+        } else {
+          out += c;
+        }
+    }
+  }
+  return out;
+}
+
+void handleRoot() {
+  Serial.printf("HTTP_ROOT heap=%u\n", (unsigned)ESP.getFreeHeap());
+  // 流式输出（chunked）: 配网模式 heap 紧张（实测 handleRoot 时仅 ~5.8KB），整页 String(~8KB)
+  // 分配会 OOM 崩溃（Exception 29）。逐段 sendContent_P 直发 flash 字面量, 不占大堆。
+  server.chunkedResponseModeStart_P(200, (const char*)F("text/html; charset=utf-8"));
+  server.sendContent_P((const char*)F("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>MoShuiPing</title></head><body><h2>MoShuiPing 配网</h2><p>状态："));
+  server.sendContent(stateText());
+  server.sendContent_P((const char*)F("</p><p>热点："));
+  server.sendContent(apSsid);
+  server.sendContent_P((const char*)F("<br>密码：333333333<br>地址：192.168.4.1</p>"));
+  // 管理密码: 除 /admin 首次设置外, 所有保存/清除操作必须携带; JS 经 syncPass 注入各表单/请求
+  server.sendContent_P((const char*)F("<p>管理密码（保存/清除等操作需填写）<br><input type='password' id='apassInput' maxlength='31' autocomplete='off'></p>"));
+  server.sendContent_P((const char*)F("<form method='POST' action='/wifi' onsubmit='syncPass(this)'><input type='hidden' name='apass'>WiFi 名称<br><input name='ssid' id='ssid' maxlength='32' required> <button type='button' onclick='scanWifi()'>扫描</button><br><select id='wifiList' onchange='useWifi()'><option value=''>-- 点扫描列出附近 WiFi --</option></select><br>WiFi 密码<br><input name='password' type='password' maxlength='64' required><br><button>保存并连接</button></form><form method='POST' action='/clear' onsubmit='syncPass(this)'><input type='hidden' name='apass'><button>清除配置</button></form>"));
+  server.sendContent_P((const char*)F("<h3>天气设置</h3><form method='POST' action='/wifi' onsubmit='syncPass(this)'><input type='hidden' name='apass'>城市<br><input name='city' maxlength='31' value='"));
+  WeatherConfig wc;
+  loadWeatherConfig(wc);
+  server.sendContent(escapeHtml(wc.city));
+  server.sendContent_P((const char*)F("'><br>心知天气 Key（已配置只显示掩码，留空/掩码值不覆盖）<br><input name='wkey' maxlength='31' value='"));
+  server.sendContent(escapeHtml(maskWeatherKey(wc.key).c_str()));
+  server.sendContent_P((const char*)F("'><br><label><input type='checkbox' name='night' value='1'"));
+  if (wc.nightUpdata) server.sendContent_P((const char*)F(" checked"));
+  server.sendContent_P((const char*)F("> 夜间不自动更新</label><br><button>保存天气</button></form>"));
+  // 管理密码 / OTA 密码设置（POST /admin; 首次设置无需旧密码, 已设置后修改需当前管理密码）
+  AdminConfig ad;
+  bool adSet = loadAdminConfig(ad) && ad.password[0] != '\0';
+  server.sendContent_P((const char*)F("<h3>管理密码 / OTA 密码</h3><p>管理密码："));
+  server.sendContent_P(adSet ? (const char*)F("已设置") : (const char*)F("未设置（未设置时所有保存/清除操作会被拒绝）"));
+  server.sendContent_P((const char*)F(" ｜ OTA："));
+  server.sendContent_P((ad.otaPass[0] != '\0') ? (const char*)F("已设置") : (const char*)F("未设置（/update 不可用）"));
+  server.sendContent_P((const char*)F("</p><form method='POST' action='/admin'>当前管理密码（已设置后修改需填写）<br><input name='apass' type='password' maxlength='31'><br>新管理密码（留空保持不变）<br><input name='adminpass' type='password' maxlength='31'><br>OTA 升级密码（留空保持不变）<br><input name='otapass' type='password' maxlength='31'><br><button>保存</button></form>"));
+  // 设备设置表单（时钟格式/时区/一言）——与 /settings 端点对接
+  SettingsConfig s;
+  loadSettingsConfig(s);
+  server.sendContent_P((const char*)F("<h3>设备设置</h3><form method='POST' action='/settings' onsubmit='syncPass(this)'><input type='hidden' name='apass'>时钟格式 <select name='clockFormat'><option value='0'"));
+  if (s.clockFormat == 0) server.sendContent_P((const char*)F(" selected"));
+  server.sendContent_P((const char*)F(">24小时制</option><option value='1'"));
+  if (s.clockFormat == 1) server.sendContent_P((const char*)F(" selected"));
+  server.sendContent_P((const char*)F(">12小时制</option></select><br>时区偏移（分钟）<input name='tz' type='number' min='-720' max='840' value='"));
+  server.sendContent(String(s.tzOffsetMin));
+  server.sendContent_P((const char*)F("'><br>一言 <select name='hitokoto'><option value='1'"));
+  if (s.hitokotoEnabled == 1) server.sendContent_P((const char*)F(" selected"));
+  server.sendContent_P((const char*)F(">开启</option><option value='0'"));
+  if (s.hitokotoEnabled == 0) server.sendContent_P((const char*)F(" selected"));
+  server.sendContent_P((const char*)F(">关闭</option></select><br>旋转方向 <select name='portrait'><option value='0'"));
+  if (s.portrait == 0) server.sendContent_P((const char*)F(" selected"));
+  server.sendContent_P((const char*)F(">0° 横屏</option><option value='3'"));
+  if (s.portrait == 3) server.sendContent_P((const char*)F(" selected"));
+  server.sendContent_P((const char*)F(">90° 竖翻</option><option value='2'"));
+  if (s.portrait == 2) server.sendContent_P((const char*)F(" selected"));
+  server.sendContent_P((const char*)F(">180° 横翻</option><option value='1'"));
+  if (s.portrait == 1) server.sendContent_P((const char*)F(" selected"));
+  server.sendContent_P((const char*)F(">270° 竖屏</option></select><br><button>保存设置</button></form>"));
+  // 连接设备: 局域网/热点下各选一台(运行进度服务器 App 的手机)作为连接对象, 配网时自动推送本机地址
+  server.sendContent_P((const char*)F("<h3>连接设备（配网后自动向选中设备推送本机地址）</h3><button type='button' onclick='scanDevices()'>扫描设备</button> <span id='devHint'></span><br>局域网设备 <select id='lanSel'></select><br>热点设备 <select id='apSel'></select><br><button type='button' onclick='saveTarget()'>保存连接对象</button>"));
+  server.sendContent_P((const char*)F("<p><a href='/fs/edit'>文件管理</a> · <a href='/status'>状态 JSON</a> · <a href='/info'>设置 JSON</a> · <a href='/update'>固件升级</a></p>"));
+  server.sendContent_P((const char*)F("<script>"
+            "function $(id){return document.getElementById(id);}"
+            "function syncPass(f){var h=f.querySelector('input[name=apass]');if(h)h.value=$('apassInput').value;}"
+            "async function scanWifi(){"
+            "try{"
+            "var r=await fetch('/scanwifi');var j=await r.json();"
+            "var sel=$('wifiList');sel.innerHTML='';"
+            "if(!j.networks||!j.networks.length){var o=document.createElement('option');o.text='未扫描到 WiFi';sel.appendChild(o);return;}"
+            "j.networks.forEach(function(n){var o=document.createElement('option');o.value=n.ssid;o.text=n.ssid+(n.secure?' (加密)':' (开放)');sel.appendChild(o);});"
+            "}catch(e){alert('扫描失败:'+e);}"
+            "}"
+            "function useWifi(){var s=$('wifiList');if(s&&s.value)$('ssid').value=s.value;}"
+            "async function scanDevices(){"
+            "try{"
+            "$('devHint').textContent='扫描中(约3秒)...';"
+            "var r=await fetch('/scandevices');var j=await r.json();"
+            "fill('lanSel',j.lan);fill('apSel',j.ap);"
+            "$('devHint').textContent='完成';"
+            "}catch(e){$('devHint').textContent='扫描失败:'+e;}"
+            "}"
+            "function fill(id,list){"
+            "var sel=$(id);sel.innerHTML='';"
+            "var o=document.createElement('option');o.value='';o.text='(未选择)';sel.appendChild(o);"
+            "(list||[]).forEach(function(d){var o=document.createElement('option');o.value=d.ip;o.text=(d.name||'未知')+(d.model?' '+d.model:'')+' ('+d.ip+')';sel.appendChild(o);});"
+            "}"
+            "async function saveTarget(){"
+            "var b=new URLSearchParams();b.set('staIp',$('lanSel').value);b.set('apIp',$('apSel').value);b.set('apass',$('apassInput').value);"
+            "try{var r=await fetch('/target',{method:'POST',body:b});if(r.ok){alert('连接对象已保存');loadTarget();}else{alert(r.status==401?'需要管理密码':'保存失败');}}catch(e){alert('保存失败:'+e);}"
+            "}"
+            "async function loadTarget(){"
+            "try{var r=await fetch('/target');var j=await r.json();preselect('lanSel',j.staIp);preselect('apSel',j.apIp);}catch(e){}"
+            "}"
+            "function preselect(id,ip){var sel=$(id);for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===ip){sel.selectedIndex=i;break;}}}"
+            "loadTarget();"
+            "</script></body></html>"));
+  server.chunkedResponseFinalize();
+}
+
+void handleStatus() {
+  String json = F("{\"state\":\"");
+  json += stateText();
+  json += F("\",\"apSsid\":\"");
+  json += apSsid;
+  json += F("\",\"apIp\":\"192.168.4.1\",\"staConnected\":");
+  json += (WiFi.status() == WL_CONNECTED) ? F("true") : F("false");
+  json += F(",\"staIp\":\"");
+  json += WiFi.localIP().toString();
+  json += F("\"}");
+  server.send(200, "application/json; charset=utf-8", json);
+}
+
+void handleSave() {
+  if (!requireAdminAuth()) return;
+  bool hasWeather = server.hasArg("city") || server.hasArg("wkey") || server.hasArg("night");
+  if (hasWeather) {
+    WeatherConfig wc;
+    loadWeatherConfig(wc);
+    String city = server.arg("city");
+    String key = server.arg("wkey");
+    if (city.length() > 0 && city.length() < sizeof(wc.city)) {
+      city.toCharArray(wc.city, sizeof(wc.city));
+    }
+    // 天气 KEY 不回显/不覆盖: 提交为空或等于掩码占位值 → 保留已有 KEY（掩码由 handleRoot/maskWeatherKey 生成）
+    if (key.length() > 0 && key != maskWeatherKey(wc.key)) {
+      key.toCharArray(wc.key, sizeof(wc.key));
+    }
+    wc.nightUpdata = (server.arg("night") == "1") ? 1 : 0;
+    if (!saveWeatherConfig(wc)) {
+      server.send(400, "text/plain; charset=utf-8", "天气配置长度无效");
+      return;
+    }
+    Serial.printf("WEATHER_WEB_SAVE cityLen=%u night=%u\n",
+                  static_cast<unsigned>(city.length()),
+                  static_cast<unsigned>(wc.nightUpdata));
+  }
+  if (!server.hasArg("ssid") || !server.hasArg("password")) {
+    if (hasWeather) {
+      server.send(200, "text/html; charset=utf-8", "<meta charset='utf-8'><p>天气设置已保存。</p><a href='/'>返回</a>");
+      return;
+    }
+    server.send(400, "text/plain; charset=utf-8", "缺少 WiFi 名称或密码");
+    return;
+  }
+  String ssid = server.arg("ssid");
+  String password = server.arg("password");
+  if (!saveConfig(ssid, password)) {
+    server.send(400, "text/plain; charset=utf-8", "输入长度无效");
+    return;
+  }
+  // 配网会话不连接 STA、保持纯 AP（同 wifiManagerBegin: AP+STA 共存触发 Exception 29 崩溃）。
+  // 凭据已入 EEPROM, 验证走校时/进度同步会话。
+  Serial.printf("WIFI_WEB_SAVE ssidLen=%u\n", static_cast<unsigned>(ssid.length()));
+  server.send(200, "text/html; charset=utf-8", "<meta charset='utf-8'><p>已保存。</p><a href='/'>返回</a>");
+  if (renderPage) renderPage(false);
+}
+
+void handleClear() {
+  if (!requireAdminAuth()) return;
+  clearConfig();
+  WiFi.disconnect();
+  WiFi.mode(WIFI_AP);
+  state = AP_ONLY;
+  Serial.println(F("WIFI_WEB_CLEAR"));
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+// DHCP 固定租约: 仅 192.168.0.100 (手机热点模式固定地址, 规避 AP 池随机分配)。
+// core 3.1.2 提供 wifi_softap_set_dhcps_lease (user_interface.h + cores/esp8266/LwipDhcpServer-NonOS.cpp)。
+// 注意: set_dhcps_lease 要求 DHCP server 未运行 (isRunning()==false) → 必须先 stop 再 set 再 start。
+static bool apSetFixedLease() {
+  bool ok = false;
+  wifi_softap_dhcps_stop();
+  struct dhcps_lease lease;
+  lease.enable = true;
+  lease.start_ip.addr = IPAddress(192, 168, 0, 100).v4();
+  lease.end_ip.addr   = IPAddress(192, 168, 0, 100).v4();
+  ok = wifi_softap_set_dhcps_lease(&lease);
+  wifi_softap_dhcps_start();
+  Serial.printf("WIFI_AP_LEASE fixed=192.168.0.100 ok=%d\n", ok ? 1 : 0);
+  return ok;
+}
+
+void startAp() {
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  char name[16];
+  snprintf(name, sizeof(name), "MSP-%02X%02X", mac[4], mac[5]);
+  apSsid = name;
+  // s0_verify4 验证过的组合（唯一 heap≈7.3KB + 手机 DHCP 正常 + 150s 稳定的配置）:
+  // mode(WIFI_AP) 在前 → softAPConfig → softAP → wifiManagerBegin 里二次 WiFi.mode(WIFI_AP)。
+  // 之后的尝试（纯 AP mode-后置/A7 顺序/AP_STA 过渡）要么 heap 塌到 ~2.3KB（AP 结构重复分配）
+  // 要么 DHCP 不工作/崩溃 —— 均已实测否决。绝不启用 STA 接口（任何 STA 启用都会触发
+  // Exception 29 崩溃/堆塌陷, 见 wifiManagerBegin 注释）。
+  auditHeap("ap_before");   // 审计: AP 创建前
+  WiFi.mode(WIFI_AP);
+  // 配网页 AP 网段必须与局域网（STA 同网段）不同：AP/STA 同子网会导致 lwIP 路由歧义，
+  // TCP SYN 被丢弃（ping 通但 80 端口 connect 超时）。选 192.168.4.1 避开常见 192.168.0.x/1.x。
+  WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
+  // 官方 A7 实测 AP 参数: softAP(ssid, psk, channel=1, hidden=0, max_connection=1)。
+  // max_connection=1 显著减少 AP 每连接的缓冲/结构预留（SDK 按 max_connection 预留）,
+  // 让中断里的 esf_buf_alloc 有更多 DRAM 可用（官方所有版本都坚持 1, 我们原用默认 4）。
+  bool ok = WiFi.softAP(apSsid.c_str(), AP_PASSWORD, 1, 0, 1);
+  auditHeap("ap_created");   // 审计: AP 创建后
+  // 配网页不设固定租约（DHCP 默认池在 4.x 网段内即可；固定租约 192.168.0.100 属于
+  // 同步纯 AP 模式 startApOnly，见 apSetFixedLease）。
+  Serial.printf("WIFI_AP_START ssid=%s ok=%d ip=%s\n", apSsid.c_str(), ok ? 1 : 0, WiFi.softAPIP().toString().c_str());
+}
+
+}
+
+// ---- 天气配置（定义在匿名命名空间外，与 wifi_manager.h 的全局声明匹配；
+//     匿名空间内符号（WEATHER_EEPROM_ADDR/WEATHER_MAGIC/weatherChecksum）同编译单元可见）----
+bool loadWeatherConfig(WeatherConfig &out) {
+  EEPROM.begin(EEPROM_SIZE);   // 确保已初始化（天气页路径不经过 wifiManagerBegin/clockManagerBegin）
+  EEPROM.get(WEATHER_EEPROM_ADDR, out);
+  if (out.magic != WEATHER_MAGIC || weatherChecksum(out) != out.checksum) {
+    // 首次使用/损坏：填默认值（城市"深圳"，夜间开关关）
+    memset(&out, 0, sizeof(out));
+    out.magic = WEATHER_MAGIC;
+    strncpy(out.city, "深圳", sizeof(out.city) - 1);
+    out.nightUpdata = 0;
+    return false;
+  }
+  return true;
+}
+
+bool saveWeatherConfig(const WeatherConfig &in) {
+  if (in.city[0] == '\0' || strlen(in.city) >= sizeof(in.city) ||
+      strlen(in.key) >= sizeof(in.key)) return false;
+  WeatherConfig cfg = in;
+  cfg.magic = WEATHER_MAGIC;
+  cfg.checksum = weatherChecksum(cfg);
+  EEPROM.begin(EEPROM_SIZE);   // 确保已初始化（配网页外路径也能保存）
+  EEPROM.put(WEATHER_EEPROM_ADDR, cfg);
+  return EEPROM.commit();
+}
+
+// ---- 设备设置（EEPROM 偏移 232, 独立区; 结构 12 字节, 232+12=244 <= 256）----
+const int SETTINGS_EEPROM_ADDR = 232;
+const uint32_t SETTINGS_MAGIC = 0x53455433UL;   // 'SET3'
+const int16_t DEFAULT_TZ_OFFSET_MIN = 480;       // UTC+8
+// 编译期保护：设置区不得与天气区(160-231)重叠、不得超出 256 字节 EEPROM
+static_assert(offsetof(SettingsConfig, checksum) + sizeof(uint16_t) <= 24,
+              "SettingsConfig too large for EEPROM tail");
+static_assert(SETTINGS_EEPROM_ADDR + sizeof(SettingsConfig) <= 256,
+              "Settings region overflows EEPROM_SIZE");
+
+// ---- WebDAV 配置（EEPROM 偏移 256, 独立区; 结构 214 字节, 256+214=470 <= 512）----
+const int WEBDAV_EEPROM_ADDR = 256;
+const uint32_t WEBDAV_MAGIC = 0x57445632UL;   // 'WDV2'
+static_assert(WEBDAV_EEPROM_ADDR + sizeof(WebdavConfig) <= 512,
+              "Webdav region overflows EEPROM_SIZE");
+
+uint16_t webdavChecksum(const WebdavConfig &value) {
+  return checksumBytes(reinterpret_cast<const uint8_t *>(&value),
+                       offsetof(WebdavConfig, checksum));
+}
+
+bool loadWebdavConfig(WebdavConfig &out) {
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.get(WEBDAV_EEPROM_ADDR, out);
+  if (out.magic != WEBDAV_MAGIC || webdavChecksum(out) != out.checksum) {
+    memset(&out, 0, sizeof(out));
+    out.magic = WEBDAV_MAGIC;   // 未配置/损坏: 清空但标记 magic(首字节空即未配置)
+    return false;
+  }
+  return true;
+}
+
+bool saveWebdavConfig(const WebdavConfig &in) {
+  if (in.endpoint[0] == '\0' || strlen(in.endpoint) >= sizeof(in.endpoint) ||
+      strlen(in.username) >= sizeof(in.username) || strlen(in.password) >= sizeof(in.password)) return false;
+  WebdavConfig cfg = in;
+  cfg.magic = WEBDAV_MAGIC;
+  cfg.checksum = webdavChecksum(cfg);
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.put(WEBDAV_EEPROM_ADDR, cfg);
+  return EEPROM.commit();
+}
+
+uint16_t settingsChecksum(const SettingsConfig &value) {
+  return checksumBytes(reinterpret_cast<const uint8_t *>(&value),
+                       offsetof(SettingsConfig, checksum));
+}
+
+bool loadSettingsConfig(SettingsConfig &out) {
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.get(SETTINGS_EEPROM_ADDR, out);
+  if (out.magic != SETTINGS_MAGIC || out.version != 1 ||
+      settingsChecksum(out) != out.checksum) {
+    // 首次使用/损坏：填默认值（24 小时制 / UTC+8 / 一言开）
+    memset(&out, 0, sizeof(out));
+    out.magic = SETTINGS_MAGIC;
+    out.version = 1;
+    out.clockFormat = 0;
+    out.tzOffsetMin = DEFAULT_TZ_OFFSET_MIN;
+    out.hitokotoEnabled = 1;
+    return false;
+  }
+  // 兼容旧数据：checksum 之后的新字段可能是 EEPROM 残留（0xFF 或旧 padding）
+  if (out.hitokotoEnabled > 1) out.hitokotoEnabled = 1;
+  if (out.portrait > 3) out.portrait = 0;   // 四向: 0横/1竖/2横翻/3竖翻; 非法残留(如 0xFF)→旧默认横屏
+  return true;
+}
+
+bool saveSettingsConfig(const SettingsConfig &in) {
+  SettingsConfig cfg = in;
+  cfg.magic = SETTINGS_MAGIC;
+  cfg.version = 1;
+  if (cfg.hitokotoEnabled > 1) cfg.hitokotoEnabled = 1;
+  if (cfg.portrait > 3) cfg.portrait = 0;   // 四向: 0横/1竖/2横翻/3竖翻
+  cfg.checksum = settingsChecksum(cfg);
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.put(SETTINGS_EEPROM_ADDR, cfg);
+  return EEPROM.commit();
+}
+
+uint8_t settingsGetClockFormat() {
+  SettingsConfig s;
+  loadSettingsConfig(s);
+  return s.clockFormat;
+}
+
+int16_t settingsGetTzOffsetMin() {
+  SettingsConfig s;
+  loadSettingsConfig(s);
+  return s.tzOffsetMin;
+}
+
+bool settingsSetClockFormat(uint8_t v) {
+  if (v > 1) return false;
+  SettingsConfig s;
+  loadSettingsConfig(s);
+  s.clockFormat = v;
+  return saveSettingsConfig(s);
+}
+
+bool settingsSetTzOffsetMin(int16_t v) {
+  if (v < -720 || v > 840) return false;   // UTC-12 .. UTC+14
+  SettingsConfig s;
+  loadSettingsConfig(s);
+  s.tzOffsetMin = v;
+  return saveSettingsConfig(s);
+}
+
+uint8_t settingsGetHitokotoEnabled() {
+  SettingsConfig s;
+  loadSettingsConfig(s);
+  return s.hitokotoEnabled;
+}
+
+bool settingsSetHitokotoEnabled(uint8_t v) {
+  if (v > 1) return false;
+  SettingsConfig s;
+  loadSettingsConfig(s);
+  s.hitokotoEnabled = v;
+  return saveSettingsConfig(s);
+}
+
+uint8_t settingsGetPortrait() {
+  SettingsConfig s;
+  loadSettingsConfig(s);
+  return s.portrait;
+}
+
+bool settingsSetPortrait(uint8_t v) {
+  if (v > 3) return false;   // 四向: 0横/1竖/2横翻/3竖翻
+  SettingsConfig s;
+  loadSettingsConfig(s);
+  s.portrait = v;
+  return saveSettingsConfig(s);
+}
+
+// ---- Web 端点：设备设置（/settings）与系统信息（/info） ----
+// 与 handleSave 分离：/wifi 管网络与天气，/settings 管设置页字段（时钟格式/时区/一言）
+void handleSettingsSave() {
+  if (!requireAdminAuth()) return;
+  bool any = false;
+  if (server.hasArg("clockFormat")) {
+    int v = server.arg("clockFormat").toInt();
+    if (settingsSetClockFormat(static_cast<uint8_t>(v == 1 ? 1 : 0))) any = true;
+  }
+  if (server.hasArg("tz")) {
+    int v = server.arg("tz").toInt();
+    if (v >= -720 && v <= 840 && settingsSetTzOffsetMin(static_cast<int16_t>(v))) any = true;
+  }
+  if (server.hasArg("hitokoto")) {
+    int v = server.arg("hitokoto").toInt();
+    if (settingsSetHitokotoEnabled(static_cast<uint8_t>(v == 1 ? 1 : 0))) any = true;
+  }
+  if (server.hasArg("portrait")) {   // 阅读旋转方向 0横/1竖/2横翻/3竖翻 (全局持久, 非法值由 setter 拒绝)
+    int v = server.arg("portrait").toInt();
+    if (settingsSetPortrait(static_cast<uint8_t>(v))) any = true;
+  }
+  if (!any) {
+    server.send(400, "text/plain; charset=utf-8", "缺少有效参数");
+    return;
+  }
+  configTime(settingsGetTzOffsetMin() * 60, 0, NTP_SERVER);   // 时区立即生效
+  Serial.println(F("SETTINGS_WEB_SAVE"));
+  server.send(200, "text/html; charset=utf-8",
+              "<meta charset='utf-8'><p>设置已保存。</p><a href='/'>返回</a>");
+}
+
+// ---- 管理密码 / OTA 密码端点 (/admin) ----
+// 首次设置（尚未设置过管理密码）无需旧密码; 已设置后修改必须携带当前管理密码（X-Admin-Pass 或 apass 字段）。
+// 新密码字段留空 = 保持不变（不提供"清空密码"操作, fail-closed）。
+void handleAdminSave() {
+  AdminConfig a;
+  loadAdminConfig(a);
+  if (a.password[0] != '\0' && !requireAdminAuth()) return;
+  String newPass = server.arg("adminpass");
+  String newOta = server.arg("otapass");
+  if (newPass.length() >= sizeof(a.password) || newOta.length() >= sizeof(a.otaPass)) {
+    server.send(400, "text/plain; charset=utf-8", "密码长度无效");
+    return;
+  }
+  bool otaChanged = false;
+  if (newPass.length() > 0) {
+    memset(a.password, 0, sizeof(a.password));
+    newPass.toCharArray(a.password, sizeof(a.password));
+  }
+  if (newOta.length() > 0) {
+    memset(a.otaPass, 0, sizeof(a.otaPass));
+    newOta.toCharArray(a.otaPass, sizeof(a.otaPass));
+    otaChanged = true;
+  }
+  if (!saveAdminConfig(a)) {
+    server.send(400, "text/plain; charset=utf-8", "保存失败");
+    return;
+  }
+  Serial.println(F("ADMIN_WEB_SAVE"));
+  if (otaChanged) {
+    server.send(200, "text/html; charset=utf-8",
+                "<meta charset='utf-8'><p>已保存（OTA 密码修改后，重启进入配网才生效）。</p><a href='/'>返回</a>");
+  } else {
+    server.send(200, "text/html; charset=utf-8",
+                "<meta charset='utf-8'><p>管理密码已保存。</p><a href='/'>返回</a>");
+  }
+}
+
+// ---- WebDAV 设置端点 (/webdav): ⚠️ 已弃用 (D0 起进度同步改直连手机 HTTP) ----
+// 结构/EEPROM/保存函数保留 (WebdavConfig/loadWebdavConfig/saveWebdavConfig), 端点仅返回弃用提示。
+void handleWebdavGet() {
+  server.send(200, "text/html; charset=utf-8",
+              "<meta charset='utf-8'><p>WebDAV 配置已弃用（改用手机直连同步）。</p><a href='/'>返回</a>");
+}
+
+void handleWebdavSave() {
+  server.send(200, "text/html; charset=utf-8",
+              "<meta charset='utf-8'><p>WebDAV 配置已弃用（改用手机直连同步），未保存任何更改。</p><a href='/'>返回</a>");
+}
+
+// GET+POST 合并（省路由对象堆——配网会话堆仅 ~1KB）
+void handleWebdavAny() {
+  if (server.method() == HTTP_POST) { handleWebdavSave(); return; }
+  handleWebdavGet();
+}
+
+void handleInfo() {
+  SettingsConfig s;
+  loadSettingsConfig(s);
+  String json = F("{\"version\":\"2.1\",\"state\":\"");
+  json += stateText();
+  json += F("\",\"staConnected\":");
+  json += (WiFi.status() == WL_CONNECTED) ? F("true") : F("false");
+  json += F(",\"staIp\":\"");
+  json += WiFi.localIP().toString();
+  json += F("\",\"clockFormat\":");
+  json += s.clockFormat;
+  json += F(",\"tzOffsetMin\":");
+  json += s.tzOffsetMin;
+  json += F(",\"hitokotoEnabled\":");
+  json += s.hitokotoEnabled;
+  json += F(",\"portrait\":");
+  json += s.portrait;
+  json += F(",\"sketchSize\":");
+  json += ESP.getSketchSize();
+  json += F(",\"freeSketchSpace\":");
+  json += ESP.getFreeSketchSpace();
+  json += F("}");
+  server.send(200, "application/json; charset=utf-8", json);
+}
+
+bool wifiManagerHasCredentials() {
+  return config.ssid[0] != '\0' && strlen(config.password) >= 8;
+}
+
+bool wifiManagerEnsureSta(uint32_t timeoutMs) {
+  // 天气页等路径可能未经过 wifiManagerBegin/clockManagerBegin，config 未加载，
+  // 此时从 EEPROM 补读 WiFi 凭据，避免误报"未配置"。
+  if (config.ssid[0] == '\0') loadConfig();
+  if (WiFi.status() == WL_CONNECTED) return true;
+  if (!wifiManagerHasCredentials()) return false;
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(config.ssid, config.password);
+  uint32_t deadline = millis() + timeoutMs;
+  while (WiFi.status() != WL_CONNECTED && millis() < deadline) {
+    delay(100);
+    ESP.wdtFeed();
+  }
+  return WiFi.status() == WL_CONNECTED;
+}
+
+// ---- 进度同步用的非阻塞 WiFi 接口 ----
+bool wifiManagerStartSta() {
+  if (config.ssid[0] == '\0') loadConfig();
+  if (!wifiManagerHasCredentials()) return false;
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(config.ssid, config.password);
+  return true;
+}
+bool wifiManagerIsStaUp() { return WiFi.status() == WL_CONNECTED; }
+void wifiManagerStopSta() { WiFi.disconnect(); WiFi.mode(WIFI_OFF); }
+
+// ---- 配网会话堆预算审计探针（临时, 审计完成后移除）----
+// 轻量: 只读 heap/maxFreeBlock; PSTR 格式串驻 flash, 不分配堆, 不影响被测环境
+void auditHeap(const char *phase) {
+  Serial.printf_P(PSTR("AUDIT %s heap=%u maxblk=%u\n"),
+                  phase, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxFreeBlockSize());
+}
+
+// 前置声明: 连接对象/扫描端点 (定义见文件尾) + 推送一次性标志
+void handleScanWifi();
+void handleScanDevices();
+void handleTargetGet();
+void handleTargetSave();
+void handleTargetAny();   // GET+POST 合并（省路由堆）
+static bool pushDone = false;
+
+// 导出 server 实例（匿名命名空间内, 内部链接; 供 file_api 等模块经 wifiManagerServer() 复用）
+ESP8266WebServer &wifiManagerServer() { return server; }
+
+// 供 file_api 用的纯校验（不发送响应, 由调用方按需回 JSON 401）:
+// 未设置管理密码 → false（fail-closed）; X-Admin-Pass/apass 与密码不符 → false
+bool wifiManagerAdminPassValid() {
+  AdminConfig a;
+  loadAdminConfig(a);
+  if (a.password[0] == '\0') return false;
+  String given = adminPassFromRequest();
+  return given.length() > 0 && given.length() < sizeof(a.password) &&
+         strcmp(given.c_str(), a.password) == 0;
+}
+
+void wifiManagerBegin(void (*renderCallback)(bool), void (*exitCallback)()) {
+  renderPage = renderCallback;
+  exitPage = exitCallback;
+  active = true;
+  Serial.println(F("NET_ENTER"));
+  auditHeap("config_enter");   // 审计: 点击配网后、AP 前
+  startAp();
+  // ⚠️ 配网页路由不再走 server.on()（路由对象常驻堆吃 ~1.8KB）:
+  // 改由 onNotFound 精确分发（与 /api/* 同款, 省路由对象堆）。配网会话堆硬约束,
+  // 12+ 路由对象累积会把 AP 手机关联/文件管理堆压到 OOM（实测 /fs/list OOM）。
+  // 分发逻辑见下方dispatchWeb()。
+  // 诊断: 未匹配请求（含 favicon.ico 等）——确认请求是否到达服务器
+  // ⚠️ 全部分发走 onNotFound（零路由对象堆）: /api/* /fs/* /fm/* 由 fileApiTryDispatch,
+  // 配网页路由（原 server.on 注册 13 条, 吃 ~1.8KB 常驻堆）也在此精确分发,
+  // 让配网会话堆只被真正匹配的请求占用, 把基线留给文件管理 /fs/*。
+  server.onNotFound([]() {
+    // ★ CORS 预检 (OPTIONS): 手机/WebView 跨源上传 multipart 会先发 OPTIONS 预检,
+    //   此前返回 404 + 无 CORS 头 → 浏览器拦截 POST → 上传"转圈无响应"。返回 200 + CORS 头排除该因素。
+    if (server.method() == HTTP_OPTIONS) {
+      server.sendHeader("Access-Control-Allow-Origin", "*");
+      server.sendHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+      server.sendHeader("Access-Control-Allow-Headers", "Content-Type, X-File-Size, X-Resume, X-Resume-Offset, Range");
+      server.send(204, "text/plain", "");
+      return;
+    }
+    if (fileApiTryDispatch()) return;   // /api/* /fs/* /fm/*（零路由对象堆, 见 file_api.cpp）
+    String uri = server.uri();
+    HTTPMethod m = server.method();
+    if (uri == "/")                           { handleRoot(); return; }
+    if (uri == "/status" && m == HTTP_GET)    { handleStatus(); return; }
+    if (uri == "/info" && m == HTTP_GET)      { handleInfo(); return; }
+    if (uri == "/settings" && m == HTTP_POST) { handleSettingsSave(); return; }
+    if (uri == "/wifi" && m == HTTP_POST)     { handleSave(); return; }
+    if (uri == "/clear" && m == HTTP_POST)    { handleClear(); return; }
+    if (uri == "/admin" && m == HTTP_POST)    { handleAdminSave(); return; }
+    if (uri == "/webdav")                     { handleWebdavAny(); return; }
+    if (uri == "/scanwifi" && m == HTTP_GET)  { handleScanWifi(); return; }
+    if (uri == "/scandevices" && m == HTTP_GET){ handleScanDevices(); return; }
+    if (uri == "/target")                     { handleTargetAny(); return; }
+    if (uri == "/update") {
+      server.send(200, "text/html; charset=utf-8",
+                  "<meta charset='utf-8'><p>OTA 未启用：请先在配网页设置 OTA 密码。</p><a href='/'>返回</a>");
+      return;
+    }
+    // 低堆安全日志: 不把 server.uri() 的临时 String 经 .c_str() + %s 传给 vsnprintf
+    //（临时 String 在 3-4KB 堆上可能已释放, %s 读到回收内存 → Exception 29 实测）。
+    // 改用固定栈缓冲先拷贝 uri（短暂; 4KB 循环栈可承受）, 不触堆。
+    char uriBuf[64];
+    String u = server.uri();
+    size_t mn = u.length();
+    if (mn >= sizeof(uriBuf)) mn = sizeof(uriBuf) - 1;
+    if (mn) memcpy(uriBuf, u.c_str(), mn);
+    uriBuf[mn] = '\0';
+    Serial.printf("HTTP_404 uri=%s heap=%u\n", uriBuf, (unsigned)ESP.getFreeHeap());
+    server.send(404, "text/plain; charset=utf-8", "Not Found");
+  });
+  // 收集 X-Admin-Pass 请求头（管理密码校验用, 见 requireAdminAuth）+ 上传协议头（file_api）
+  server.collectHeaders("X-Admin-Pass", "X-File-Size", "X-Resume", "X-Resume-Offset", "Range");
+  // Web 固件升级（OTA）：/update GET=上传页 POST=固件上传。
+  // 认证用独立 OTA 密码（EEPROM 管理区, 与 AP 密码/管理密码分离）; 未设置 OTA 密码 → /update 不可用。
+  {
+    AdminConfig ad;
+    loadAdminConfig(ad);
+    if (ad.otaPass[0] != '\0') {
+      httpUpdater.setup(&server, "/update", "admin", ad.otaPass);
+    }
+    // 未设置 OTA 密码: 不注册 /update 路由（省 2 个路由对象堆）, 由 onNotFound 兜底提示。
+  }
+  // 文件管理 API + LittleFS Web UI（/fm/）：统一 API 供 Web/Android/Legado 使用
+  // ⚠️ 二次 WiFi.mode(WIFI_AP) 提前到路由/挂载之前执行: AP 结构在堆充足时初始化,
+  // 路由注册(1.8KB)+LFS 挂载(~1KB)之后只剩 ~3KB, AP 后台延迟分配(实测 5s 内 -2.9KB)
+  // 会把手机关联/DHCP 处理的堆压到 OOM（Unhandled C++ exception: OOM 实测）。
+  WiFi.mode(WIFI_AP);
+  fileApiInit();
+  auditHeap("rte_before_begin");   // 探针: fileApiInit 后, server.begin 前
+  server.begin();
+  auditHeap("rte_after_begin");   // 探针: server.begin 后
+  pushDone = false;
+  Serial.println(F("WIFI_WEB_START"));
+  // 配网会话固定纯 AP（不自动连 STA）：AP+STA 共存时 STA 连接/beacon 解析触发 SDK phy 崩溃
+  // （Exception 29 epc1=0x4000df64, 栈 ieee80211_phy_init/scan_parse_beacon/sta_input,
+  //  实测进入配网后 8~15s 必崩, 与已保存网络是否可达无关）。
+  // ⚠️ 上面已保留 WiFi.mode(WIFI_AP)（s0_verify4 验证: 有它 DHCP 正常+heap 7.3KB, 无则 heap 塌到
+  // ~2.3KB 且 DHCP 失效——SDK opmode 重设才会正确初始化/释放 AP 内存结构）。
+  // 配网页走 AP 热点即可完成全部管理; 新网络验证走校时/进度同步（纯 STA/纯 AP, 无共存）。
+  state = AP_ONLY;
+  auditHeap("config_ready");   // 审计: 配网入口完成（路由+LFS已注册, 二次 mode 已执行）
+  Serial.printf("WIFI_AP_STA_READY heap=%u\n", (unsigned)ESP.getFreeHeap());   // 诊断: 配网会话堆水位
+  // ★ 配网页显示用局刷(用户要求: 每次不用全刷, 全刷阻塞 1s+)。首次从"正在加载储存卡"提示页
+  //   局刷切换, 残影由 FIXED_REFRESH 定次全刷自愈。
+  if (renderPage) renderPage(false);
+}
+
+// 配网会话 5s 塌陷审计: AP_ONLY 期间每 500ms 采样 heap（串口紧凑格式, 不影响被测环境）
+static uint32_t gAuditTs = 0;
+
+void wifiManagerLoop() {
+  if (!active) return;
+  server.handleClient();
+  // 请求边界探针: /fs/list handler 在 handleClient 内执行完（gFsListJustHandled=true）,
+  // 回到此处即"handleClient 收尾完成 + 下一轮 loop 前"状态, 打印堆/块/栈。
+  if (gFsListJustHandled) {
+    gFsListJustHandled = false;
+    fsListProbe("LOOP_AFTER");
+  }
+  // 对照实验探针采样定时（AP_ONLY 下每 1000ms; 与 gAuditTs=500ms 分开, 互不干扰）
+  static uint32_t gAbTs = 0;
+  if (state == CONNECTING) {
+    if (WiFi.status() == WL_CONNECTED) {
+      WiFi.mode(WIFI_AP_STA);
+      staIp = WiFi.localIP().toString();
+      state = STA_AP;
+      if (renderPage) renderPage(false);
+    } else if (static_cast<int32_t>(millis() - deadline) >= 0) {
+      WiFi.disconnect();   // 干净拆除 STA 再切纯 AP（避免 mode 切换撞 beacon 解析崩溃, 同 handleClear 模式）
+      WiFi.mode(WIFI_AP);
+      state = ERROR;
+      if (renderPage) renderPage(false);
+    }
+  }
+  if (state != CONNECTING && !pushDone) {
+    pushDone = true;             // STA 连接结果确定后推一次设备信息到连接对象
+    wifiManagerPushDeviceInfo();
+  }
+  // 诊断: AP 关联站数（排查"手机连上热点但拿不到 IP"的 DHCP 问题）
+  static uint32_t lastStaLog = 0;
+  if (state == AP_ONLY && static_cast<int32_t>(millis() - lastStaLog) >= 5000) {
+    lastStaLog = millis();
+    Serial.printf("AP_STA_NUM=%u heap=%u\n", (unsigned)WiFi.softAPgetStationNum(),
+                  (unsigned)ESP.getFreeHeap());
+  }
+  // 审计: 5s 塌陷曲线（500ms 采样; AP_ONLY 全程, 覆盖手机未连/关联/DHCP/开页面）
+  if (state == AP_ONLY && static_cast<int32_t>(millis() - gAuditTs) >= 500) {
+    gAuditTs = millis();
+    Serial.printf_P(PSTR("H %u\n"), (unsigned)ESP.getFreeHeap());
+  }
+  // 对照实验探针: AP_ONLY 下每 1000ms 采一次（验证"纯 AP 下 SD 访问 × AP hostap_input 竞争"）。
+  // 见 file_api_fs.h ofsAbTestTick 注释。编译实验版用 -DOFS_ABTEST_MODE=<0|1|2>（默认 0=不碰 SD）。
+  if (state == AP_ONLY && static_cast<int32_t>(millis() - gAbTs) >= 1000) {
+    gAbTs = millis();
+    ofsAbTestTick();
+  }
+  // ★ 上传结束回配网页: 上传状态回调(renderUploadStatus)显示"上传完毕/失败"提示后,
+  //   handleClient 返回到此, 延时 ~1.5s 让用户看清, 再恢复配网页(热点信息)。
+  //   用 phase 边沿检测(非结束态→结束态)触发一次, 避免每轮重复。
+  if (state == AP_ONLY) {
+    static int gOfsUpLastPhase = -1;
+    int cur = ofsUpGetPhase();
+    static uint32_t gOfsUpDoneAt = 0;
+    bool ended = (cur == OFS_UP_PHASE_DONE || cur == OFS_UP_PHASE_FAIL);
+    if (ended && gOfsUpLastPhase != cur) {
+      gOfsUpDoneAt = millis();   // 刚结束: 启动恢复计时
+    } else if (ended && gOfsUpDoneAt != 0 && static_cast<int32_t>(millis() - gOfsUpDoneAt) >= 1500) {
+      gOfsUpDoneAt = 0;
+      if (renderPage) renderPage(false);   // 回配网页(局刷)
+    } else if (!ended) {
+      gOfsUpDoneAt = 0;                    // 非结束态(新一轮上传): 清计时
+    }
+    gOfsUpLastPhase = cur;
+  }
+  ESP.wdtFeed();
+}
+
+void wifiManagerHandleKeys(int middleEvent, int rightEvent) {
+  if (!active) return;
+  if (middleEvent == 2) {
+    server.stop();
+    WiFi.softAPdisconnect(true);
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    active = false;
+    state = IDLE;
+    Serial.println(F("NET_EXIT"));
+    if (exitPage) exitPage();
+  }
+  (void)rightEvent;
+}
+
+bool wifiManagerIsActive() { return active; }
+const char *wifiManagerApSsid() { return apSsid.c_str(); }
+const char *wifiManagerStateText() { return stateText(); }
+const char *wifiManagerStaIp() { return staIp.c_str(); }
+
+void clockManagerBegin(void (*renderCallback)(bool), void (*doneCallback)()) {
+  clockRender = renderCallback;
+  clockDone = doneCallback;
+  clockState = CLOCK_STA;
+  clockDeadline = millis() + STA_TIMEOUT_MS;
+  clockSkippedSession = false;
+  syncedTime = 0;
+  syncedRtcTicks = 0;
+  rtcBaseValid = false;
+  EEPROM.begin(EEPROM_SIZE);
+  // 立即设置本地时区（设置页可调，默认 UTC+8）: 即使跳过校准(WiFi 未连), localtime() 也能正确显示北京时间
+  configTime(settingsGetTzOffsetMin() * 60, 0, NTP_SERVER);
+  // 时间源优先级: 板载 BL8025T (断电后继续走时) > EEPROM 兑底。
+  // 注意: 不再用 ESP8266 内部 RTC 内存(loadRtcClock) — KEY1 复位会清掉, 且用户要求时间只走外挂 RTC。
+  rtc8025Init();
+  if (rtc8025Present && rtc8025TimeValid) {
+    syncedTime = rtc8025NowEpoch;
+    lastCalibrationTime = 0;
+    rtcBaseValid = false;
+    syncedAtMs = millis();
+    // 从 EEPROM 恢复上次校准时间 (用于“距上次校准”)
+    PersistClockRecord rec;
+    EEPROM.get(CLOCK_EEPROM_ADDR, rec);
+    if (rec.magic == CLOCK_EEPROM_MAGIC && rec.epoch >= 1600000000UL &&
+        persistChecksum(rec) == rec.checksum) {
+      lastCalibrationTime = rec.epoch;
+    }
+    Serial.printf("CLOCK_8025T_READ epoch=%lu\n", (unsigned long)syncedTime);
+  } else {
+    // BL8025T 不在线(实测 I2C 扫描无设备): 从 EEPROM 恢复校准时间 (flash, KEY1 不清)
+    loadPersistedClock();
+  }
+  Serial.println(F("CLOCK_ENTER"));
+  if (!loadConfig()) {
+    clockState = CLOCK_FAILED;
+    Serial.println(F("CLOCK_NO_WIFI_CONFIG"));
+    if (clockRender) clockRender(true);
+    return;
+  }
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(config.ssid, config.password);
+  Serial.printf("CLOCK_WIFI_BEGIN ssidLen=%u\n", static_cast<unsigned>(strlen(config.ssid)));
+  if (clockRender) clockRender(true);
+}
+
+// A7 对齐: NTP 失败后改用天气时间 — 请求心知 now.json, 解析 last_update 作为时钟基准。
+// last_update 格式: "YYYY-MM-DDTHH:MM:SS+08:00" (前 19 字符为本地时间, 按设置时区转 epoch)
+static bool clockManagerTryWeatherTime() {
+  ESP.wdtFeed();
+  WeatherConfig wc;
+  loadWeatherConfig(wc);
+  if (wc.key[0] == '\0' || wc.city[0] == '\0') {
+    Serial.println(F("CLOCK_WEATHER_NOCFG"));
+    return false;
+  }
+  WiFiClient client;
+  HTTPClient http;
+  char url[180];
+  snprintf(url, sizeof(url),
+           "http://api.seniverse.com/v3/weather/now.json?key=%s&location=%s&language=zh-Hans&unit=c",
+           wc.key, wc.city);
+  http.setTimeout(3000);   // 阻塞 ≤3s < WDT 8s
+  if (!http.begin(client, url)) return false;
+  int code = http.GET();
+  String body = (code == HTTP_CODE_OK) ? http.getString() : String("");
+  http.end();
+  ESP.wdtFeed();
+  if (code != HTTP_CODE_OK) {
+    Serial.printf("CLOCK_WEATHER_HTTP %d\n", code);
+    return false;
+  }
+  int pos = body.indexOf("\"last_update\"");
+  if (pos < 0) return false;
+  int q = body.indexOf('"', pos + 14);   // 值起始引号
+  if (q < 0) return false;
+  int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0;
+  if (sscanf(body.c_str() + q + 1, "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &s) != 6) return false;
+  // 本地时间(按设置时区) → UTC epoch (civilToEpoch 把本地当 UTC, 再减时区偏移)
+  int64_t t = civilToEpoch(y, mo, d, h, mi, s) - (int64_t)settingsGetTzOffsetMin() * 60;
+  if (t <= 1600000000LL) return false;
+  syncedTime = (time_t)t;
+  syncedAtMs = millis();
+  // 时间持久化: 优先写外挂 BL8025T; 芯片不在线(实测 I2C 扫描无设备)时降级写 EEPROM
+  // (EEPROM 是 flash, KEY1 复位不会清 — 用户担心的"内部RTC/内存"是 rtcUserMemory, 已避开)
+  clockManagerPersistSync((time_t)t);
+  clockState = CLOCK_SUCCESS;
+  clockSuccessDeadline = millis() + 1800UL;
+  Serial.printf("CLOCK_WEATHER_TIME epoch=%lld\n", (long long)t);
+  if (clockRender) clockRender(false);
+  return true;
+}
+
+void clockManagerLoop() {
+  if (clockState == CLOCK_IDLE || clockState == CLOCK_SKIPPED || clockState == CLOCK_FAILED) return;
+  if (clockState == CLOCK_SUCCESS) {
+    if (static_cast<int32_t>(millis() - clockSuccessDeadline) >= 0) {
+      if (clockDone) clockDone();
+      clockState = CLOCK_IDLE;
+    }
+    ESP.wdtFeed();
+    return;
+  }
+  if (clockState == CLOCK_STA) {
+    if (WiFi.status() == WL_CONNECTED) {
+      clockState = CLOCK_NTP;
+      clockDeadline = millis() + NTP_TIMEOUT_MS;
+      configTime(settingsGetTzOffsetMin() * 60, 0, NTP_SERVER);
+      Serial.printf("CLOCK_WIFI_CONNECTED ip=%s\n", WiFi.localIP().toString().c_str());
+      if (clockRender) clockRender(false);
+    } else if (static_cast<int32_t>(millis() - clockDeadline) >= 0) {
+      clockState = CLOCK_FAILED;
+      Serial.println(F("CLOCK_WIFI_TIMEOUT"));
+      if (clockRender) clockRender(false);
+    }
+  } else if (clockState == CLOCK_NTP) {
+    time_t now = time(nullptr);
+    if (now > 1600000000) {
+      clockSkippedSession = false;
+      syncedTime = now;
+      syncedAtMs = millis();
+      // 时间持久化: 优先写外挂 BL8025T; 芯片不在线(实测 I2C 扫描无设备)时降级写 EEPROM
+      // (EEPROM 是 flash, KEY1 复位不会清 — 用户担心的"内部RTC/内存"是 rtcUserMemory, 已避开)
+      clockManagerPersistSync(now);   // 写板载 BL8025T(断电后继续走时); 失败/不在线降级 EEPROM
+      clockState = CLOCK_SUCCESS;
+      clockSuccessDeadline = millis() + 1800UL;
+      Serial.printf("CLOCK_NTP_SUCCESS epoch=%lu\n", static_cast<unsigned long>(now));
+      if (clockRender) clockRender(false);
+    } else if (static_cast<int32_t>(millis() - clockDeadline) >= 0) {
+      // 对齐 A7: NTP 失败 → 改用天气时间 (天气接口 last_update 字段)
+      clockState = CLOCK_WEATHER;
+      Serial.println(F("CLOCK_NTP_TIMEOUT -> weather time"));
+      if (clockRender) clockRender(false);
+    }
+  } else if (clockState == CLOCK_WEATHER) {
+    if (!clockManagerTryWeatherTime()) {
+      clockState = CLOCK_FAILED;
+      Serial.println(F("CLOCK_WEATHER_FAILED"));
+      if (clockRender) clockRender(false);
+    }
+    ESP.wdtFeed();
+    return;
+  }
+  ESP.wdtFeed();
+}
+
+void clockManagerHandleKeys(int middleEvent, int rightEvent) {
+  if (clockState == CLOCK_IDLE || clockState == CLOCK_SUCCESS || clockState == CLOCK_SKIPPED || clockState == CLOCK_FAILED) return;
+  // 校准界面: 右键短按即跳过校准 (用户要求: 只需短按, 响应更快; 对齐 A7 "按下按键3可跳过校准",
+  // 天气降级阶段 CLOCK_WEATHER 同样可跳过)
+  if (rightEvent == 1) {
+    clockSkippedSession = true;
+    clockState = CLOCK_SKIPPED;
+    Serial.println(F("CLOCK_SKIP"));
+    // 调试: 打印当前 epoch 与本地时间字符串, 确认时区/显示是否正确
+    {
+      time_t dbgNow = clockManagerNow();
+      struct tm *dbgTm = dbgNow > 1600000000UL ? localtime(&dbgNow) : nullptr;
+      char dbgBuf[40];
+      if (dbgTm) {
+        snprintf(dbgBuf, sizeof(dbgBuf), "%04d-%02d-%02d %02d:%02d:%02d", dbgTm->tm_year + 1900,
+                 dbgTm->tm_mon + 1, dbgTm->tm_mday, dbgTm->tm_hour, dbgTm->tm_min, dbgTm->tm_sec);
+      } else {
+        snprintf(dbgBuf, sizeof(dbgBuf), "(invalid)");
+      }
+      Serial.printf("CLOCK_SKIP_DEBUG epoch=%lu local=%s lastCal=%lu\n", (unsigned long)dbgNow, dbgBuf,
+                    (unsigned long)lastCalibrationTime);
+    }
+    clockManagerPersistNow();
+    if (clockDone) clockDone();
+  }
+  (void)middleEvent;
+}
+
+bool clockManagerIsActive() {
+  return clockState == CLOCK_STA || clockState == CLOCK_NTP || clockState == CLOCK_WEATHER;
+}
+
+// 开机早期探测外挂 BL8025T (用户重要决策: 时间只读外挂 RTC)。
+// 若不在开机时探测, rtc8025Present=false → clockManagerNow 读 BL8025T 直接失败 → 回退内存旧值。
+void clockManagerProbeRtc() {
+  rtc8025Init();
+}
+
+bool clockManagerIsSynced() { return syncedTime > 1600000000; }
+time_t clockManagerNow() {
+  // 用户要求(重要): 读取时间只读外挂 BL8025T (KEY1 复位会清掉 ESP8266 内部 RTC 内存/内存漂移)
+  time_t t = 0;
+  if (rtc8025ReadEpoch(t)) return t;
+  // BL8025T 不可用(总线忙/未探测到) → 回退内存漂移
+  if (syncedTime > 1600000000UL) {
+    if (rtcBaseValid) return syncedTime + (system_get_rtc_time() - syncedRtcTicks) / RTC_TICKS_PER_SECOND;
+    return syncedTime + (millis() - syncedAtMs) / 1000UL;
+  }
+  return 0;
+}
+bool clockManagerWasSkipped() { return clockSkippedSession; }
+void clockManagerPersistNow() {
+  if (syncedTime > 1600000000UL && lastCalibrationTime > 0) {
+    savePersistedClock(lastCalibrationTime, clockManagerNow());
+  }
+}
+
+time_t clockManagerLastCalibration() { return lastCalibrationTime; }
+uint32_t clockManagerMinutesSinceCalibration() {
+  time_t now = clockManagerNow();
+  if (lastCalibrationTime == 0 || now <= lastCalibrationTime) return 0;
+  uint32_t minutes = static_cast<uint32_t>((now - lastCalibrationTime) / 60UL);
+  return minutes > 599940UL ? 599940UL : minutes;
+}
+uint32_t clockManagerHoursSinceCalibration() {
+  time_t now = clockManagerNow();
+  if (lastCalibrationTime == 0 || now <= lastCalibrationTime) return 0;
+  uint32_t hours = static_cast<uint32_t>((now - lastCalibrationTime) / 3600UL);
+  return hours > 9999UL ? 9999UL : hours;
+}
+int clockManagerStage() { return static_cast<int>(clockState); }
+const char *clockManagerStageText() {
+  // 文案对齐官方 A7 时间校准页（反编译字符串：获取NTP时间 / :成功 / :失败 / 改用天气时间 / 手动跳过校准）
+  switch (clockState) {
+    case CLOCK_STA: return "获取NTP时间";
+    case CLOCK_NTP: return "获取NTP时间";
+    case CLOCK_WEATHER: return "获取NTP时间失败，改用天气时间";
+    case CLOCK_SUCCESS: return "获取NTP时间:成功";
+    case CLOCK_SKIPPED: return "已跳过校准";
+    case CLOCK_FAILED: return "获取NTP时间:失败";
+    default: return "获取NTP时间";
+  }
+}
+
+// A7 对齐: 校时同步时间后时钟芯片写入结果提示 (成功=读取数据正常, 失败=数据出错或不存在,使用软件时钟)
+const char *clockManagerClockChipText() { return clockChipMessage; }
+bool clockManagerClockChipOk() { return clockChipOk; }
+bool clockManagerSyncSucceeded() { return clockState == CLOCK_SUCCESS; }
+
+// ==================== 连接对象配置（EEPROM 470, 'TGRT'）====================
+// 局域网/热点下各选一台设备(如运行"墨水屏同步代理"App 的手机)作为连接对象:
+// 配网模式开启时设备主动推送自身信息到选中 IP, App 收到后自动设置设备地址。
+const int TARGET_EEPROM_ADDR = 470;
+const uint32_t TARGET_MAGIC = 0x54475254UL;
+static_assert(TARGET_EEPROM_ADDR + sizeof(TargetConfig) <= 512,
+              "Target region overflows EEPROM_SIZE");
+
+uint16_t targetChecksum(const TargetConfig &v) {
+  return checksumBytes(reinterpret_cast<const uint8_t *>(&v), offsetof(TargetConfig, checksum));
+}
+
+bool loadTargetConfig(TargetConfig &out) {
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.get(TARGET_EEPROM_ADDR, out);
+  bool valid = (out.magic == TARGET_MAGIC && targetChecksum(out) == out.checksum);
+  if (!valid) {
+    memset(&out, 0, sizeof(out));
+    out.magic = TARGET_MAGIC;
+  }
+  // 内存默认: 空 IP 填默认 (不写 EEPROM)。局域网 192.168.0.10 / 热点 192.168.0.100。
+  if (out.staIp[0] == '\0') strncpy(out.staIp, "192.168.0.10", sizeof(out.staIp) - 1);
+  if (out.apIp[0] == '\0')  strncpy(out.apIp,  "192.168.0.100", sizeof(out.apIp) - 1);
+  return valid;
+}
+
+bool saveTargetConfig(const TargetConfig &in) {
+  TargetConfig cfg = in;
+  cfg.magic = TARGET_MAGIC;
+  cfg.checksum = targetChecksum(cfg);
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.put(TARGET_EEPROM_ADDR, cfg);
+  return EEPROM.commit();
+}
+
+// 简单 JSON 字符串取值: {"key":"value"} → value（不含引号）
+static String jsonStrValue(const char *json, const char *key) {
+  String k = String("\"") + key + "\":\"";
+  const char *p = strstr(json, k.c_str());
+  if (!p) return "";
+  p += k.length();
+  String out;
+  while (*p && *p != '"') { out += *p; p++; }
+  return out;
+}
+
+static bool validIpv4(const String &s) {
+  if (s.length() < 7 || s.length() > 15) return false;
+  int dots = 0;
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (c == '.') dots++;
+    else if (!(c >= '0' && c <= '9')) return false;
+  }
+  return dots == 3;
+}
+
+// ---- WiFi 扫描 (主动扫描含隐藏, ~2-5s): {"networks":[{"ssid","rssi","secure"}]} ----
+void handleScanWifi() {
+  WiFi.scanDelete();
+  int8_t n = WiFi.scanNetworks(false, true);
+  String json = F("{\"networks\":[");
+  if (n >= 0) {
+    for (int8_t i = 0; i < n; i++) {
+      if (i) json += ',';
+      json += F("{\"ssid\":\"");
+      json += jsonEscape(WiFi.SSID(i).c_str());
+      json += F("\",\"rssi\":");
+      json += WiFi.RSSI(i);
+      json += F(",\"secure\":");
+      json += (WiFi.encryptionType(i) != ENC_TYPE_NONE) ? F("true") : F("false");
+      json += '}';
+    }
+  }
+  json += F("]}");
+  WiFi.scanDelete();
+  server.send(200, "application/json; charset=utf-8", json);
+  Serial.printf("SCAN_WIFI n=%d\n", (int)n);
+}
+
+// ---- 连接设备扫描: UDP 探测(广播 INKPING, App 应答 name/model) + 热点 station 列表 ----
+void handleScanDevices() {
+  const uint16_t PING_PORT = 8083;
+  const uint32_t WAIT_MS = 3000;
+  struct Dev { String ip; String name; String model; };
+  Dev lan[10]; int lanN = 0;
+  Dev ap[10];  int apN = 0;
+
+  // 热点关联的 station 先入 ap 列表（名字待 UDP 响应匹配后补充）
+  {
+    struct station_info *si = wifi_softap_get_station_info();
+    for (; si != nullptr && apN < 10; si = si->next.stqe_next) {
+      IPAddress ip(si->ip.addr);
+      ap[apN].ip = ip.toString();
+      ap[apN].name = "热点设备";
+      ap[apN].model = "";
+      apN++;
+    }
+    wifi_softap_free_station_info();
+  }
+
+  WiFiUDP udp;
+  if (udp.begin(PING_PORT)) {
+    IPAddress staIp = WiFi.localIP();
+    if (staIp.isSet() && staIp != IPAddress(0, 0, 0, 0)) {
+      IPAddress lanBcast(staIp[0], staIp[1], staIp[2], 255);
+      udp.beginPacket(lanBcast, PING_PORT);
+      udp.write((const uint8_t *)"INKPING", 7);
+      udp.endPacket();
+    }
+    IPAddress apIp = WiFi.softAPIP();
+    if (apIp.isSet() && apIp != IPAddress(0, 0, 0, 0)) {
+      IPAddress apBcast(apIp[0], apIp[1], apIp[2], 255);
+      udp.beginPacket(apBcast, PING_PORT);
+      udp.write((const uint8_t *)"INKPING", 7);
+      udp.endPacket();
+    }
+    uint32_t t0 = millis();
+    while ((int32_t)(millis() - t0) < (int32_t)WAIT_MS) {
+      int sz = udp.parsePacket();
+      if (sz > 0 && sz < 256) {
+        char buf[256];
+        int n = udp.read(buf, min(sz, 255));
+        buf[n] = '\0';
+        IPAddress from = udp.remoteIP();
+        bool isAp = (apN > 0) && (from[0] == WiFi.softAPIP()[0] &&
+                                  from[1] == WiFi.softAPIP()[1] &&
+                                  from[2] == WiFi.softAPIP()[2]);
+        Dev *list = isAp ? ap : lan;
+        int *cnt = isAp ? &apN : &lanN;
+        int idx = -1;
+        for (int i = 0; i < *cnt; i++) {
+          if (list[i].ip == from.toString()) { idx = i; break; }
+        }
+        if (idx < 0 && *cnt < 10) {
+          idx = *cnt;
+          (*cnt)++;
+          list[idx].ip = from.toString();
+          list[idx].name = "";
+          list[idx].model = "";
+        }
+        if (idx >= 0) {
+          String name = jsonStrValue(buf, "name");
+          String model = jsonStrValue(buf, "model");
+          if (!name.isEmpty()) list[idx].name = name;
+          if (!model.isEmpty()) list[idx].model = model;
+          if (list[idx].name.isEmpty()) list[idx].name = "未知设备";
+        }
+      }
+      delay(10);
+      ESP.wdtFeed();
+    }
+    udp.stop();
+  }
+
+  String json = F("{\"lan\":[");
+  for (int i = 0; i < lanN; i++) {
+    if (i) json += ',';
+    json += F("{\"ip\":\"");
+    json += jsonEscape(lan[i].ip.c_str());
+    json += F("\",\"name\":\"");
+    json += jsonEscape(lan[i].name.c_str());
+    json += F("\",\"model\":\"");
+    json += jsonEscape(lan[i].model.c_str());
+    json += F("\"}");
+  }
+  json += F("],\"ap\":[");
+  for (int i = 0; i < apN; i++) {
+    if (i) json += ',';
+    json += F("{\"ip\":\"");
+    json += jsonEscape(ap[i].ip.c_str());
+    json += F("\",\"name\":\"");
+    json += jsonEscape(ap[i].name.c_str());
+    json += F("\",\"model\":\"");
+    json += jsonEscape(ap[i].model.c_str());
+    json += F("\"}");
+  }
+  json += F("]}");
+  server.send(200, "application/json; charset=utf-8", json);
+  Serial.printf("SCAN_DEVICES lan=%d ap=%d\n", lanN, apN);
+}
+
+// ---- 连接对象端点 ----
+void handleTargetAny() {
+  if (server.method() == HTTP_POST) { handleTargetSave(); return; }
+  handleTargetGet();
+}
+
+void handleTargetGet() {
+  TargetConfig t;
+  loadTargetConfig(t);
+  String json = F("{\"staIp\":\"");
+  json += jsonEscape(t.staIp);
+  json += F("\",\"apIp\":\"");
+  json += jsonEscape(t.apIp);
+  json += F("\"}");
+  server.send(200, "application/json; charset=utf-8", json);
+}
+
+void handleTargetSave() {
+  if (!requireAdminAuth()) return;
+  TargetConfig t;
+  loadTargetConfig(t);
+  String sta = server.arg("staIp");
+  sta.trim();
+  String ap = server.arg("apIp");
+  ap.trim();
+  if (!sta.isEmpty() && !validIpv4(sta)) {
+    server.send(400, "text/plain; charset=utf-8", "局域网 IP 无效");
+    return;
+  }
+  if (!ap.isEmpty() && !validIpv4(ap)) {
+    server.send(400, "text/plain; charset=utf-8", "热点 IP 无效");
+    return;
+  }
+  sta.toCharArray(t.staIp, sizeof(t.staIp));
+  ap.toCharArray(t.apIp, sizeof(t.apIp));
+  if (!saveTargetConfig(t)) {
+    server.send(400, "text/plain; charset=utf-8", "保存失败");
+    return;
+  }
+  Serial.printf("TARGET_WEB_SAVE sta=[%s] ap=[%s]\n", t.staIp, t.apIp);
+  wifiManagerPushDeviceInfo();   // 保存后立即推送设备信息给选中 App (App 收到自动更新设备地址)
+  server.send(200, "text/html; charset=utf-8",
+              "<meta charset='utf-8'><p>连接对象已保存。</p><a href='/'>返回</a>");
+}
+
+// ---- 配网模式开启后向连接对象推送设备信息 (HTTP POST, 3s 超时, 失败静默) ----
+void wifiManagerPushDeviceInfo() {
+  TargetConfig t;
+  loadTargetConfig(t);
+  const char *target = nullptr;
+  if (WiFi.status() == WL_CONNECTED && t.staIp[0]) target = t.staIp;
+  else if (t.apIp[0]) target = t.apIp;
+  if (!target) {
+    Serial.println(F("PUSH_DEVICE no-target"));
+    return;
+  }
+  IPAddress tip;
+  if (!tip.fromString(target)) {
+    Serial.printf("PUSH_DEVICE bad-ip [%s]\n", target);
+    return;
+  }
+  WiFiClient c;
+  if (!c.connect(tip, 8082)) {
+    Serial.printf("PUSH_DEVICE connect-fail [%s]\n", target);
+    return;
+  }
+  char body[160];
+  snprintf(body, sizeof(body),
+           "{\"device\":\"ink\",\"mode\":\"%s\",\"ip\":\"%s\",\"ssid\":\"%s\",\"ap\":\"192.168.4.1\"}",
+           (WiFi.status() == WL_CONNECTED) ? "sta" : "ap",
+           WiFi.localIP().toString().c_str(),
+           apSsid.c_str());
+  c.print("POST /device_info HTTP/1.1\r\nHost: ");
+  c.print(target);
+  c.print("\r\nContent-Type: application/json\r\nContent-Length: ");
+  c.print(strlen(body));
+  c.print("\r\nConnection: close\r\n\r\n");
+  c.print(body);
+  uint32_t t0 = millis();
+  while (c.connected() && (int32_t)(millis() - t0) < 3000) {
+    while (c.available()) c.read();
+    delay(5);
+  }
+  c.stop();
+  Serial.printf("PUSH_DEVICE ok target=[%s] body=[%s]\n", target, body);
+}
+
+// ---- 进度同步直连手机 (D0): 纯 AP / 目标地址 ----
+
+// 纯 AP: WIFI_AP(STA 断开, 规避 AP/STA 同子网路由歧义), softAP 192.168.0.1/24,
+// DHCP 固定租约仅 192.168.0.100 (手机热点模式固定地址)。SSID/密码与配网热点一致。
+bool wifiManagerStartApOnly() {
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  char name[16];
+  snprintf(name, sizeof(name), "MSP-%02X%02X", mac[4], mac[5]);
+  apSsid = name;
+  WiFi.persistent(false);
+  WiFi.disconnect();                        // 断开 STA (纯 AP)
+  WiFi.mode(WIFI_AP);
+  WiFi.softAPConfig(IPAddress(192, 168, 0, 1), IPAddress(192, 168, 0, 1), IPAddress(255, 255, 255, 0));
+  bool ok = WiFi.softAP(apSsid.c_str(), AP_PASSWORD);
+  apSetFixedLease();                        // 固定租约仅 192.168.0.100
+  Serial.printf("WIFI_AP_ONLY_START ssid=%s ok=%d ip=%s\n",
+                apSsid.c_str(), ok ? 1 : 0, WiFi.softAPIP().toString().c_str());
+  return ok;
+}
+
+// 目标手机 IP: STA 已连且 staIp 非空 → staIp；否则 → apIp (loadTargetConfig 后取, 含默认值)
+const char* wifiManagerSyncTarget() {
+  static char buf[16];
+  TargetConfig t;
+  loadTargetConfig(t);
+  const char* ip = (WiFi.status() == WL_CONNECTED && t.staIp[0]) ? t.staIp : t.apIp;
+  snprintf(buf, sizeof(buf), "%s", ip);
+  return buf;
+}
+
+// 调试: 当前 softAP IP 字符串 (如 192.168.0.1)
+const char* wifiManagerApIp() {
+  static char buf[16];
+  snprintf(buf, sizeof(buf), "%s", WiFi.softAPIP().toString().c_str());
+  return buf;
+}

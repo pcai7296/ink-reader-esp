@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang='zh'>
+  <head>
+    <meta charset='utf-8'>
+    <title>高级文件管理器</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <style>
+      :root {
+        --bg: #f4f6fb;
+        --surface: #ffffff;
+        --surface-2: #f8fafc;
+        --border: #e3e8f0;
+        --border-strong: #d5dbe6;
+        --text: #1e293b;
+        --text-2: #64748b;
+        --text-3: #94a3b8;
+        --primary: #4f6ef7;
+        --primary-h: #3d5bf0;
+        --on-primary: #ffffff;
+        --danger: #ef4444;
+        --danger-bg: #fee2e2;
+        --shadow-sm: 0 1px 2px rgba(15,23,42,.06), 0 1px 3px rgba(15,23,42,.08);
+        --shadow-md: 0 4px 12px rgba(15,23,42,.12), 0 2px 6px rgba(15,23,42,.08);
+        --radius: 10px;
+        --radius-sm: 7px;
+      }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body {
+        position: fixed; top: 0; left: 0;
+        display: flex; flex-direction: column;
+        width: 100vw; height: 100vh;
+        font-family: "Microsoft YaHei", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        -webkit-font-smoothing: antialiased;
+      }
+
+      /* ---- 顶栏 ---- */
+      #header {
+        flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center;
+        gap: 8px; padding: 12px 16px;
+        background: var(--surface); border-bottom: 1px solid var(--border);
+        box-shadow: var(--shadow-sm); z-index: 20;
+      }
+      #header > * { box-sizing: border-box; }
+      #header > input:not([type="file"]) {
+        padding: 9px 12px; border: 1px solid var(--border-strong);
+        border-radius: var(--radius-sm); background: var(--surface-2);
+        color: var(--text); font-size: 14px; outline: none;
+        transition: border-color .15s, box-shadow .15s, background .15s;
+      }
+      #header > input:not([type="file"]):focus {
+        border-color: var(--primary); background: #fff;
+        box-shadow: 0 0 0 3px rgba(79,110,247,.15);
+      }
+      #header > input:nth-child(2) { flex: 1 1 200px; }
+      #header > input[type="file"] {
+        color: var(--text-2); font-size: 13px; cursor: pointer; border: none; outline: none;
+      }
+      #header > input[type="file"]::file-selector-button {
+        margin-right: 10px; padding: 8px 14px; border: 1px solid var(--border-strong);
+        border-radius: var(--radius-sm); background: var(--surface-2);
+        color: var(--text-2); font-size: 13px; cursor: pointer;
+        transition: background .15s, border-color .15s, color .15s;
+      }
+      #header > input[type="file"]::file-selector-button:hover {
+        background: #eef1f7; border-color: var(--border-strong); color: var(--text);
+      }
+
+      button {
+        padding: 9px 16px; border: none; border-radius: var(--radius-sm);
+        cursor: pointer; background: var(--primary); color: var(--on-primary);
+        outline: none; font-size: 14px; font-weight: 600; line-height: 1;
+        box-shadow: 0 1px 2px rgba(79,110,247,.3);
+        transition: background .15s, transform .05s, box-shadow .15s;
+      }
+      button:hover { background: var(--primary-h); }
+      button:active { transform: translateY(1px); box-shadow: none; }
+      button:focus-visible { box-shadow: 0 0 0 3px rgba(79,110,247,.25); }
+      #header > button:not(#mkdir) { /* 主操作按钮保持主色 */ }
+
+      /* ---- 状态 / 容量 ---- */
+      #status { align-items: center; color: var(--text-2); font-size: 13px; min-width: 0; }
+      #status meter {
+        width: 130px; height: 10px; vertical-align: middle; margin-left: 6px;
+        -webkit-appearance: none; appearance: none; border: 1px solid var(--border);
+        border-radius: 999px; background: var(--surface-2); overflow: hidden;
+      }
+      #status meter::-webkit-meter-bar { background: var(--surface-2); border-radius: 999px; }
+      #status meter::-webkit-meter-optimum-value,
+      #status meter::-webkit-meter-suboptimum-value { background: linear-gradient(90deg,#4f6ef7,#7c9bff); border-radius: 999px; }
+
+      /* ---- 加载遮罩 ---- */
+      #loading {
+        position: absolute; top: 0; left: 0; z-index: 9999999; display: none;
+        width: 100vw; height: 100vh; flex-direction: column;
+        align-items: center; justify-content: center;
+        color: white; background-color: rgba(15,23,42,.45);
+        backdrop-filter: blur(2px);
+      }
+      #loading.shown { display: flex; }
+      #loading-msg { display: inline-block; font-size: 15px; font-weight: 500; margin-bottom: 14px; text-shadow: 0 1px 4px rgba(0,0,0,.3); }
+      #loading .spinner-anim:not(:required) {
+        display: inline-block; animation: spinner-anim 0.8s infinite linear;
+        border: 4px solid rgba(255,255,255,.3); border-right-color: #fff;
+        border-radius: 100%; text-indent: -9999px; width: 38px; height: 38px;
+      }
+      @keyframes spinner-anim { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+      /* ---- 右键菜单 ---- */
+      .contextMenu {
+        z-index: 300; position: absolute; left: 5px; border: 1px solid var(--border);
+        background-color: var(--surface); display: none; box-shadow: var(--shadow-md);
+        border-radius: var(--radius); font-size: 13px; font-weight: 500; overflow: hidden;
+        min-width: 140px; padding: 6px;
+      }
+      .contextMenu ul { list-style: none; margin: 0; padding: 0; }
+      .contextMenu li { position: relative; min-width: 120px; cursor: pointer; border-radius: var(--radius-sm); }
+      .contextMenu span { color: var(--text); display: inline-block; padding: 8px 12px; width: 100%; }
+      .contextMenu li:hover { background: #eef1f7; }
+      .contextMenu li:hover span { color: var(--primary); }
+
+      /* ---- 文件树 ---- */
+      .css-treeview {
+        width: 100%; overflow: auto; padding: 14px 16px;
+        background: var(--surface); border-radius: 0;
+      }
+      .css-treeview ul, .css-treeview li { list-style: none; }
+      .css-treeview input { display: none; }
+      .css-treeview span {
+        color: var(--text); white-space: nowrap; padding: 5px 9px; cursor: pointer;
+        border-radius: var(--radius-sm); display: inline-flex; align-items: center;
+        transition: background .12s, color .12s;
+      }
+      .css-treeview span:hover { background: #eef1f7; }
+      .css-treeview span i { font-style: normal; color: var(--text-3); font-size: 12px; margin-left: 6px; }
+      .css-treeview label {
+        color: var(--text); cursor: pointer; padding: 5px 9px; border-radius: var(--radius-sm);
+        display: inline-flex; align-items: center; gap: 6px;
+        transition: background .12s, color .12s;
+      }
+      .css-treeview label::before {
+        content: ''; width: 0; height: 0; border-left: 5px solid var(--text-3);
+        border-top: 4px solid transparent; border-bottom: 4px solid transparent;
+        transition: transform .15s;
+      }
+      .css-treeview label:hover { background: #eef1f7; }
+      .css-treeview input ~ ul { display: none; }
+      .css-treeview input:checked:not(:disabled) ~ ul { display: block; }
+      .css-treeview input:checked:not(:disabled) + label::before {
+        transform: rotate(90deg); border-left-color: var(--primary);
+      }
+      .css-treeview li { margin-left: .6em; }
+
+      /* ---- 预览 ---- */
+      #preview {
+        display: none; width: 100%; justify-content: center; align-items: center;
+        background: rgba(15,23,42,.45); backdrop-filter: blur(2px);
+      }
+      .show-close {
+        position: absolute; z-index: 99999999; top: 14px; right: 14px;
+        width: 34px; height: 34px; cursor: pointer; border-radius: 50%;
+        background: rgba(255,255,255,.9); box-shadow: var(--shadow-md);
+      }
+      .show-close::before, .show-close::after {
+        content: ''; position: absolute; top: 50%; left: 50%;
+        display: flex; width: 16px; height: 2px; background: #334155; border-radius: 2px;
+      }
+      .show-close::before { transform: translate(-50%,-50%) rotate(45deg); }
+      .show-close::after  { transform: translate(-50%,-50%) rotate(-45deg); }
+
+      /* ---- 分页加载更多 ---- */
+      .loadMore span {
+        color: var(--primary); font-weight: 600; font-size: 13px;
+      }
+      .loadMore span:hover { text-decoration: underline; }
+
+      /* ---- 底部 ---- */
+      .app-footer {
+        flex: 0 0 auto; text-align: center; font-size: 12px; color: var(--text-3); padding: 6px;
+      }
+
+      @media (max-width: 750px) {
+        #header { gap: 6px; padding: 10px 12px; }
+        #header > input { width: 100%; }
+        #header > input[type="file"] { width: 100%; }
+        #header > button { flex: 1 1 auto; }
+        #tree { width: 100%; }
+        #status { width: 100%; justify-content: center; }
+        #status meter { width: 100%; }
+      }
+    </style>
+    <script>
+      var tree;   // 编辑器/树需要在操作后刷新
+      var fsInfo; // /fs/status 结果（容量条 + SPIFFS 分支判断用）
+
+      function setLoading(show, message) {
+        if (message) console.log(message);
+        document.getElementById("loading-msg").innerHTML = message ? message : "";
+        if (show) document.getElementById("loading").classList.add("shown");
+        else document.getElementById("loading").classList.remove("shown");
+        document.body.style.cursor = show ? "wait" : "default";
+      }
+
+      function readableSize(bytes) {
+        if (bytes < 1024) return bytes + " B";
+        var units = [' KB', ' MB', ' GB', ' TB', 'PB'];
+        var i = -1;
+        do { bytes = bytes / 1024; i++; } while (bytes > 1024);
+        return bytes.toFixed(2) + units[i];
+      }
+
+      function showHttpError(request) {
+        alert("ERROR: [" + request.status + "] " + request.responseText);
+      }
+
+      function refreshStatus() {
+        document.getElementById("status").innerHTML = "(刷新中...)";
+        var xmlHttp = new XMLHttpRequest();
+        xmlHttp.onload = function() {
+          if (xmlHttp.status != 200) showHttpError(xmlHttp);
+          else {
+            fsInfo = JSON.parse(xmlHttp.responseText);
+            var status = fsInfo.type + " - ";
+            if (fsInfo.isOk == "true") {
+              var used = parseInt(fsInfo.usedBytes), total = parseInt(fsInfo.totalBytes);
+              var percent = Math.round(100 * used / total);
+              var text = readableSize(total - used) + " ，最大 " + readableSize(total);
+              status += "<meter min='0' optimum='0' low='90' high='95' max='100' value='" +
+                        percent + "' title='" + text + "'>" + text + "</meter>";
+            } else {
+              status += "<span style='background-color:red;color:white;font-weight:bold'>INIT ERROR !</span>";
+            }
+            document.getElementById("status").innerHTML = status;
+            document.getElementById("mkdir").style.display = "inline";
+            maybeFireInitialList();   // status 完成后串行发根目录 list
+          }
+        };
+        xmlHttp.open("GET", "status", true);
+        xmlHttp.send(null);
+      }
+
+      // 串行化: status 完成后才发根目录 list, 避免两个 HTTP 请求并发叠加压低配网堆
+      // （纯 AP 会话堆 ~5KB, 并发多请求 + SD 访问会打穿堆 → esf_buf_alloc 失败崩溃）。
+      var gInitialListPending = false;   // onBodyLoad 设 true, status onload 尾部触发
+      function maybeFireInitialList() {
+        if (gInitialListPending) {
+          gInitialListPending = false;
+          httpList("/");
+        }
+      }
+
+      function getParentFolder(path) {
+        if (!path.startsWith("/")) path = "/" + path;
+        if (path.endsWith("/")) path = path.slice(0, -1);
+        return path.substring(0, path.lastIndexOf("/"));
+      }
+
+      function createHeader(element, tree) {
+        var header = document.getElementById(element);
+        var fileSelector = document.createElement("input");
+        fileSelector.type = "file"; fileSelector.multiple = false; fileSelector.name = "data";
+        header.appendChild(fileSelector);
+
+        var pathInput = document.createElement("input");
+        pathInput.id = "pathInput"; pathInput.type = "text"; pathInput.name = "path";
+        pathInput.defaultValue = "/";
+        header.appendChild(pathInput);
+
+        var upload = document.createElement("button");
+        upload.innerHTML = "上传"; header.appendChild(upload);
+
+        var mkdir = document.createElement("button");
+        mkdir.id = "mkdir"; mkdir.style.display = "none"; mkdir.innerHTML = "新建文件夹";
+        header.appendChild(mkdir);
+
+        var mkfile = document.createElement("button");
+        mkfile.innerHTML = "新建文件"; header.appendChild(mkfile);
+
+        var status = document.createElement("span");
+        status.id = "status"; status.innerHTML = "(加载)"; header.appendChild(status);
+
+        fileSelector.onchange = function(e) {
+          if (fileSelector.files.length === 0) return;
+          var filename = fileSelector.files[0].name;
+          if (!pathInput.value.startsWith("/")) pathInput.value = "/" + pathInput.value;
+          pathInput.value = getParentFolder(pathInput.value) + "/" + filename;
+        };
+        upload.onclick = function(e) {
+          if (fileSelector.files.length === 0) return;
+          tree.httpUpload(fileSelector.files[0], pathInput.value);
+        };
+        mkfile.onclick = function(e) {
+          var path = pathInput.value.trim();
+          if (path === "") alert("A filename must be given");
+          else if (path.endsWith("/")) alert("Filenames must not end with a '/' character");
+          else tree.httpCreate(path);
+        };
+        mkdir.onclick = function(e) {
+          var path = pathInput.value.trim();
+          if (path === "") alert("A folder name must be given");
+          else {
+            if (!path.endsWith("/")) path = path + "/";
+            tree.httpCreate(path);
+          }
+        };
+      }
+
+      function createTree(element) {
+        var preview = document.getElementById("preview");
+        var treeRoot = document.createElement("div");
+        treeRoot.className = "css-treeview";
+        treeRoot.id = "/";
+        document.getElementById(element).appendChild(treeRoot);
+
+        function loadDownload(path) {
+          document.getElementById("download-frame").src =
+            "file?path=" + encodeURIComponent(path) + "&download=true";
+        }
+
+        function loadImgPreview(path) {
+          document.getElementById("pathInput").value = path;
+          document.getElementById("preview").style.display = "flex";
+          document.getElementById("preview").innerHTML =
+            "<div class='show-close'></div>" +
+            "<img src='file?path=" + encodeURIComponent(path) +
+            "' style='max-width:100%; max-height:100%; margin:auto; display:block;' />";
+          document.querySelectorAll('.show-close')[0].onclick = showClose;
+        }
+
+        function loadTxtPreview(path) {
+          document.getElementById("pathInput").value = path;
+          document.getElementById("preview").style.display = "flex";
+          document.getElementById("preview").innerHTML =
+            "<div class='show-close'></div><pre id='txtContents' style='overflow:auto;'></pre>";
+          document.querySelectorAll('.show-close')[0].onclick = showClose;
+          var xhr = new XMLHttpRequest();
+          xhr.onload = function() {
+            document.getElementById('txtContents').textContent = this.responseText;
+          };
+          xhr.open('GET', "file?path=" + encodeURIComponent(path));
+          xhr.send();
+        }
+
+        function showClose(e) { e.target.parentNode.style.display = "none"; }
+
+        this.clearMainPanel = function() {
+          document.getElementById("preview").style.display = "flex";
+          document.getElementById("preview").innerHTML =
+            "<div class='show-close'></div><div style='color:#fff'>(找不到文件或不支持格式<br>或文件大于1MB无法预览)</div>";
+          document.querySelectorAll('.show-close')[0].onclick = showClose;
+        };
+
+        function isTextFile(path) {
+          var ext = /(?:\.([^.]+))?$/.exec(path)[1];
+          if (ext !== undefined) {
+            switch (ext.toLowerCase()) {
+              case "txt": case "htm": case "html": case "js": case "json":
+              case "c": case "h": case "cpp": case "css": case "xml":
+              case "config": case "z1": case "z2": case "i1": case "i2":
+                return true;
+            }
+          }
+          return false;
+        }
+        function isImageFile(path) {
+          var ext = /(?:\.([^.]+))?$/.exec(path)[1];
+          if (ext !== undefined) {
+            switch (ext.toLowerCase()) {
+              case "png": case "jpg": case "jpeg": case "gif": case "ico": case "bmp":
+                return true;
+            }
+          }
+          return false;
+        }
+
+        function fillFolderMenu(el, path) {
+          var list = document.createElement("ul"); el.appendChild(list);
+          var isChecked = document.getElementById(path).childNodes[0].checked;
+
+          var expnd = document.createElement("li"); list.appendChild(expnd);
+          expnd.innerHTML = isChecked ? "<span>折叠</span>" : "<span>展开</span>";
+          expnd.onclick = function(e) {
+            removeMenus();
+            document.getElementById(path).childNodes[0].checked = !isChecked;
+            if (!isChecked) httpList(path);
+          };
+
+          var renFolder = document.createElement("li"); list.appendChild(renFolder);
+          renFolder.innerHTML = "<span>重命名/移动</span>";
+          renFolder.onclick = function(e) {
+            removeMenus();
+            var newPath = prompt("Rename " + path + " to", path);
+            if (newPath != null && newPath != path) httpRename(path, newPath);
+          };
+
+          var delFolder = document.createElement("li"); list.appendChild(delFolder);
+          delFolder.innerHTML = "<span>删除</span>";
+          delFolder.onclick = function(e) {
+            removeMenus();
+            httpDelete(path);
+          };
+        }
+
+        function fillFileMenu(el, path) {
+          var list = document.createElement("ul"); el.appendChild(list);
+
+          var action = document.createElement("li"); list.appendChild(action);
+          if (isTextFile(path)) {
+            action.innerHTML = "<span>观看</span>";
+            action.onclick = function(e) { removeMenus(); loadTxtPreview(path); };
+          } else if (isImageFile(path)) {
+            action.innerHTML = "<span>预览</span>";
+            action.onclick = function(e) { removeMenus(); loadImgPreview(path); };
+          }
+
+          var download = document.createElement("li"); list.appendChild(download);
+          download.innerHTML = "<span>下载</span>";
+          download.onclick = function(e) { removeMenus(); loadDownload(path); };
+
+          var renFile = document.createElement("li"); list.appendChild(renFile);
+          renFile.innerHTML = "<span>重命名/移动</span>";
+          renFile.onclick = function(e) {
+            removeMenus();
+            var newPath = prompt("Rename " + path + " to", path);
+            if (newPath != null && newPath != path) httpRename(path, newPath);
+          };
+
+          var delFile = document.createElement("li"); list.appendChild(delFile);
+          delFile.innerHTML = "<span>删除</span>";
+          delFile.onclick = function(e) { removeMenus(); httpDelete(path); };
+
+          var close = document.createElement("li"); list.appendChild(close);
+          close.innerHTML = "<span>关闭</span>";
+          close.onclick = function(e) { removeMenus(); };
+        }
+
+        function removeMenus() {
+          document.querySelectorAll('.contextMenu').forEach(function(dom) {
+            if (dom.parentNode) document.body.removeChild(dom);
+          });
+        }
+
+        function showContextMenu(e, path, isfile) {
+          removeMenus();
+          var divContext = document.createElement("div");
+          divContext.className = 'contextMenu';
+          divContext.style.display = 'block';
+          divContext.style.left = e.clientX + 'px';
+          divContext.style.top = e.clientY + 'px';
+          if (isfile) fillFileMenu(divContext, path);
+          else fillFolderMenu(divContext, path);
+          document.body.appendChild(divContext);
+          var width = divContext.offsetWidth, height = divContext.offsetHeight;
+          divContext.onmouseout = function(e) {
+            if (e.clientX < 0 || e.clientY < 0 ||
+                e.clientX > (window.innerWidth) || e.clientY > (window.innerHeight)) {
+              removeMenus();
+            }
+          };
+        }
+
+        function createTreeLeaf(parentPath, name, size) {
+          var leaf = document.createElement("li");
+          leaf.id = ((parentPath == "/") ? "" : parentPath) + "/" + name;
+          var span = document.createElement("span");
+          span.innerHTML = name + " <i>(" + readableSize(size) + ")</i>";
+          leaf.appendChild(span);
+          leaf.onclick = function(e) { attemptLoad(leaf.id); };
+          leaf.oncontextmenu = function(e) {
+            e.preventDefault(); e.stopPropagation();
+            showContextMenu(e, leaf.id, true);
+          };
+          return leaf;
+        }
+
+        function createTreeBranch(parentPath, name) {
+          var leaf = document.createElement("li");
+          leaf.id = ((parentPath == "/") ? "" : parentPath) + "/" + name;
+          var check = document.createElement("input");
+          check.type = "checkbox";
+          leaf.appendChild(check);
+          var label = document.createElement("label");
+          label.textContent = name;
+          leaf.appendChild(label);
+          check.onchange = function(e) { if (check.checked) httpList(leaf.id); };
+          label.onclick = function(e) {
+            if (!check.checked) {
+              // 手风琴: 收起同级已展开目录
+              [].forEach.call(leaf.parentNode.children, function(dom) {
+                var c = dom.querySelector('[type="checkbox"]');
+                if (c && c.checked) c.checked = false;
+              });
+              check.checked = true;
+              httpList(leaf.id);
+            } else {
+              check.checked = false;
+            }
+          };
+          leaf.oncontextmenu = function(e) {
+            e.preventDefault(); e.stopPropagation();
+            showContextMenu(e, leaf.id, false);
+          };
+          return leaf;
+        }
+
+        function addFileNodes(parentPath, items) {
+          items.sort(function(a, b) {
+            if (a.type == b.type) return a.name.localeCompare(b.name);
+            return a.type.localeCompare(b.type);   // dir 前 file 后（官方客户端排序）
+          });
+          var list = document.createElement("ul");
+          document.getElementById(parentPath).appendChild(list);
+          for (var i = 0; i < items.length; i++) {
+            var item = items[i];
+            var itemEl = (item.type === "file")
+              ? createTreeLeaf(parentPath, item.name, item.size)
+              : createTreeBranch(parentPath, item.name);
+            list.appendChild(itemEl);
+          }
+        }
+
+        this.attemptLoad = function(path) {
+          document.getElementById("pathInput").value = path;
+          if (isTextFile(path)) loadTxtPreview(path);        // 无 ACE: 官方 loadTxtPreview fallback 路径
+          else if (isImageFile(path)) loadImgPreview(path);
+          else this.clearMainPanel();
+        };
+
+        this.refreshPath = function(path) {
+          var paths = [];
+          var parentPath = path;
+          while ((parentPath.lastIndexOf("/") != -1) && !document.getElementById(parentPath)) {
+            paths.push(parentPath);
+            parentPath = getParentFolder(parentPath);
+          }
+          if (parentPath == "") paths.push("/");
+          else paths.push(parentPath);
+          listPaths(paths);
+        };
+
+        function onListReceived(req, parentPath, remainingPaths) {
+          return function() {
+            setLoading(false);
+            if (req.status != 200) { showHttpError(req); return; }
+            var parentEl = document.getElementById(parentPath);
+            if (parentEl) {
+              var lastChild = parentEl.lastElementChild;
+              if (lastChild && lastChild.tagName == "UL") parentEl.removeChild(lastChild);
+            }
+            var data;
+            try { data = JSON.parse(req.responseText); } catch(e) { data = {items:[], nextStart:0, hasMore:false}; }
+            addFileNodes(parentPath, data.items || []);
+            var pe = document.getElementById(parentPath);
+            if (pe && pe.childNodes[0] && pe.childNodes[0].checked !== undefined) pe.childNodes[0].checked = true;
+            if (data.hasMore && data.nextStart > 0 && pe) appendLoadMore(pe, parentPath, data.nextStart);
+            if (remainingPaths && remainingPaths.length) listPaths(remainingPaths);
+          };
+        }
+
+        function onListMoreReceived(req, parentPath) {
+          return function() {
+            setLoading(false);
+            if (req.status != 200) { showHttpError(req); return; }
+            var data;
+            try { data = JSON.parse(req.responseText); } catch(e) { data = {items:[], nextStart:0, hasMore:false}; }
+            var pe = document.getElementById(parentPath);
+            if (!pe) return;
+            var moreBtn = pe.querySelector('.loadMore');
+            if (moreBtn && moreBtn.parentNode) moreBtn.parentNode.removeChild(moreBtn);
+            addFileNodes(parentPath, data.items || []);
+            if (data.hasMore && data.nextStart > 0) appendLoadMore(pe, parentPath, data.nextStart);
+          };
+        }
+
+        function appendLoadMore(parentEl, parentPath, nextStart) {
+          var lists = parentEl.querySelectorAll('ul');
+          var ul = lists.length ? lists[lists.length - 1] : null;
+          if (!ul) return;
+          var li = document.createElement("li");
+          li.className = "loadMore";
+          var b = document.createElement("span");
+          b.textContent = "[加载更多]";
+          li.appendChild(b);
+          li.onclick = function(e) { e.stopPropagation(); httpListMore(parentPath, nextStart); };
+          ul.appendChild(li);
+        }
+
+        function onOperationComplete(req, path) {
+          return function() {
+            setLoading(false);
+            if (req.status != 200) showHttpError(req);
+            else {
+              if (path) {
+                var parentPath = getParentFolder(path);
+                if (req.responseText && req.responseText != parentPath) refreshPath(req.responseText);
+                refreshPath(parentPath);
+                attemptLoad(path);
+              } else {
+                refreshPath(req.responseText);
+              }
+            }
+            refreshStatus();
+          };
+        }
+
+        function httpList(parentPath, remainingPaths) {
+          setLoading(true, "Listing '" + parentPath + "'...");
+          var xmlHttp = new XMLHttpRequest();
+          xmlHttp.onload = onListReceived(xmlHttp, parentPath, remainingPaths);
+          xmlHttp.open("GET", "list?dir=" + encodeURIComponent(parentPath) + "&start=0&count=25", true);
+          xmlHttp.send(null);
+        }
+
+        function httpListMore(parentPath, start) {
+          setLoading(true, "Loading more '" + parentPath + "'...");
+          var xmlHttp = new XMLHttpRequest();
+          xmlHttp.onload = onListMoreReceived(xmlHttp, parentPath);
+          xmlHttp.open("GET", "list?dir=" + encodeURIComponent(parentPath) + "&start=" + start + "&count=50", true);
+          xmlHttp.send(null);
+        }
+
+        function listPaths(paths) {
+          var path = paths.pop();
+          if (path) httpList(path, paths);
+        }
+
+        this.httpUpload = function(file, path) {
+          setLoading(true, "上传中 '" + path + "'...");
+          if (!path.startsWith("/")) path = "/" + path;
+          // ⚠️ 手机浏览器对大文件用 Transfer-Encoding: chunked, ESP8266WebServer core 不支持
+          // （Parsing-impl.h 只读 Content-Length 头不解析 chunked → contentLength=0 → 连接被重置,
+          // 上传卡死/报错）。修复: 手工拼 multipart Blob 再 xhr.send(blob) —— 浏览器对 Blob 必发
+          // Content-Length, 从客户端彻底消除 chunked。
+          // 同时清洗文件名内的引号/控制字符, 防 Content-Disposition 解析错位导致 BAD PATH。
+          function sendAsBlob(fileBytes) {
+            var boundary = "----DSHUploadBoundary" + Date.now().toString(16) + Math.floor(Math.random()*1e9).toString(16);
+            var safePath = String(path).replace(/[\r\n"]/g, "_");
+            var before = new TextEncoder().encode(
+              "--" + boundary + "\r\n" +
+              "Content-Disposition: form-data; name=\"data\"; filename=\"" + safePath + "\"\r\n" +
+              "Content-Type: application/octet-stream\r\n\r\n"
+            );
+            var after = new TextEncoder().encode("\r\n--" + boundary + "--\r\n");
+            var parts = [before];
+            if (fileBytes instanceof ArrayBuffer) parts.push(fileBytes);
+            else if (ArrayBuffer.isView(fileBytes)) parts.push(fileBytes);
+            else parts.push(fileBytes);
+            parts.push(after);
+            var body = new Blob(parts, { type: "multipart/form-data; boundary=" + boundary });
+            var xmlHttp = new XMLHttpRequest();
+            xmlHttp.onload = onOperationComplete(xmlHttp, path);
+            xmlHttp.open("POST", "edit");
+            xmlHttp.setRequestHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
+            xmlHttp.send(body);           // Blob → Content-Length 必发, 不再 chunked
+          }
+          if (file && file.arrayBuffer) {
+            file.arrayBuffer().then(sendAsBlob, function() { oldFormDataUpload(file, path); });
+          } else {
+            var fr = new FileReader();
+            fr.onload = function() { sendAsBlob(fr.result); };
+            fr.onerror = function() { oldFormDataUpload(file, path); };
+            fr.readAsArrayBuffer(file);
+          }
+        };
+        // 兜底: Blob/FileReader 不可用时才退回原生 FormData（老浏览器, 可能退化回 chunked; 仅保底）
+        function oldFormDataUpload(file, path) {
+          var xmlHttp = new XMLHttpRequest();
+          xmlHttp.onload = onOperationComplete(xmlHttp, path);
+          var formData = new FormData();
+          formData.append("data", file, path);
+          xmlHttp.open("POST", "edit");
+          xmlHttp.send(formData);
+        }
+        window.__dsb_uploadMode = "blob";   // 标记: 当前启用 Blob 强制 Content-Length 上传
+
+        this.httpCreate = function(path) {
+          setLoading(true, "Creating '" + path + "'...");
+          if (!path.startsWith("/")) path = "/" + path;
+          var xmlHttp = new XMLHttpRequest();
+          xmlHttp.onload = onOperationComplete(xmlHttp, path);
+          // ⚠️ 用 URL query 传参（PUT + FormData 服务端 s.arg() 解析不到字段）
+          xmlHttp.open("PUT", "edit?path=" + encodeURIComponent(path));
+          xmlHttp.send();
+        };
+
+        function httpRename(srcPath, dstPath) {
+          setLoading(true, "Renaming '" + srcPath + "' to '" + dstPath + "'...");
+          if (!dstPath.startsWith("/")) dstPath = "/" + dstPath;
+          var xmlHttp = new XMLHttpRequest();
+          xmlHttp.onload = onOperationComplete(xmlHttp, dstPath);
+          // ⚠️ 用 URL query 传参: multipart FormData + PUT 的服务端 s.arg() 解析不到字段（core 缺陷）
+          xmlHttp.open("PUT", "edit?src=" + encodeURIComponent(srcPath) + "&path=" + encodeURIComponent(dstPath));
+          xmlHttp.send();
+        }
+
+        function httpDelete(path) {
+          setLoading(true, "Deleting '" + path + "'...");
+          var xmlHttp = new XMLHttpRequest();
+          xmlHttp.onload = onOperationComplete(xmlHttp);
+          // ⚠️ 用 URL query 传参（同上, DELETE + FormData 服务端 s.arg() 解析不到）
+          xmlHttp.open("DELETE", "edit?path=" + encodeURIComponent(path));
+          xmlHttp.send();
+        }
+
+        httpList("/");
+        return this;
+      }
+
+      function onBodyLoad() {
+        tree = createTree("tree");
+        createHeader("header", tree);
+        gInitialListPending = true;   // 根目录 list 延到 status 完成后串行发
+        refreshStatus();
+      }
+    </script>
+  </head>
+  <body onload="onBodyLoad();">
+    <div id="header"></div>
+    <div style="flex:1 1 100%;display:flex;overflow:hidden;">
+      <div id="tree" style="flex:0 0 auto;height:100%;display:flex;"></div>
+      <div id="preview"></div>
+    </div>
+    <div id="loading"><span id="loading-msg"></span><br/><div class="spinner-anim">加载中...</div></div>
+    <iframe id="download-frame" style="display:none;"></iframe>
+    <div class="app-footer">
+      官方 A7 管理 Web 文件管理构造复刻（file_manager /fs/*）
+    </div>
+  </body>
+</html>

@@ -1,0 +1,43 @@
+# ===== Arduino 编译产物 =====
+build/
+build_*/
+build_a3/
+build_abA/
+build_abB/
+build_cfs/
+build_maxconn/
+build_mmu/
+
+# ===== 第三方/外部库（由用户自行安装，见 README 依赖引导）=====
+libraries/
+
+# ===== 固件/编译二进制 =====
+*.bin
+*.elf
+*.map
+*.o
+*.d
+*.exe
+*.globals.h
+*.ino.cpp
+
+# ===== 调试串口日志 / 抓包 / 压力结果 =====
+serial_logs/
+serial_*.log
+*.capture.log
+sync_monitor*.log
+ab_*.log
+stress_results/
+*.log
+
+# ===== Python 缓存 =====
+__pycache__/
+*.pyc
+*.pyo
+
+# ===== 临时 / 编辑器 =====
+*.tmpdir/
+.idea/
+.vscode/
+*.swp
+.DS_Store
