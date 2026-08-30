@@ -3079,13 +3079,14 @@ void renderReaderMenu() {
         int bw = utf8Width(itemText[i]) + btnPad * 2;
         if (x + bw > MX + MW - 4) { x = MX + 4; y += btnH + btnGap; }
         bool sel = readerMenuSel == i;
-        fillRect(x, y, bw, btnH, sel);
-        drawRect(x, y, bw, btnH, !sel);
+        fillRect(x, y, bw, btnH, false);   // 恒白底 (官方 A7 光标: 选中=空心框)
+        drawRect(x, y, bw, btnH, false);   // 默认不画框 (未选中无框)
         // 12px 字体基线 ≈ y+13 (wqy12 字高 15px, ascent 11): 文字下移避免与按钮上边框重叠
         // (16px 的 drawTextUTF8 用 +13; 12px 实测 +11 顶到上边框, 用户反馈重叠)
-        u8g2Fonts.setForegroundColor(sel ? 0 : 1);
+        u8g2Fonts.setForegroundColor(1);   // 恒黑字 (选中不再反色白字)
         u8g2Fonts.setCursor(x + btnPad, y + 13);
         u8g2Fonts.print(itemText[i]);
+        if (sel) drawRect(x, y, bw, btnH, true);   // 选中画空心框
         x += bw + btnGap;
         if (y + btnH > maxY) maxY = y + btnH;
     }
@@ -3152,12 +3153,12 @@ static void renderRotSelOverlay() {
     const int rowH = 20, step = 24, top = MY + 22;
     for (int i = 0; i < 4; i++) {
         bool sel = rotSelCursor == i;
-        fillRect(MX + 6, top + i * step, MW - 12, rowH, sel);
-        drawRect(MX + 6, top + i * step, MW - 12, rowH, !sel);
-        drawTextUTF8(MX + 12, top + i * step + 3, opts[i], MW - 36, !sel);
+        fillRect(MX + 6, top + i * step, MW - 12, rowH, false);   // 恒白底 (空心框样式)
+        drawTextUTF8(MX + 12, top + i * step + 3, opts[i], MW - 36, true);   // 恒黑字
         if (rotSelTable[i] == readerRot) {   // 当前方向: 行右缘实心方块
-            fillRect(MX + MW - 17, top + i * step + 7, 6, 6, !sel);
+            fillRect(MX + MW - 17, top + i * step + 7, 6, 6, true);
         }
+        if (sel) drawRect(MX + 6, top + i * step, MW - 12, rowH, true);   // 选中画空心框
     }
     refresh(false);
     fbRot = 90;
@@ -3198,9 +3199,9 @@ void renderMarkMenuOverlay() {
     const int rowH = 24, step = 30, top = MY + 26;
     for (int i = 0; i < 2; i++) {
         bool sel = markMenuSel == i;
-        fillRect(MX + 6, top + i * step, MW - 12, rowH, sel);
-        drawRect(MX + 6, top + i * step, MW - 12, rowH, !sel);
-        drawTextUTF8(MX + 14, top + i * step + 4, opts[i], MW - 32, !sel);
+        fillRect(MX + 6, top + i * step, MW - 12, rowH, false);   // 恒白底 (空心框样式)
+        drawTextUTF8(MX + 14, top + i * step + 4, opts[i], MW - 32, true);   // 恒黑字
+        if (sel) drawRect(MX + 6, top + i * step, MW - 12, rowH, true);   // 选中画空心框
     }
     refresh(false);
     fbRot = 90;
@@ -3846,10 +3847,10 @@ void drawChapterBottomElement(int idx, const char *label) {
     static const int ew[3] = {69, 69, 69};
     int x = ex[idx - 6], w = ew[idx - 6];
     bool sel = chapterSel == idx;
-    fillRect(x, 110, w, 18, sel);
-    drawRect(x, 110, w, 18, !sel);
+    fillRect(x, 110, w, 18, false);   // 恒白底 (官方 A7 光标: 选中=空心框)
     int tw = utf8Width(label);
-    drawTextUTF8(x + (w - tw) / 2, 111, label, tw + 2, !sel);
+    drawTextUTF8(x + (w - tw) / 2, 111, label, tw + 2, true);   // 恒黑字
+    if (sel) drawRect(x, 110, w, 18, true);   // 选中画空心框
 }
 
 void renderChapterList(bool full) {
