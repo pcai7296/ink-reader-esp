@@ -62,18 +62,33 @@ bool wifiManagerStartSta();
 bool wifiManagerIsStaUp();
 void wifiManagerStopSta();
 
-// ---- 设备设置（EEPROM 偏移 232, 独立区, 避开 WifiConfig/CLOCK/WeatherConfig）----
-// 布局兼容说明：hitokotoEnabled/portrait 位于 checksum 之后 → checksum 范围/位置不变，
-// 旧版本(step01)数据无需迁移即可读取；reserved 复用为 portrait (四向: 0=横屏 1=竖屏 2=横屏翻转 3=竖屏翻转,
-// 旧数据 0/1 含义不变=兼容编码, 数值语义由 ink-reader-esp.ino storedToRot/rotToStored 隔离)
+// ---- 设备设置（EEPROM 偏移 232, 独立区）----
+// 布局兼容说明：checksum 之前的字段(magic/version/clockFormat/tzOffsetMin)不变，
+// checksum 范围/位置不变；checksum 之后的旧字段(hitokotoEnabled/portrait)与新字段均不参与校验，
+// 旧版本数据无需迁移即可读取，新字段读默认值。portrait 四向: 0横/1竖/2横翻/3竖翻(兼容编码)。
 struct SettingsConfig {
     uint32_t magic;        // 0x53455433UL 'SET3'
     uint8_t version;       // 1
     uint8_t clockFormat;   // 0=24小时制 1=12小时制
     int16_t tzOffsetMin;   // 时区偏移（分钟），默认 480 = UTC+8
-    uint16_t checksum;
-    uint8_t hitokotoEnabled; // 1=时钟页显示一言 0=关闭（容错：非 0/1 视为 1）
-    uint8_t portrait;      // 阅读旋转方向 0横/1竖/2横翻/3竖翻（兼容编码, 全局持久: 上次模式下次恢复）
+    uint16_t checksum;     // 仅覆盖 magic..tzOffsetMin (checksum 之前字段)
+    // ---- 旧字段 (checksum 之后, 不参与校验) ----
+    uint8_t hitokotoEnabled; // 1=时钟页显示一言 0=关
+    uint8_t portrait;      // 阅读旋转方向 0横/1竖/2横翻/3竖翻
+    // ---- 新增设置字段 (checksum 之后, 不参与校验; 读默认值) ----
+    uint16_t longPressMs;    // 长按触发时间(ms), 默认 500
+    char ntpServer[32];      // NTP 服务器地址, 默认 "cn.pool.ntp.org"
+    uint8_t sdFrequency;     // SD 卡频率(MHz), 默认 20
+    uint8_t fullRefreshMin;  // 时钟全刷间隔(分钟), 默认 25
+    uint8_t calibIntervalMin;// 时钟校准间隔(分钟), 默认 60
+    uint8_t batDisplayType;  // 电池显示 0=电压 1=百分比, 默认 1
+    uint8_t nightUpdate;     // 天气夜间更新 0=不更新 1=更新, 默认 1
+    uint8_t fastFlip;        // 快速翻页 0=关 1=开, 默认 1
+    uint8_t setRotation;     // 屏幕旋转编码, 默认 1 (=270度)
+    uint8_t outputPower;     // 输出功率(dB), 默认 20 (≈19.0)
+    uint8_t sdEnabled;       // SD 卡启用 0=未启用 1=启用, 默认 0
+    uint8_t albumAuto;       // 相册自动播放 0=关 1=开, 默认 0
+    uint8_t reserved[4];     // 预留
 };
 // 读取设置；校验失败返回 false 并填充默认值（24小时制 / UTC+8）
 bool loadSettingsConfig(SettingsConfig &out);
@@ -92,13 +107,40 @@ bool settingsSetClockFormat(uint8_t v);
 bool settingsSetTzOffsetMin(int16_t v);
 bool settingsSetHitokotoEnabled(uint8_t v);
 bool settingsSetPortrait(uint8_t v);
+// 新设置字段便捷读写 (checksum 之后, 读默认值/容错)
+void settingsFillDefaults(SettingsConfig &s);
+uint16_t settingsGetLongPressMs();
+bool settingsSetLongPressMs(uint16_t v);
+const char* settingsGetNtpServer();
+bool settingsSetNtpServer(const char *v);
+uint8_t settingsGetSdFrequency();
+bool settingsSetSdFrequency(uint8_t v);
+uint8_t settingsGetFullRefreshMin();
+bool settingsSetFullRefreshMin(uint8_t v);
+uint8_t settingsGetCalibIntervalMin();
+bool settingsSetCalibIntervalMin(uint8_t v);
+uint8_t settingsGetBatDisplayType();
+bool settingsSetBatDisplayType(uint8_t v);
+uint8_t settingsGetNightUpdate();
+bool settingsSetNightUpdate(uint8_t v);
+uint8_t settingsGetFastFlip();
+bool settingsSetFastFlip(uint8_t v);
+uint8_t settingsGetSetRotation();
+bool settingsSetSetRotation(uint8_t v);
+uint8_t settingsGetOutputPower();
+bool settingsSetOutputPower(uint8_t v);
+uint8_t settingsGetSdEnabled();
+bool settingsSetSdEnabled(uint8_t v);
+uint8_t settingsGetAlbumAuto();
+bool settingsSetAlbumAuto(uint8_t v);
 
-// ---- WebDAV 配置（EEPROM 偏移 256, 独立区; 避开 WifiConfig/CLOCK/Weather/Settings）----
+// ---- WebDAV 配置（EEPROM 偏移 360, 独立区; 避开 WifiConfig/CLOCK/Weather/Settings）----
 // ⚠️ 已弃用（2026, D0 直连手机 HTTP 取代）：结构/EEPROM/保存函数保留不删除，
 //    配网页 UI 已隐藏，/webdav 端点仅返回弃用提示；进度同步改走 progress_sync.cpp 直连手机 8384。
+//    2026 定位到 360 (原 256 让位 SettingsConfig 扩展), endpoint 缩短 128→64。
 struct WebdavConfig {
     uint32_t magic;         // 0x57445632UL 'WDV2'
-    char endpoint[128];     // WebDAV 服务器根(如 https://dav.example.com/dav/)
+    char endpoint[64];      // WebDAV 服务器根(如 https://dav.example.com/dav/)
     char username[40];      // Basic Auth 用户名
     char password[40];      // Basic Auth 密码
     uint16_t checksum;

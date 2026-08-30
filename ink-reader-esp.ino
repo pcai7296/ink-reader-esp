@@ -704,8 +704,18 @@ void renderClockPage(bool full);
 void renderSettingsPage(bool full);
 void settingsHandleKeys(int r2, int r3);
 // 设置页状态（全局，供 enterHomeCard 初始化）
-#define SETTINGS_ITEM_CNT 4
-int settingsSel = 0;           // 光标所在项 0..SETTINGS_ITEM_CNT-1
+#define SETTINGS_MAX_TABS 5
+#define SETTINGS_TAB_WIFI 0
+#define SETTINGS_TAB_SD 1
+#define SETTINGS_TAB_CLOCK 2
+#define SETTINGS_TAB_WEATHER 3
+#define SETTINGS_TAB_BAT 4
+// 每分类标签的设置项数量（官方 5 分类：WiFi/存储卡/时钟/天气&其他/电池校准）
+static const uint8_t kSettingsTabItemCnt[SETTINGS_MAX_TABS] = { 3, 2, 5, 5, 2 };
+static const char *const kSettingsTabNames[SETTINGS_MAX_TABS] = {"WIFI", "存储卡", "时钟", "天气", "电池"};
+int settingsTab = 0;        // 当前分类标签 0..4
+int settingsSel = 0;        // 当前分类下的项索引
+int settingsLevel = 0;      // 0=项列表 1=标签行(中长逐级退回, 复刻官方多级)
 bool settingsTzEdit = false;   // 时区编辑态（±30 分钟调整中）
 char yiyanText[64] = "";       // 一言（进入时钟页时联网获取；空=不显示）
 void showMsg(const char *msg, const char *msg2);
@@ -1036,6 +1046,8 @@ void enterHomeCard() {
             saveSleepRecord();   // 界面快照: 已进入配网页
             break;
         case 5:
+            settingsTab = 0;
+            settingsLevel = 0;
             settingsSel = 0;
             settingsTzEdit = false;
             appMode = APP_SETTINGS;
@@ -1273,41 +1285,133 @@ void renderSettingsPage(bool full) {
     fillRect(0, 0, SCR_W, SCR_H, false);
     drawTextUTF8(4, 2, "设备设置", 100, true);
     fillRect(0, 14, SCR_W, 1, true);
+
+    // ── 顶部标签行 (5 分类) ──
+    const int tabY = 18, tabH = 16;
+    int tx = 4;
+    for (int t = 0; t < SETTINGS_MAX_TABS; t++) {
+        bool tabSel = (settingsLevel == 1) ? (t == settingsTab) : (t == settingsTab);
+        int tw = utf8Width(kSettingsTabNames[t]);
+        fillRect(tx, tabY, tw + 8, tabH, false);
+        drawTextUTF8(tx + 4, tabY, kSettingsTabNames[t], tw + 4, true);
+        if (tabSel) drawRect(tx, tabY, tw + 8, tabH, true);
+        tx += tw + 12;
+    }
+    fillRect(0, tabY + tabH + 1, SCR_W, 1, true);
+
+    // ── 项列表 (当前分类, 光标纵移) ──
+    int cnt = kSettingsTabItemCnt[settingsTab];
+    const int itemY0 = tabY + tabH + 8, rowH = 18;
     SettingsConfig s;
     loadSettingsConfig(s);
-    char line[48];
-    const int rowY[SETTINGS_ITEM_CNT] = { 20, 40, 60, 80 };
-    const int rowH = 20;
-    for (int i = 0; i < SETTINGS_ITEM_CNT; i++) {
-        bool sel = (i == settingsSel);
-        fillRect(0, rowY[i], SCR_W, rowH, false);   // 恒白底 (空心框样式)
-        const char *name = nullptr;
-        switch (i) {
-            case 0: name = "时钟格式"; break;
-            case 1: name = "时区偏移"; break;
-            case 2: name = "一言"; break;
-            case 3: name = "恢复默认"; break;
+    char lastDetail[64];
+    for (int i = 0; i < cnt; i++) {
+        bool sel = (settingsLevel == 0) && (i == settingsSel);
+        int y = itemY0 + i * rowH;
+        char name[24];
+        const char *val = nullptr;
+        bool dev = false;   // 未开发
+        snprintf(lastDetail, sizeof(lastDetail), "%s", "");
+        switch (settingsTab) {
+            case SETTINGS_TAB_WIFI:
+                if (i == 0) { snprintf(name, sizeof(name), "输出功率"); snprintf(lastDetail, sizeof(lastDetail), "%udB", settingsGetOutputPower()); }
+                else if (i == 1) { snprintf(name, sizeof(name), "NTP服务器"); snprintf(lastDetail, sizeof(lastDetail), "%s", settingsGetNtpServer()); }
+                else { snprintf(name, sizeof(name), "SD频率"); snprintf(lastDetail, sizeof(lastDetail), "%uMHz", settingsGetSdFrequency()); }
+                break;
+            case SETTINGS_TAB_SD:
+                if (i == 0) { snprintf(name, sizeof(name), "SD卡启用"); snprintf(lastDetail, sizeof(lastDetail), "%s", settingsGetSdEnabled() ? "启用" : "未启用"); }
+                else { snprintf(name, sizeof(name), "相册自动播放"); dev = true; }
+                break;
+            case SETTINGS_TAB_CLOCK:
+                if (i == 0) { snprintf(name, sizeof(name), "时钟格式"); snprintf(lastDetail, sizeof(lastDetail), "%s", s.clockFormat ? "12小时制" : "24小时制"); }
+                else if (i == 1) { snprintf(name, sizeof(name), "时区"); formatTzOffset(s.tzOffsetMin, lastDetail, sizeof(lastDetail)); }
+                else if (i == 2) { snprintf(name, sizeof(name), "全刷间隔"); snprintf(lastDetail, sizeof(lastDetail), "%u分钟", settingsGetFullRefreshMin()); }
+                else if (i == 3) { snprintf(name, sizeof(name), "校准间隔"); snprintf(lastDetail, sizeof(lastDetail), "%u分钟", settingsGetCalibIntervalMin()); }
+                else { snprintf(name, sizeof(name), "误差补偿"); dev = true; }
+                break;
+            case SETTINGS_TAB_WEATHER:
+                if (i == 0) {
+                    snprintf(name, sizeof(name), "天气城市");
+                    WeatherConfig wc; loadWeatherConfig(wc);
+                    snprintf(lastDetail, sizeof(lastDetail), "%s", wc.city[0] ? wc.city : "深圳");
+                } else if (i == 1) { snprintf(name, sizeof(name), "夜间更新"); snprintf(lastDetail, sizeof(lastDetail), "%s", settingsGetNightUpdate() ? "更新" : "不更新"); }
+                else if (i == 2) { snprintf(name, sizeof(name), "长按触发"); snprintf(lastDetail, sizeof(lastDetail), "%ums", settingsGetLongPressMs()); }
+                else if (i == 3) { snprintf(name, sizeof(name), "屏幕旋转"); snprintf(lastDetail, sizeof(lastDetail), "方向%u", settingsGetSetRotation()); }
+                else { snprintf(name, sizeof(name), "快速翻页"); snprintf(lastDetail, sizeof(lastDetail), "%s", settingsGetFastFlip() ? "开" : "关"); }
+                break;
+            case SETTINGS_TAB_BAT:
+                if (i == 0) { snprintf(name, sizeof(name), "电池显示"); snprintf(lastDetail, sizeof(lastDetail), "%s", settingsGetBatDisplayType() ? "百分比" : "电压"); }
+                else { snprintf(name, sizeof(name), "电压校准"); dev = true; }
+                break;
+            default: snprintf(name, sizeof(name), "?"); break;
         }
-        drawTextUTF8(6, rowY[i] + 2, name, 110, true);   // 恒黑字
-        if (i == 0) {
-            snprintf(line, sizeof(line), "%s", s.clockFormat ? "12小时制" : "24小时制");
-        } else if (i == 1) {
-            formatTzOffset(s.tzOffsetMin, line, sizeof(line));
-        } else if (i == 2) {
-            snprintf(line, sizeof(line), "%s", s.hitokotoEnabled ? "开启" : "关闭");
+        fillRect(0, y, SCR_W, rowH, false);
+        drawTextUTF8(6, y + 2, name, 110, true);
+        if (dev) {
+            drawTextUTF8(150, y + 2, "未开发", 140, true);
+        } else if (val) {
+            drawTextUTF8(150, y + 2, val, 140, true);
         } else {
-            snprintf(line, sizeof(line), "%s", "执行");
+            drawTextUTF8(150, y + 2, lastDetail, 140, true);
         }
-        drawTextUTF8(150, rowY[i] + 2, line, 140, true);   // 恒黑字
-        if (sel) drawRect(0, rowY[i], SCR_W, rowH, true);   // 选中画空心框
+        if (sel) drawRect(0, y, SCR_W, rowH, true);
     }
     if (settingsTzEdit) {
-        // 编辑态指示条（覆盖底部，局部提示）
         drawTextUTF8(4, 104, "中/右短按调整 右长保存 中长取消", 288, true);
     } else {
-        drawTextUTF8(4, 104, "右长执行 中长返回", 288, true);
+        drawTextUTF8(4, 104, "右短:下/编辑 中短:上 右长:执行 中长:返回", 288, true);
     }
     refresh(full);
+}
+
+// 执行设置页当前项 (toggle 切换 / enum 循环 / 进入编辑 / 未开发提示)
+void settingsExecItem() {
+    int tab = settingsTab, i = settingsSel;
+    // 未开发项: 统一提示
+    if ((tab == SETTINGS_TAB_SD && i == 1) || (tab == SETTINGS_TAB_CLOCK && i == 4) ||
+        (tab == SETTINGS_TAB_BAT && i == 1)) {
+        showMsg("未开发", "此项后续版本开放");
+        return;
+    }
+    switch (tab) {
+        case SETTINGS_TAB_WIFI:
+            if (i == 0) { // 输出功率 10-20 循环
+                uint8_t v = settingsGetOutputPower();
+                settingsSetOutputPower(v >= 20 ? 10 : v + 1);
+            } else if (i == 1) { // NTP 编辑(简化提示, 真编辑走 Web)
+                showMsg("NTP服务器", "请在配网页修改");
+            } else { // SD频率 5-40 循环
+                uint8_t v = settingsGetSdFrequency();
+                settingsSetSdFrequency(v >= 40 ? 5 : v + 5);
+            }
+            break;
+        case SETTINGS_TAB_SD:
+            if (i == 0) settingsSetSdEnabled(settingsGetSdEnabled() ? 0 : 1);
+            break;
+        case SETTINGS_TAB_CLOCK:
+            if (i == 0) settingsSetClockFormat(settingsGetClockFormat() ? 0 : 1);
+            else if (i == 1) settingsTzEdit = true;
+            else if (i == 2) { // 全刷间隔 1-120 循环
+                uint8_t v = settingsGetFullRefreshMin();
+                settingsSetFullRefreshMin(v >= 120 ? 1 : v + 5);
+            } else if (i == 3) { // 校准间隔 10-720 循环
+                uint8_t v = settingsGetCalibIntervalMin();
+                settingsSetCalibIntervalMin(v >= 720 ? 10 : v * 2);
+            }
+            break;
+        case SETTINGS_TAB_WEATHER:
+            if (i == 0) showMsg("天气城市", "请在配网页修改");
+            else if (i == 1) settingsSetNightUpdate(settingsGetNightUpdate() ? 0 : 1);
+            else if (i == 2) { // 长按触发 100-5000 循环
+                uint16_t v = settingsGetLongPressMs();
+                settingsSetLongPressMs(v >= 5000 ? 100 : v + 100);
+            } else if (i == 3) settingsSetSetRotation((settingsGetSetRotation() + 1) % 4);
+            else if (i == 4) settingsSetFastFlip(settingsGetFastFlip() ? 0 : 1);
+            break;
+        case SETTINGS_TAB_BAT:
+            if (i == 0) settingsSetBatDisplayType(settingsGetBatDisplayType() ? 0 : 1);
+            break;
+    }
 }
 
 void settingsHandleKeys(int r2, int r3) {
@@ -1339,49 +1443,40 @@ void settingsHandleKeys(int r2, int r3) {
         delay(30);
         return;
     }
-    if (r2 == 1) {                           // 中短: 上移
-        settingsSel = (settingsSel + SETTINGS_ITEM_CNT - 1) % SETTINGS_ITEM_CNT;
-        renderSettingsPage(false);
-    } else if (r3 == 1) {                    // 右短: 下移
-        settingsSel = (settingsSel + 1) % SETTINGS_ITEM_CNT;
-        renderSettingsPage(false);
-    } else if (r3 == 2) {                    // 右长: 执行
-        switch (settingsSel) {
-            case 0: {                        // 时钟格式切换
-                SettingsConfig s;
-                loadSettingsConfig(s);
-                settingsSetClockFormat(s.clockFormat ? 0 : 1);
-                renderSettingsPage(false);
-                break;
-            }
-            case 1: {                        // 进入时区编辑
-                settingsTzEdit = true;
-                renderSettingsPage(false);
-                break;
-            }
-            case 2: {                        // 一言开关切换
-                SettingsConfig s;
-                loadSettingsConfig(s);
-                settingsSetHitokotoEnabled(s.hitokotoEnabled ? 0 : 1);
-                renderSettingsPage(false);
-                break;
-            }
-            case 3: {                        // 恢复默认
-                SettingsConfig s;
-                memset(&s, 0, sizeof(s));
-                s.clockFormat = 0;
-                s.tzOffsetMin = 480;
-                s.hitokotoEnabled = 1;
-                saveSettingsConfig(s);
-                configTime(480 * 60, 0, "cn.pool.ntp.org");   // 立即生效（当前会话）
-                showMsg("已恢复默认", "24小时 / UTC+8 / 一言开");
-                break;
-            }
+    int cnt = kSettingsTabItemCnt[settingsTab];
+    if (settingsLevel == 0) {
+        // Level 0: 项列表
+        if (r2 == 1) {                         // 中短: 上移项
+            settingsSel = (settingsSel + cnt - 1) % cnt;
+            renderSettingsPage(false);
+        } else if (r3 == 1) {                  // 右短: 下移项
+            settingsSel = (settingsSel + 1) % cnt;
+            renderSettingsPage(false);
+        } else if (r2 == 2) {                  // 中长: 回到标签行层
+            settingsLevel = 1;
+            renderSettingsPage(false);
+        } else if (r3 == 2) {                  // 右长: 执行/编辑当前项
+            settingsExecItem();
+            renderSettingsPage(false);
         }
-    } else if (r2 == 2) {                    // 中长: 返回首页
-        appMode = APP_HOME;
-        renderHome(true);
-        saveSleepRecord();
+    } else {
+        // Level 1: 标签行
+        if (r3 == 1) {                         // 右短: 下一个标签
+            settingsTab = (settingsTab + 1) % SETTINGS_MAX_TABS;
+            settingsSel = 0;
+            renderSettingsPage(false);
+        } else if (r2 == 1) {                  // 中短: 上一个标签
+            settingsTab = (settingsTab + SETTINGS_MAX_TABS - 1) % SETTINGS_MAX_TABS;
+            settingsSel = 0;
+            renderSettingsPage(false);
+        } else if (r3 == 2) {                  // 右长: 进入项列表层
+            settingsLevel = 0;
+            renderSettingsPage(false);
+        } else if (r2 == 2) {                  // 中长: 返回首页
+            appMode = APP_HOME;
+            renderHome(true);
+            saveSleepRecord();
+        }
     }
     delay(30);
 }

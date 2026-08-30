@@ -650,7 +650,39 @@ void handleRoot() {
   if (s.portrait == 2) server.sendContent_P((const char*)F(" selected"));
   server.sendContent_P((const char*)F(">180° 横翻</option><option value='1'"));
   if (s.portrait == 1) server.sendContent_P((const char*)F(" selected"));
-  server.sendContent_P((const char*)F(">270° 竖屏</option></select><br><button>保存设置</button></form>"));
+  server.sendContent_P((const char*)F(">270° 竖屏</option></select><br>"));
+  // ---- 新增设置字段 (官方设置项) ----
+  server.sendContent_P((const char*)F("输出功率 <select name='outputPower'><option value='19'"));
+  if (s.outputPower == 19) server.sendContent_P((const char*)F(" selected"));
+  server.sendContent_P((const char*)F(">19dB</option><option value='20'"));
+  if (s.outputPower == 20) server.sendContent_P((const char*)F(" selected"));
+  server.sendContent_P((const char*)F(">20dB</option><option value='18'"));
+  if (s.outputPower == 18) server.sendContent_P((const char*)F(" selected"));
+  server.sendContent_P((const char*)F(">18dB</option></select><br>NTP服务器 <input name='ntpServer' type='text' maxlength='31' value='"));
+  server.sendContent(String(s.ntpServer));
+  server.sendContent_P((const char*)F("'><br>SD频率 <input name='sdFrequency' type='number' min='5' max='40' value='"));
+  server.sendContent(String(s.sdFrequency));
+  server.sendContent_P((const char*)F("'><br>时钟全刷间隔（分钟）<input name='fullRefresh' type='number' min='1' max='120' value='"));
+  server.sendContent(String(s.fullRefreshMin));
+  server.sendContent_P((const char*)F("'><br>时钟校准间隔（分钟）<input name='calibInterval' type='number' min='1' max='720' value='"));
+  server.sendContent(String(s.calibIntervalMin));
+  server.sendContent_P((const char*)F("'><br>电池显示 <select name='batDisplay'><option value='1'"));
+  if (s.batDisplayType == 1) server.sendContent_P((const char*)F(" selected"));
+  server.sendContent_P((const char*)F(">百分比</option><option value='0'"));
+  if (s.batDisplayType == 0) server.sendContent_P((const char*)F(" selected"));
+  server.sendContent_P((const char*)F(">电压</option></select><br>夜间更新 <select name='nightUpdate'><option value='1'"));
+  if (s.nightUpdate == 1) server.sendContent_P((const char*)F(" selected"));
+  server.sendContent_P((const char*)F(">更新</option><option value='0'"));
+  if (s.nightUpdate == 0) server.sendContent_P((const char*)F(" selected"));
+  server.sendContent_P((const char*)F(">不更新</option></select><br>快速翻页 <select name='fastFlip'><option value='1'"));
+  if (s.fastFlip == 1) server.sendContent_P((const char*)F(" selected"));
+  server.sendContent_P((const char*)F(">开</option><option value='0'"));
+  if (s.fastFlip == 0) server.sendContent_P((const char*)F(" selected"));
+  server.sendContent_P((const char*)F(">关</option></select><br>屏幕旋转(0-3) <input name='setRotation' type='number' min='0' max='3' value='"));
+  server.sendContent(String(s.setRotation));
+  server.sendContent_P((const char*)F("'><br><button>保存设置</button></form>"));
+  // 未开发项提示（误差补偿/相册/电压校准/时钟风格 后续版本）
+  server.sendContent_P((const char*)F("<p style='color:#888'>误差补偿、时钟风格、相册自动播放、电压校准：未开发（后续版本开放)</p>"));
   // 连接设备: 局域网/热点下各选一台(运行进度服务器 App 的手机)作为连接对象, 配网时自动推送本机地址
   server.sendContent_P((const char*)F("<h3>连接设备（配网后自动向选中设备推送本机地址）</h3><button type='button' onclick='scanDevices()'>扫描设备</button> <span id='devHint'></span><br>局域网设备 <select id='lanSel'></select><br>热点设备 <select id='apSel'></select><br><button type='button' onclick='saveTarget()'>保存连接对象</button>"));
   server.sendContent_P((const char*)F("<p><a href='/fs/edit'>文件管理</a> · <a href='/status'>状态 JSON</a> · <a href='/info'>设置 JSON</a> · <a href='/update'>固件升级</a></p>"));
@@ -832,18 +864,18 @@ bool saveWeatherConfig(const WeatherConfig &in) {
   return EEPROM.commit();
 }
 
-// ---- 设备设置（EEPROM 偏移 232, 独立区; 结构 12 字节, 232+12=244 <= 256）----
+// ---- 设备设置（EEPROM 偏移 232, 独立区; 结构扩展, 232+~70=302 <= 360）----
 const int SETTINGS_EEPROM_ADDR = 232;
 const uint32_t SETTINGS_MAGIC = 0x53455433UL;   // 'SET3'
 const int16_t DEFAULT_TZ_OFFSET_MIN = 480;       // UTC+8
-// 编译期保护：设置区不得与天气区(160-231)重叠、不得超出 256 字节 EEPROM
+// 编译期保护：checksum 之前字段(到 tzOffsetMin)不超 24 字节; 整个结构不超 360 让位区
 static_assert(offsetof(SettingsConfig, checksum) + sizeof(uint16_t) <= 24,
-              "SettingsConfig too large for EEPROM tail");
-static_assert(SETTINGS_EEPROM_ADDR + sizeof(SettingsConfig) <= 256,
-              "Settings region overflows EEPROM_SIZE");
+              "SettingsConfig checksum region too large");
+static_assert(SETTINGS_EEPROM_ADDR + sizeof(SettingsConfig) <= 360,
+              "Settings region overflows (must stay <= 360 before Webdav)");
 
-// ---- WebDAV 配置（EEPROM 偏移 256, 独立区; 结构 214 字节, 256+214=470 <= 512）----
-const int WEBDAV_EEPROM_ADDR = 256;
+// ---- WebDAV 配置（EEPROM 偏移 360, 独立区; 结构 150 字节, 360+150=510 <= 512）----
+const int WEBDAV_EEPROM_ADDR = 360;
 const uint32_t WEBDAV_MAGIC = 0x57445632UL;   // 'WDV2'
 static_assert(WEBDAV_EEPROM_ADDR + sizeof(WebdavConfig) <= 512,
               "Webdav region overflows EEPROM_SIZE");
@@ -880,6 +912,23 @@ uint16_t settingsChecksum(const SettingsConfig &value) {
                        offsetof(SettingsConfig, checksum));
 }
 
+// 新设置字段默认值/容错：checksum 之后字段不参与校验，非法或 0xFF 残留→填默认
+void settingsFillDefaults(SettingsConfig &s) {
+  if (s.longPressMs == 0 || s.longPressMs == 0xFFFF) s.longPressMs = 500;
+  // ntpServer: 首字节非法(0xFF/0) → 填默认
+  if (s.ntpServer[0] == 0 || s.ntpServer[0] == 0xFF) strncpy(s.ntpServer, "cn.pool.ntp.org", sizeof(s.ntpServer) - 1);
+  if (s.sdFrequency == 0 || s.sdFrequency > 40) s.sdFrequency = 20;
+  if (s.fullRefreshMin == 0 || s.fullRefreshMin > 120) s.fullRefreshMin = 25;
+  if (s.calibIntervalMin == 0 || s.calibIntervalMin > 720) s.calibIntervalMin = 60;
+  if (s.batDisplayType > 1) s.batDisplayType = 1;
+  if (s.nightUpdate > 1) s.nightUpdate = 1;
+  if (s.fastFlip > 1) s.fastFlip = 1;
+  if (s.setRotation > 3) s.setRotation = 1;
+  if (s.outputPower == 0 || s.outputPower > 20) s.outputPower = 19;
+  if (s.sdEnabled > 1) s.sdEnabled = 0;
+  if (s.albumAuto > 1) s.albumAuto = 0;
+}
+
 bool loadSettingsConfig(SettingsConfig &out) {
   EEPROM.begin(EEPROM_SIZE);
   EEPROM.get(SETTINGS_EEPROM_ADDR, out);
@@ -892,11 +941,14 @@ bool loadSettingsConfig(SettingsConfig &out) {
     out.clockFormat = 0;
     out.tzOffsetMin = DEFAULT_TZ_OFFSET_MIN;
     out.hitokotoEnabled = 1;
+    settingsFillDefaults(out);
     return false;
   }
   // 兼容旧数据：checksum 之后的新字段可能是 EEPROM 残留（0xFF 或旧 padding）
   if (out.hitokotoEnabled > 1) out.hitokotoEnabled = 1;
   if (out.portrait > 3) out.portrait = 0;   // 四向: 0横/1竖/2横翻/3竖翻; 非法残留(如 0xFF)→旧默认横屏
+  // 新字段: 非法残留/无值 → 填默认(0xFF 或 0 均视为未设置)
+  settingsFillDefaults(out);
   return true;
 }
 
@@ -968,6 +1020,92 @@ bool settingsSetPortrait(uint8_t v) {
   return saveSettingsConfig(s);
 }
 
+uint16_t settingsGetLongPressMs() {
+  SettingsConfig s; loadSettingsConfig(s); return s.longPressMs;
+}
+bool settingsSetLongPressMs(uint16_t v) {
+  if (v < 100 || v > 5000) return false;
+  SettingsConfig s; loadSettingsConfig(s); s.longPressMs = v; return saveSettingsConfig(s);
+}
+const char* settingsGetNtpServer() {
+  SettingsConfig s; loadSettingsConfig(s); return s.ntpServer;
+}
+bool settingsSetNtpServer(const char *v) {
+  if (!v || strlen(v) >= sizeof(SettingsConfig().ntpServer)) return false;
+  SettingsConfig s; loadSettingsConfig(s); strncpy(s.ntpServer, v, sizeof(s.ntpServer) - 1);
+  s.ntpServer[sizeof(s.ntpServer) - 1] = '\0'; return saveSettingsConfig(s);
+}
+uint8_t settingsGetSdFrequency() {
+  SettingsConfig s; loadSettingsConfig(s); return s.sdFrequency;
+}
+bool settingsSetSdFrequency(uint8_t v) {
+  if (v < 5 || v > 40) return false;
+  SettingsConfig s; loadSettingsConfig(s); s.sdFrequency = v; return saveSettingsConfig(s);
+}
+uint8_t settingsGetFullRefreshMin() {
+  SettingsConfig s; loadSettingsConfig(s); return s.fullRefreshMin;
+}
+bool settingsSetFullRefreshMin(uint8_t v) {
+  if (v < 1 || v > 120) return false;
+  SettingsConfig s; loadSettingsConfig(s); s.fullRefreshMin = v; return saveSettingsConfig(s);
+}
+uint8_t settingsGetCalibIntervalMin() {
+  SettingsConfig s; loadSettingsConfig(s); return s.calibIntervalMin;
+}
+bool settingsSetCalibIntervalMin(uint8_t v) {
+  if (v < 1 || v > 720) return false;
+  SettingsConfig s; loadSettingsConfig(s); s.calibIntervalMin = v; return saveSettingsConfig(s);
+}
+uint8_t settingsGetBatDisplayType() {
+  SettingsConfig s; loadSettingsConfig(s); return s.batDisplayType;
+}
+bool settingsSetBatDisplayType(uint8_t v) {
+  if (v > 1) return false;
+  SettingsConfig s; loadSettingsConfig(s); s.batDisplayType = v; return saveSettingsConfig(s);
+}
+uint8_t settingsGetNightUpdate() {
+  SettingsConfig s; loadSettingsConfig(s); return s.nightUpdate;
+}
+bool settingsSetNightUpdate(uint8_t v) {
+  if (v > 1) return false;
+  SettingsConfig s; loadSettingsConfig(s); s.nightUpdate = v; return saveSettingsConfig(s);
+}
+uint8_t settingsGetFastFlip() {
+  SettingsConfig s; loadSettingsConfig(s); return s.fastFlip;
+}
+bool settingsSetFastFlip(uint8_t v) {
+  if (v > 1) return false;
+  SettingsConfig s; loadSettingsConfig(s); s.fastFlip = v; return saveSettingsConfig(s);
+}
+uint8_t settingsGetSetRotation() {
+  SettingsConfig s; loadSettingsConfig(s); return s.setRotation;
+}
+bool settingsSetSetRotation(uint8_t v) {
+  if (v > 3) return false;
+  SettingsConfig s; loadSettingsConfig(s); s.setRotation = v; return saveSettingsConfig(s);
+}
+uint8_t settingsGetOutputPower() {
+  SettingsConfig s; loadSettingsConfig(s); return s.outputPower;
+}
+bool settingsSetOutputPower(uint8_t v) {
+  if (v < 10 || v > 20) return false;
+  SettingsConfig s; loadSettingsConfig(s); s.outputPower = v; return saveSettingsConfig(s);
+}
+uint8_t settingsGetSdEnabled() {
+  SettingsConfig s; loadSettingsConfig(s); return s.sdEnabled;
+}
+bool settingsSetSdEnabled(uint8_t v) {
+  if (v > 1) return false;
+  SettingsConfig s; loadSettingsConfig(s); s.sdEnabled = v; return saveSettingsConfig(s);
+}
+uint8_t settingsGetAlbumAuto() {
+  SettingsConfig s; loadSettingsConfig(s); return s.albumAuto;
+}
+bool settingsSetAlbumAuto(uint8_t v) {
+  if (v > 1) return false;
+  SettingsConfig s; loadSettingsConfig(s); s.albumAuto = v; return saveSettingsConfig(s);
+}
+
 // ---- Web 端点：设备设置（/settings）与系统信息（/info） ----
 // 与 handleSave 分离：/wifi 管网络与天气，/settings 管设置页字段（时钟格式/时区/一言）
 void handleSettingsSave() {
@@ -988,6 +1126,48 @@ void handleSettingsSave() {
   if (server.hasArg("portrait")) {   // 阅读旋转方向 0横/1竖/2横翻/3竖翻 (全局持久, 非法值由 setter 拒绝)
     int v = server.arg("portrait").toInt();
     if (settingsSetPortrait(static_cast<uint8_t>(v))) any = true;
+  }
+  // ---- 新增设置字段 (官方设置项) ----
+  if (server.hasArg("longPress")) {
+    int v = server.arg("longPress").toInt();
+    if (settingsSetLongPressMs(static_cast<uint16_t>(v))) any = true;
+  }
+  if (server.hasArg("ntpServer")) settingsSetNtpServer(server.arg("ntpServer").c_str());
+  if (server.hasArg("sdFrequency")) {
+    int v = server.arg("sdFrequency").toInt();
+    if (settingsSetSdFrequency(static_cast<uint8_t>(v))) any = true;
+  }
+  if (server.hasArg("fullRefresh")) {
+    int v = server.arg("fullRefresh").toInt();
+    if (settingsSetFullRefreshMin(static_cast<uint8_t>(v))) any = true;
+  }
+  if (server.hasArg("calibInterval")) {
+    int v = server.arg("calibInterval").toInt();
+    if (settingsSetCalibIntervalMin(static_cast<uint8_t>(v))) any = true;
+  }
+  if (server.hasArg("batDisplay")) {
+    int v = server.arg("batDisplay").toInt();
+    if (settingsSetBatDisplayType(static_cast<uint8_t>(v == 1 ? 1 : 0))) any = true;
+  }
+  if (server.hasArg("nightUpdate")) {
+    int v = server.arg("nightUpdate").toInt();
+    if (settingsSetNightUpdate(static_cast<uint8_t>(v == 1 ? 1 : 0))) any = true;
+  }
+  if (server.hasArg("fastFlip")) {
+    int v = server.arg("fastFlip").toInt();
+    if (settingsSetFastFlip(static_cast<uint8_t>(v == 1 ? 1 : 0))) any = true;
+  }
+  if (server.hasArg("setRotation")) {
+    int v = server.arg("setRotation").toInt();
+    if (settingsSetSetRotation(static_cast<uint8_t>(v))) any = true;
+  }
+  if (server.hasArg("outputPower")) {
+    int v = server.arg("outputPower").toInt();
+    if (settingsSetOutputPower(static_cast<uint8_t>(v))) any = true;
+  }
+  if (server.hasArg("sdEnabled")) {
+    int v = server.arg("sdEnabled").toInt();
+    if (settingsSetSdEnabled(static_cast<uint8_t>(v == 1 ? 1 : 0))) any = true;
   }
   if (!any) {
     server.send(400, "text/plain; charset=utf-8", "缺少有效参数");
