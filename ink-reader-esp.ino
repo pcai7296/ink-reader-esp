@@ -330,13 +330,13 @@ void drawSmallIcon(int x, int y, int idx, bool black) {
     }
 }
 
-// 13x13 首页导航图标：navIcons[6][26] PROGMEM，bit=1 黑像素，每行 2 字节 MSB left
-// 顺序: 0=文件 1=时钟 2=天气 3=配网 4=设置 5=返回
+// 22x22 首页导航线条描边图标：navIcons[6][66] PROGMEM，bit=1 黑像素，每行 3 字节 MSB left
+// 顺序: 0=续读 1=文件 2=时钟 3=天气 4=配网 5=设置
 void drawNavIcon(int x, int y, int idx, bool black) {
     if (idx < 0 || idx > 5) return;
-    for (int r = 0; r < 13; r++) {
-        for (int c = 0; c < 13; c++) {
-            uint8_t byte = pgm_read_byte(&navIcons[idx][r * 2 + c / 8]);
+    for (int r = 0; r < 22; r++) {
+        for (int c = 0; c < 22; c++) {
+            uint8_t byte = pgm_read_byte(&navIcons[idx][r * 3 + c / 8]);
             if (byte & (0x80 >> (c % 8))) setPix(x + c, y + r, black);
         }
     }
@@ -945,8 +945,8 @@ void renderHome(bool full) {
     if (isCharging()) drawLightningIcon(276, 1, true);  // 充电: 画闪电图标
     fillRect(0, 15, SCR_W, 1, true);
 
-    // ── 主卡: 继续阅读 (y18-62, 高44) ──
-    const int mY = 18, mH = 44;
+    // ── 主卡: 继续阅读 (y18-54, 高37, 仅信息展示) ──
+    const int mY = 18, mH = 37;
     char recentTitle[96];
     char recentDetail[56];
     if (!sdAvailable) {
@@ -961,45 +961,47 @@ void renderHome(bool full) {
         snprintf(recentTitle, sizeof(recentTitle), "%s", name);
     }
     fillRect(2, mY, 292, mH, false);
-    drawTextUTF8(6, mY, "继续阅读", 60, true);
-    drawTextUTF8(6, mY + 14, recentTitle, 250, true);
+    drawTextUTF8(6, mY + 2, "继续阅读", 60, true);
+    drawTextUTF8(6, mY + 18, recentTitle, 250, true);
     // 进度条 + 页码百分比
     if (recentReadValid && recentReadTotalPages > 0) {
         uint32_t pct = (uint32_t)(((uint64_t)recentReadPage * 100) / recentReadTotalPages);
         if (pct > 100) pct = 100;
-        const int pbX = 6, pbY = mY + 32, pbW = 190, pbH = 6;
+        const int pbX = 6, pbY = mY + 30, pbW = 190, pbH = 5;
         fillRect(pbX, pbY, pbW, pbH, false);
         drawRect(pbX, pbY, pbW, pbH, true);
         int fillW = (int)((uint64_t)pbW * pct / 100);
         if (fillW > 0) fillRect(pbX + 1, pbY + 1, fillW - 1, pbH - 2, true);
         char pr[20];
         snprintf(pr, sizeof(pr), "%lu%%", (unsigned long)pct);
-        drawTextUTF8(pbX + pbW + 4, pbY - 8, pr, 40, true);
+        drawTextUTF8(pbX + pbW + 4, pbY - 6, pr, 40, true);
         char pg[20];
         snprintf(pg, sizeof(pg), "%lu/%lu页", (unsigned long)recentReadPage, (unsigned long)recentReadTotalPages);
-        drawTextUTF8(228, pbY - 8, pg, 68, true);
+        drawTextUTF8(228, pbY - 6, pg, 68, true);
     } else {
-        drawTextUTF8(6, mY + 30, recentDetail, 200, true);
+        drawTextUTF8(6, mY + 28, recentDetail, 200, true);
     }
     drawRect(2, mY, 292, mH, true);   // 主卡仅信息展示, 不画选中框 (非按钮)
 
-    // ── 导航 2行×3列 (y66-124) ──
+    // ── 导航 2行×3列 (y58-124) ──
     // 位0-5: 续读/文件/时钟 | 天气/配网/设置 (续读替换返回放第一位)
     static const char *const navNames[6] = {"续读", "文件", "时钟", "天气", "配网", "设置"};
     static const int navX[3] = {2, 99, 196};
-    static const int navY[2] = {66, 98};
-    const int nw = 93, nh = 28;
+    static const int navY[2] = {58, 94};
+    const int nw = 93, nh = 32;
     for (int i = 0; i < 6; i++) {
         int col = i % 3, row = i / 3;
         int nx = navX[col], ny = navY[row];
         bool sel = homeSel == i;
         fillRect(nx, ny, nw, nh, false);
         int tw = utf8Width(navNames[i]);
-        // 图标(13) + 间距(4) + 文字 整体水平居中
-        int blockW = 13 + 4 + tw;
+        // 图标(22) + 间距(6) + 文字 整体水平居中; 图标与文字垂直中心对齐
+        int blockW = 22 + 6 + tw;
         int bx = nx + (nw - blockW) / 2;
-        drawNavIcon(bx, ny + (nh - 13) / 2, i, true);
-        drawTextUTF8(bx + 17, ny + (nh - 16) / 2, navNames[i], nw - 4, true);
+        int iconY = ny + (nh - 22) / 2;   // 图标垂直居中
+        int textY = ny + nh / 2 - 5;      // 文字基线 (垂直居中于图标)
+        drawNavIcon(bx, iconY, i, true);
+        drawTextUTF8(bx + 28, textY, navNames[i], nw - 4, true);
         if (sel) drawRect(nx, ny, nw, nh, true);
     }
     refresh(full);
