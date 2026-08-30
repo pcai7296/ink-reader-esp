@@ -966,14 +966,14 @@ void renderHome(bool full) {
     if (recentReadValid && recentReadTotalPages > 0) {
         uint32_t pct = (uint32_t)(((uint64_t)recentReadPage * 100) / recentReadTotalPages);
         if (pct > 100) pct = 100;
-        const int pbX = 6, pbY = mY + 25, pbW = 190, pbH = 5;
+        const int pbX = 6, pbY = mY + 25, pbW = 140, pbH = 5;
         fillRect(pbX, pbY, pbW, pbH, false);
         drawRect(pbX, pbY, pbW, pbH, true);
         int fillW = (int)((uint64_t)pbW * pct / 100);
         if (fillW > 0) fillRect(pbX + 1, pbY + 1, fillW - 1, pbH - 2, true);
         char pr[12];
         formatProgressPercent((uint64_t)recentReadPage, (uint64_t)recentReadTotalPages, pr);
-        drawTextUTF8(pbX + pbW + 4, pbY - 5, pr, 40, true);
+        drawTextUTF8(pbX + pbW + 6, pbY - 5, pr, 60, true);
         char pg[20];
         snprintf(pg, sizeof(pg), "%lu/%lu页", (unsigned long)recentReadPage, (unsigned long)recentReadTotalPages);
         drawTextUTF8(228, pbY - 5, pg, 68, true);
