@@ -60,51 +60,50 @@ def icon_clock():
     return img
 
 
-# 3 天气: 云 + 太阳 (线条描边)
+# 3 天气: 实心太阳 (实心圆 + 8 粗芒, 低分辨率下实心最清晰)
 def icon_weather():
     img = new_img()
     d = ImageDraw.Draw(img)
-    # 太阳 (右上)
-    d.ellipse([12, 2, 19, 9], outline=BLACK, width=2)
-    for a in range(8):
-        ang = a * math.pi / 4
-        x1 = 15.5 + 6.5 * math.cos(ang)
-        y1 = 5.5 + 6.5 * math.sin(ang)
-        x2 = 15.5 + 8.5 * math.cos(ang)
-        y2 = 5.5 + 8.5 * math.sin(ang)
-        d.line([x1, y1, x2, y2], fill=BLACK, width=2)
-    # 云 (左下, 三圆弧 + 底)
-    d.ellipse([3, 10, 9, 16], outline=BLACK, width=2)
-    d.ellipse([7, 7, 14, 14], outline=BLACK, width=2)
-    d.ellipse([11, 10, 17, 16], outline=BLACK, width=2)
-    d.rectangle([3, 14, 17, 16], outline=BLACK, width=2)
+    d.ellipse([7, 7, 14, 14], fill=BLACK)   # 实心中心圆
+    cx, cy = 10.5, 10.5
+    # 8 条粗光芒 (固定长度, 分布整齐)
+    for i in range(8):
+        a = i * math.pi / 4
+        x1 = cx + 5.6 * math.cos(a)
+        y1 = cy + 5.6 * math.sin(a)
+        x2 = cx + 7.8 * math.cos(a)
+        y2 = cy + 7.8 * math.sin(a)
+        d.line([x1, y1, x2, y2], fill=BLACK, width=3)
     return img
 
 
-# 4 配网: WiFi 信号 (三弧线 + 底点, 线条)
+# 4 配网: 实心 WiFi (3 粗弧 + 底部单点)
 def icon_wifi():
     img = new_img()
     d = ImageDraw.Draw(img)
-    d.ellipse([9, 17, 13, 21], fill=BLACK)   # 底点
-    for r, ytop in [(4, 12), (7, 8), (10, 4)]:
-        d.arc([11 - r, ytop, 11 + r, ytop + 2 * r], start=180, end=360, fill=BLACK, width=2)
+    d.ellipse([9, 15, 13, 19], fill=BLACK)   # 底部圆点
+    # 3 条粗弧 (同心, 下方张开)
+    for r, ytop in [(5, 9), (8, 5), (11, 1)]:
+        d.arc([11 - r, ytop, 11 + r, ytop + 2 * r], start=210, end=330, fill=BLACK, width=3)
     return img
 
 
-# 5 设置: 齿轮 (外圆2px + 8 粗齿 + 中心孔, 线条)
+# 5 设置: 实心齿轮 (外圆环 + 均匀短齿块)
 def icon_settings():
     img = new_img()
     d = ImageDraw.Draw(img)
-    d.ellipse([7, 7, 15, 15], outline=BLACK, width=2)   # 外圆
+    # 8 个矩形短齿块 (均匀分布)
+    cx, cy = 11, 11
     for i in range(8):
         a = i * math.pi / 4
-        x1 = 11 + 4.2 * math.cos(a)
-        y1 = 11 + 4.2 * math.sin(a)
-        x2 = 11 + 7.5 * math.cos(a)
-        y2 = 11 + 7.5 * math.sin(a)
-        d.line([x1, y1, x2, y2], fill=BLACK, width=2)
-    d.ellipse([9, 9, 13, 13], fill=WHITE)   # 中心孔
-    d.ellipse([9, 9, 13, 13], outline=BLACK, width=2)
+        x1 = cx + 4.0 * math.cos(a)
+        y1 = cy + 4.0 * math.sin(a)
+        x2 = cx + 8.0 * math.cos(a)
+        y2 = cy + 8.0 * math.sin(a)
+        d.line([x1, y1, x2, y2], fill=BLACK, width=3)
+    # 中心圆环 (外圈描边 + 白孔)
+    d.ellipse([5, 5, 17, 17], outline=BLACK, width=3)
+    d.ellipse([8, 8, 14, 14], fill=WHITE)   # 中心孔
     return img
 
 

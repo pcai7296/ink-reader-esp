@@ -961,25 +961,24 @@ void renderHome(bool full) {
         snprintf(recentTitle, sizeof(recentTitle), "%s", name);
     }
     fillRect(2, mY, 292, mH, false);
-    drawTextUTF8(6, mY + 2, "继续阅读", 60, true);
-    drawTextUTF8(6, mY + 18, recentTitle, 250, true);
+    drawTextUTF8(6, mY + 3, recentTitle, 250, true);   // 书名 (去掉"继续阅读"标题行, 避免与进度条重叠)
     // 进度条 + 页码百分比
     if (recentReadValid && recentReadTotalPages > 0) {
         uint32_t pct = (uint32_t)(((uint64_t)recentReadPage * 100) / recentReadTotalPages);
         if (pct > 100) pct = 100;
-        const int pbX = 6, pbY = mY + 30, pbW = 190, pbH = 5;
+        const int pbX = 6, pbY = mY + 25, pbW = 190, pbH = 5;
         fillRect(pbX, pbY, pbW, pbH, false);
         drawRect(pbX, pbY, pbW, pbH, true);
         int fillW = (int)((uint64_t)pbW * pct / 100);
         if (fillW > 0) fillRect(pbX + 1, pbY + 1, fillW - 1, pbH - 2, true);
         char pr[20];
         snprintf(pr, sizeof(pr), "%lu%%", (unsigned long)pct);
-        drawTextUTF8(pbX + pbW + 4, pbY - 6, pr, 40, true);
+        drawTextUTF8(pbX + pbW + 4, pbY - 5, pr, 40, true);
         char pg[20];
         snprintf(pg, sizeof(pg), "%lu/%lu页", (unsigned long)recentReadPage, (unsigned long)recentReadTotalPages);
-        drawTextUTF8(228, pbY - 6, pg, 68, true);
+        drawTextUTF8(228, pbY - 5, pg, 68, true);
     } else {
-        drawTextUTF8(6, mY + 28, recentDetail, 200, true);
+        drawTextUTF8(6, mY + 25, recentDetail, 200, true);
     }
     drawRect(2, mY, 292, mH, true);   // 主卡仅信息展示, 不画选中框 (非按钮)
 
