@@ -15,7 +15,7 @@
 #include <LittleFS.h>
 #include <ESP8266WebServer.h>
 
-extern bool sdAvailable;   // file_manager.ino 全局: SD 挂载标志（/api/status O(1) 只读此标志）
+extern bool sdAvailable;   // ink-reader-esp.ino 全局: SD 挂载标志（/api/status O(1) 只读此标志）
 extern bool reinitSdBus(const char *reason);
 
 static bool lfsReady = false;   // 只挂载/注册一次（配网会话可重复进入）

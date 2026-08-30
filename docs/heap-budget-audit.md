@@ -44,7 +44,7 @@
 **🔴 当前 <3KB 安全余量（实测 ~1KB）→ 功能分级, 优先降静态 RAM。**
 
 候选降静态（按用户优先级）:
-- idxBuf[2048]（file_manager.ino 索引构建缓冲）: 仅构建期用 → malloc 化 省 2KB
+- idxBuf[2048]（ink-reader-esp.ino 索引构建缓冲）: 仅构建期用 → malloc 化 省 2KB
 - recScanBuf（启动扫描缓冲）: 仅启动用 → 复用/动态 省 ~0.5-1KB
 - 其他大静态: fb[4608]（帧缓冲, 核心不可动）/ chapterRows / diagRing
 

@@ -1,5 +1,5 @@
 /**
- * @file file_manager.ino
+ * @file ink-reader-esp.ino
  * @brief SD 卡文件管理器 (屏幕反馈版) - 复刻 xz014 项目文件管理功能
  *
  * 板卡: MoShuiPing-V2.9 (V2.41+)
@@ -38,9 +38,7 @@
 #include "font8x8.h"
 #include <user_interface.h>
 #include "reader_utils.h"   // 通用 (深睡 ESP.deepSleep 由 core 提供)
-
-extern const uint8_t chinese_gb2312[253023] U8G2_FONT_SECTION("chinese_gb2312");
-extern const uint8_t u8g2_font_wqy12_t_gb2312[] U8G2_FONT_SECTION("u8g2_font_wqy12_t_gb2312");   // 12px 中文 (菜单小字, 完整 GB2312)
+#include "fb_gfx.h"         // FramebufferGfx 类型 + epd/gfx/u8g2Fonts/textRendererReady extern + 字体 extern
 
 
 EPD_290A epd;
@@ -203,14 +201,7 @@ void drawRect(int x0, int y0, int w, int h, bool black) {
 }
 
 // ---------- U8g2 + UTF-8 framebuffer renderer ----------
-class FramebufferGfx final : public Adafruit_GFX {
-public:
-    FramebufferGfx() : Adafruit_GFX(SCR_W, SCR_H) {}
-
-    void drawPixel(int16_t x, int16_t y, uint16_t color) override {
-        setPix(x, y, color != 0);
-    }
-};
+// FramebufferGfx 类定义在 fb_gfx.h (共享头文件); 此处为对象定义点 (唯一定义)。
 
 FramebufferGfx gfx;
 U8G2_FOR_ADAFRUIT_GFX u8g2Fonts;

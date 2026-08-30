@@ -4,7 +4,7 @@
 // 手机连热点获固定 IP 192.168.0.100 → 直连。
 // 协议：GET /progress?file=<RFC3986 编码文件名> → 200+LUMI1 / 404；
 //       PUT /progress（body=LUMI1 + file= 行）→ 200/400。
-// 本地进度读写与 UI 渲染通过宿主钩子 (progressSyncSnapshot/ApplyRemote/Render/Done, 在 file_manager.ino)。
+// 本地进度读写与 UI 渲染通过宿主钩子 (progressSyncSnapshot/ApplyRemote/Render/Done, 在 ink-reader-esp.ino)。
 // 设计: 非阻塞状态机, 每阶段阻塞 ≤6s, 循环内喂狗, 任何失败走 cleanup(WiFi OFF)。
 // 旧 WebDAV 云同步已弃用（传输层整体删除；WebdavConfig/EEPROM 保留于 wifi_manager，UI 隐藏）。
 
@@ -329,7 +329,7 @@ static int discoveryPoll(char* out, size_t cap) {
 static void discoveryStop() { gDiscUdp.stop(); }
 
 // ---------- v3 指纹快照生成 (复用已打开的 txtFile; 任一步失败 → 整组无效) ----------
-extern File txtFile;   // file_manager.ino 的全局 (当前打开 TXT 句柄; PREPARE 后已打开)
+extern File txtFile;   // ink-reader-esp.ino 的全局 (当前打开 TXT 句柄; PREPARE 后已打开)
 
 static void fpRegion(uint64_t start, uint64_t end, char* out) {
   uint8_t d[20];

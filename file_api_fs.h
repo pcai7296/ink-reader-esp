@@ -14,7 +14,7 @@ void fileApiFsRegisterUploadRoute();
 #define OFS_UP_PHASE_UPLOADING 1
 #define OFS_UP_PHASE_DONE 2
 #define OFS_UP_PHASE_FAIL 3
-// 上传状态回调（file_api_fs 上传回调里调用; 由 file_manager.ino 注入渲染函数实现"上传中/上传完毕"墨水屏）
+// 上传状态回调（file_api_fs 上传回调里调用; 由 ink-reader-esp.ino 注入渲染函数实现"上传中/上传完毕"墨水屏）
 // 传 phase + 最终文件名(完成/失败时非空, 中途中止为空)
 typedef void (*OfsUpPhaseCallback)(int phase, const char *path);
 void ofsUpSetPhaseCallback(OfsUpPhaseCallback cb);

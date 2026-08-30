@@ -9,7 +9,7 @@
 // 返回 false = 逻辑坐标越界或 rot 非法 (px/py 不写; 防御保险丝, 不画任何像素)。
 // 旋转语义: 内容相对物理面板原生竖屏的顺时针角度; 0→90→180→270→0。
 // ⚠️ 旋转角用 uint16_t: 270 超出 uint8_t 上限 (270 会被截断成 14, 单测实测踩坑)。
-// 90° 行 px=y, py=295-x 与既有产线代码 (file_manager.ino setPix 横屏分支) 完全一致。
+// 90° 行 px=y, py=295-x 与既有产线代码 (ink-reader-esp.ino setPix 横屏分支) 完全一致。
 
 static const int ROT_FB_W = 128;   // 物理 fb 列数 (== EPD_WIDTH)
 static const int ROT_FB_H = 296;   // 物理 fb 行数 (== EPD_HEIGHT)

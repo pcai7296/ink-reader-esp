@@ -1,15 +1,15 @@
 // bmp_show.cpp — SD 卡 BMP 图片显示（移植自官方 A7 Bmp.ino，适配 SDFS + 本项目帧缓冲）
-// 帧缓冲 fb 由 file_manager.ino 定义（物理 128×296），setPix(x,y,black) 逻辑坐标写入
+// 帧缓冲 fb 由 ink-reader-esp.ino 定义（物理 128×296），setPix(x,y,black) 逻辑坐标写入
 #include "bmp_show.h"
 #include <SD.h>   // 提供 SD 对象（SDFS 实例，File API 与 LittleFS 兼容）
 
 #define BMP_W 296
 #define BMP_H 128
 
-// 与 file_manager.ino 共享的帧缓冲（物理 128×296）
+// 与 ink-reader-esp.ino 共享的帧缓冲（物理 128×296）
 extern uint8_t fb[128 * 296 / 8];
 
-// 逻辑坐标写入（与 file_manager.ino 的 setPix 同映射；setPix 是 inline 无外部符号，此处自带一份）
+// 逻辑坐标写入（与 ink-reader-esp.ino 的 setPix 同映射；setPix 是 inline 无外部符号，此处自带一份）
 static inline void bmpSetPix(int x, int y, bool black) {
     if (x < 0 || x >= BMP_W || y < 0 || y >= BMP_H) return;
     int px = y;                     // 物理列 = 逻辑y

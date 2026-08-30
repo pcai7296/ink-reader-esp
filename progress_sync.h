@@ -45,7 +45,7 @@ uint8_t  progressSyncFileMismatch();
 
 // ---- 纯工具（LUMI1，实现见 progress_lumi.h/cpp，PC 可测）----
 
-// ---- 宿主钩子 (file_manager.ino 实现) ----
+// ---- 宿主钩子 (ink-reader-esp.ino 实现) ----
 bool   progressSyncSnapshot(const String& txtPath, uint32_t& localOffset, uint32_t& txtSize, float& localPercent);
 void   progressSyncRender(int state);            // 绘制当前同步界面 (状态/比较/错误)
 bool   progressSyncApplyRemote(uint32_t offset); // 手机→本地: 写 .i1[0] + seek + 重渲

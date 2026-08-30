@@ -1,5 +1,5 @@
 // reader_utils.cpp — 阅读器自包含工具函数实现
-// 从 file_manager.ino 提取, 零全局依赖, 纯逻辑。
+// 从 ink-reader-esp.ino 提取, 零全局依赖, 纯逻辑。
 
 #include "reader_utils.h"
 #include <string.h>

@@ -1,23 +1,20 @@
 #pragma once
 // globals.h — 跨模块全局变量统一声明
 // 所有 extern 全局变量集中于此, 避免每个 .cpp 各自 extern 导致声明散落/不一致。
-// 定义在 file_manager.ino (唯一定义点), 其他模块通过 #include "globals.h" 访问。
+// 定义在 ink-reader-esp.ino (唯一定义点), 其他模块通过 #include "globals.h" 访问。
 
 #include <Arduino.h>
 #include <SD.h>
 #include <SDFS.h>
 #include "file_list.h"   // FileItem, winItems, winCount, itemCount, selIndex, topIndex
+#include "fb_gfx.h"      // FramebufferGfx 类型 + epd/gfx/u8g2Fonts/textRendererReady extern
 
 // ---------- 帧缓冲 / 屏幕 ----------
 extern uint8_t fb[];
 extern uint16_t fbRot;
 extern bool textRendererReady;
 
-// SCR_W/SCR_H 定义在 file_manager.ino (296×128 横屏逻辑尺寸)
-#ifndef SCR_W
-#define SCR_W 296
-#define SCR_H 128
-#endif
+// SCR_W/SCR_H 定义在 fb_gfx.h (296×128 横屏逻辑尺寸)
 
 // ---------- 按键 ----------
 #define KEY2_PIN 0

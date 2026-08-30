@@ -33,7 +33,7 @@
 
 ```
 ink-reader-esp/
-├── file_manager.ino          # 主固件 (3480+ 行)
+├── ink-reader-esp.ino      # 主固件 (3480+ 行)
 ├── epd_290a.h / .cpp         # EPD 驱动 (296×128 SSD1680)
 ├── rot_map.h                 # 四向旋转坐标规范 (mapFbRot 纯函数, 唯一权威)
 ├── wifi_manager.h / .cpp     # 时钟 / 配网 / 天气配置模块
@@ -69,7 +69,7 @@ ink-reader-esp/
 arduino-cli compile --fqbn esp8266:esp8266:d1_mini \
   --libraries libraries \
   --build-path "J:\code\esp8266\ink-reader-esp\build" \
-  file_manager.ino
+  ink-reader-esp.ino
 ```
 
 ### 开机引导固件（BOOT_AP_MODE=1）
@@ -81,16 +81,16 @@ arduino-cli compile --fqbn esp8266:esp8266:d1_mini \
   --libraries libraries \
   --build-path "J:\code\esp8266\ink-reader-esp\build" \
   --build-property "compiler.cpp.extra_flags=-DBOOT_AP_MODE=1" \
-  file_manager.ino
+  ink-reader-esp.ino
 ```
 
-烧录前核对 `build\file_manager.ino.bin` 时间戳（bin 名是 `file_manager.ino.bin`）。
+烧录前核对 `build\ink-reader-esp.ino.bin` 时间戳（bin 名是 `ink-reader-esp.ino.bin`）。
 
 ## 烧录
 
 ```bash
 esptool.py --port COM20 --baud 460800 write_flash 0x0 \
-  "J:\code\esp8266\ink-reader-esp\build\file_manager.ino.bin"
+  "J:\code\esp8266\ink-reader-esp\build\ink-reader-esp.ino.bin"
 ```
 
 ## Web 管理页 / 配网

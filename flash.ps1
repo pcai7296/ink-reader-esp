@@ -20,8 +20,8 @@ $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 $esptool = "C:\Users\Administrator\AppData\Local\Programs\Python\Python312\Scripts\esptool.exe"
 $buildDir = Join-Path $root "build_cfs"
-$appBin = Join-Path $buildDir "file_manager.ino.bin"
-$fsBin = Join-Path $buildDir "file_manager.littlefs.bin"
+$appBin = Join-Path $buildDir "ink-reader-esp.ino.bin"
+$fsBin = Join-Path $buildDir "ink-reader-esp.littlefs.bin"
 
 Write-Host "=== FLASH SCRIPT ==="
 $flagWithFs = if ($WithFs) { "yes" } else { "no" }
@@ -48,7 +48,7 @@ Start-Sleep -Seconds 2   # 等端口句柄释放
 # ---- 2. 编译 ----
 if (-not $SkipCompile) {
   Write-Host "--- [2/3] compiling ---"
-  arduino-cli compile --fqbn esp8266:esp8266:d1_mini --libraries (Join-Path $root "libraries") --build-path $buildDir (Join-Path $root "file_manager.ino")
+  arduino-cli compile --fqbn esp8266:esp8266:d1_mini --libraries (Join-Path $root "libraries") --build-path $buildDir (Join-Path $root "ink-reader-esp.ino")
   if ($LASTEXITCODE -ne 0) { Write-Host "COMPILE FAILED"; exit 1 }
   Write-Host ("compiled: {0} ({1}B)" -f $appBin, (Get-Item $appBin).Length)
 } else {

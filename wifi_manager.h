@@ -65,7 +65,7 @@ void wifiManagerStopSta();
 // ---- 设备设置（EEPROM 偏移 232, 独立区, 避开 WifiConfig/CLOCK/WeatherConfig）----
 // 布局兼容说明：hitokotoEnabled/portrait 位于 checksum 之后 → checksum 范围/位置不变，
 // 旧版本(step01)数据无需迁移即可读取；reserved 复用为 portrait (四向: 0=横屏 1=竖屏 2=横屏翻转 3=竖屏翻转,
-// 旧数据 0/1 含义不变=兼容编码, 数值语义由 file_manager.ino storedToRot/rotToStored 隔离)
+// 旧数据 0/1 含义不变=兼容编码, 数值语义由 ink-reader-esp.ino storedToRot/rotToStored 隔离)
 struct SettingsConfig {
     uint32_t magic;        // 0x53455433UL 'SET3'
     uint8_t version;       // 1

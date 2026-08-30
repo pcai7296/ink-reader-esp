@@ -102,7 +102,7 @@ arduino-cli compile --fqbn esp8266:esp8266:d1_mini \
   --libraries "J:\code\esp8266\ink-reader-esp\libraries" \
   --build-path "J:\code\esp8266\ink-reader-esp\build_mmu" \
   --build-property "build.mmuflags=-DMMU_IRAM_SIZE=0xC000 -DMMU_ICACHE_SIZE=0x4000 -DMMU_IRAM_HEAP" \
-  "J:\code\esp8266\ink-reader-esp\file_manager.ino"
+  "J:\code\esp8266\ink-reader-esp\ink-reader-esp.ino"
 ```
 验证点：编译后看 IRAM 占用 / 是否有空间给 second heap；烧录后看 `config_ready` 的 heap 是否
 因 IRAM heap 加入而明显上升（`esf_buf_alloc` 若能复用 IRAM，AP 会话可能稳定）。

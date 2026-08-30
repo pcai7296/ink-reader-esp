@@ -7,7 +7,7 @@
 #include <Arduino.h>
 #include <SD.h>
 
-// reinitSdBus 定义于 file_manager.ino（局刷后 SPI 总线在 EPD 侧, SD 访问前必须恢复）
+// reinitSdBus 定义于 ink-reader-esp.ino（局刷后 SPI 总线在 EPD 侧, SD 访问前必须恢复）
 bool reinitSdBus(const char *reason);
 
 // 目录项（回调/查询输出; name 为 basename, path 为完整路径, UTF-8）

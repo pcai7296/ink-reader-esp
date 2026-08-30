@@ -8,7 +8,7 @@ ESP8266 Arduino 固件，主控 ESP‑12F，2.9" SSD1680 墨水屏横放（逻�
 ## STRUCTURE
 ```
 ink-reader-esp/
-├── file_manager.ino          # 主固件 (3480+ 行)
+├── ink-reader-esp.ino          # 主固件 (3480+ 行)
 ├── epd_290a.h / .cpp         # EPD 驱动 (296×128 SSD1680)
 ├── rot_map.h                 # 四向旋转坐标规范 (mapFbRot 纯函数, 唯一权威, pc_tests 可测)
 ├── wifi_manager.h / .cpp     # 时钟/配网/天气配置模块
@@ -30,23 +30,23 @@ ink-reader-esp/
 ## WHERE TO LOOK
 | Task | File | Notes |
 |------|------|-------|
-| 主页/文件列表 | `file_manager.ino` §renderHome/renderAll/renderListRow | APP_HOME/APP_BROWSER |
-| TXT 阅读 | `file_manager.ino` §TXT 阅读实现 | buildTxtIndex / 排版 / 翻页 |
-| 章节目录 | `file_manager.ino` §章节 | chapterRows, ChapterRow |
-| 按键 | `file_manager.ino` §按键状态机 | KEY2=GPIO0/KEY3=GPIO3 长按机 |
-| 屏幕刷新 | `file_manager.ino` §refresh | display(displayPartial) |
-| 电池 | `file_manager.ino` §电池电量 | GPIO12 采样 + SD MISO 冲突 |
-| 时钟 | `file_manager.ino` §renderClockPage + `wifi_manager.cpp` | BL8025T 探测 |
-| 天气 | `file_manager.ino` §天气页面 + `weather_data.cpp` | APP_WEATHER; 心知天气 API |
-| 一言 | `file_manager.ino` §fetchHitokotoFlow + `hitokoto.cpp` | 时钟页; v1.hitokoto.cn, 2s 超时 |
+| 主页/文件列表 | `ink-reader-esp.ino` §renderHome/renderAll/renderListRow | APP_HOME/APP_BROWSER |
+| TXT 阅读 | `ink-reader-esp.ino` §TXT 阅读实现 | buildTxtIndex / 排版 / 翻页 |
+| 章节目录 | `ink-reader-esp.ino` §章节 | chapterRows, ChapterRow |
+| 按键 | `ink-reader-esp.ino` §按键状态机 | KEY2=GPIO0/KEY3=GPIO3 长按机 |
+| 屏幕刷新 | `ink-reader-esp.ino` §refresh | display(displayPartial) |
+| 电池 | `ink-reader-esp.ino` §电池电量 | GPIO12 采样 + SD MISO 冲突 |
+| 时钟 | `ink-reader-esp.ino` §renderClockPage + `wifi_manager.cpp` | BL8025T 探测 |
+| 天气 | `ink-reader-esp.ino` §天气页面 + `weather_data.cpp` | APP_WEATHER; 心知天气 API |
+| 一言 | `ink-reader-esp.ino` §fetchHitokotoFlow + `hitokoto.cpp` | 时钟页; v1.hitokoto.cn, 2s 超时 |
 | 配网 | `wifi_manager.cpp` | wifiManagerBegin; 端点 / /status /info /settings /wifi /clear |
 | 天气配置 | `wifi_manager.cpp` §loadWeatherConfig/saveWeatherConfig | EEPROM 160-232 |
-| 设置页 | `file_manager.ino` §设置页面 + `wifi_manager.cpp` §设备设置 | APP_SETTINGS; EEPROM 232-244; 4 项: 时钟格式/时区/一言/恢复默认 |
-| BMP 图片 | `bmp_show.cpp` + `file_manager.ino` §showBmpFile | APP_BMP=9; 文件管理器打开 .bmp 全屏 |
+| 设置页 | `ink-reader-esp.ino` §设置页面 + `wifi_manager.cpp` §设备设置 | APP_SETTINGS; EEPROM 232-244; 4 项: 时钟格式/时区/一言/恢复默认 |
+| BMP 图片 | `bmp_show.cpp` + `ink-reader-esp.ino` §showBmpFile | APP_BMP=9; 文件管理器打开 .bmp 全屏 |
 | OTA | `wifi_manager.cpp` (ESP8266HTTPUpdateServer) | /update 端点, admin/333333 |
 | 中文字体数据 | `u8g2Fonts` + `chinese_gb2312` 字库 | 253KB flash, UTF-8 输入 |
-| 索引格式 | `file_manager.ino` §formatIndexNumber | 8 字节 ASCII 补零 |
-| 调试 | `file_manager.ino` §diagLog/diagFlushSd | DIAG_SD=1 时写 debug_trace.log |
+| 索引格式 | `ink-reader-esp.ino` §formatIndexNumber | 8 字节 ASCII 补零 |
+| 调试 | `ink-reader-esp.ino` §diagLog/diagFlushSd | DIAG_SD=1 时写 debug_trace.log |
 
 ## CONVENTIONS
 - **UTF-8 全链路**: 全文本 UTF-8 → U8g2_for_Adafruit_GFX + `u8g2Fonts` 渲染；不混用 GBK
@@ -78,9 +78,9 @@ ink-reader-esp/
 ## COMMANDS
 ```bash
 # ⚠️ 必须 --build-path 指向项目 build 目录，否则 bin 输出到临时目录（曾烧录旧 bin 误判修复无效）
-arduino-cli compile --fqbn esp8266:esp8266:d1_mini --libraries libraries --build-path "J:\code\esp8266\ink-reader-esp\build" file_manager.ino
-# 烧录前核对 build\file_manager.ino.bin 时间戳（bin 名是 file_manager.ino.bin，不是 .d1_mini.bin）
-esptool.py --port COM20 --baud 460800 write_flash 0x0 "J:\code\esp8266\ink-reader-esp\build\file_manager.ino.bin"
+arduino-cli compile --fqbn esp8266:esp8266:d1_mini --libraries libraries --build-path "J:\code\esp8266\ink-reader-esp\build" ink-reader-esp.ino
+# 烧录前核对 build\ink-reader-esp.ino.bin 时间戳（bin 名是 ink-reader-esp.ino.bin，不是 .d1_mini.bin）
+esptool.py --port COM20 --baud 460800 write_flash 0x0 "J:\code\esp8266\ink-reader-esp\build\ink-reader-esp.ino.bin"
 ```
 
 ## NOTES
@@ -88,7 +88,7 @@ esptool.py --port COM20 --baud 460800 write_flash 0x0 "J:\code\esp8266\ink-reade
 - RAM 70% 余量（56200/80192），避免大静态数组
 - `fb` 帧缓冲 4608 字节 (128×296/8)
 - `diagRing` 24 条环形日志
-- 小说索引构建参考 `J:\code\esp8266\archive\test\` 的 `.i1`/`.z1` 样例
+- 小说索引构建参考 `J:\code\esp8266\legacy\archive\test\` 的 `.i1`/`.z1` 样例
 - 排版算法已 PC 端 Python 模拟验证 100%（`simulate_index.py`）
 - ✅ **UTF-8 全链路已修复**（原乱码根因：GB2312 分支拦截 UTF-8 首字节 + 2 字节查表）：`buildTxtIndex`/`readTxtPage`/`drawReaderLine`/`isChapterTitle`/`normalizeReaderLines` 全部对齐 PC 模拟器 `sim_engine.py`（b==0xE0 读 2 字节、ch_px=14）
 - **索引构建抗打断（官方 A7 同款）**：无 `.i1b` 断点文件——页表即断点。`记录[N-1]=txt大小` 是完整性标记；重启检测到末记录≠txt大小 → 从页表末条页首偏移续扫（`beginResumeIndexBuildFromPartial`），最多重扫一页；重扫页章节经 `resumeChapterSeed` 去重

@@ -93,7 +93,7 @@ BOOT reason=Software Watchdog  Fatal exception:4  flag:3
 | `wifi_manager.cpp` | 配网页 13 条 `server.on` 路由改为 onNotFound 精确分发（省 ~1.8KB 常驻路由对象堆）；onNotFound 不再 `Serial.printf(uri.c_str())` 读临时 String；OTA 未启用时不再注册 `/update` 路由 | **有效**（config_ready 从 3.9KB 提到 5.16KB）|
 | `file_api.cpp` / `file_api.h` | 新增 `fileApiEnsureLfsMount()` 共享懒挂载；`/fm` 与 `/fs/edit` 只挂载一次 | **有效**（去掉 /fs/edit 每请求 LittleFS.begin 的 ~1KB 峰值）|
 | `file_api_fs.cpp` | `handleOfsEditGet` 复用它；`ofsBlacklistedEntry`/`ofsWhitelistedFile` 改 strcasecmp 零 String；`handleOfsList` 加堆探针 | 部分（零 String 有效；探针待清）|
-| `file_manager.ino` | 首页/阅读菜单进配网前调用 `progressSyncFreeReaderHeap()`；退出配网回阅读调 `progressSyncRestoreReaderHeap()` | 阅读器路径有效；首页路径（阅读器未开）为空操作 |
+| `ink-reader-esp.ino` | 首页/阅读菜单进配网前调用 `progressSyncFreeReaderHeap()`；退出配网回阅读调 `progressSyncRestoreReaderHeap()` | 阅读器路径有效；首页路径（阅读器未开）为空操作 |
 
 `data/manager.htm` 已从 web_test 移植（相对 URL、无 ACE/iconfont），`data/index.html`/`app.js`/`style.css` 旧 S6 UI 已删（git 历史保留）。
 

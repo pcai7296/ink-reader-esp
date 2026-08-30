@@ -25,7 +25,7 @@
 #include <LittleFS.h>
 #include <ESP8266WebServer.h>
 
-extern bool sdAvailable;   // file_manager.ino 全局: SD 挂载标志（/fs/status O(1) 只读）
+extern bool sdAvailable;   // ink-reader-esp.ino 全局: SD 挂载标志（/fs/status O(1) 只读）
 extern bool reinitSdBus(const char *reason);
 bool fileApiGetCachedCapacity(uint64_t *total, uint64_t *used);   // file_api.cpp
 
@@ -107,7 +107,7 @@ static void ofsJsonEscape(const char *s, char *out, size_t outSize) {
   out[oi] = '\0';
 }
 
-// ---- 显示过滤（搬运 file_manager.ino listDir 同款: 不该显示的不显示）----
+// ---- 显示过滤（搬运 ink-reader-esp.ino listDir 同款: 不该显示的不显示）----
 // 纯栈/strcasecmp 版本（零 String 分配）: /fs/list 对每个 SD 项调用一次,
 // 原 String lower = name + toLowerCase() 在 3-4KB 配网会话基线上每项分配/释放堆 → 200 项打穿堆（重启根因）。
 static bool ofsHasBlacklistSuffix(const char *dot) {
