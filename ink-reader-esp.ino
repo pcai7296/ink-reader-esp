@@ -981,19 +981,18 @@ void renderHome(bool full) {
     } else {
         drawTextUTF8(6, mY + 30, recentDetail, 200, true);
     }
-    drawRect(2, mY, 292, mH, true);
-    if (homeSel == 0) drawRect(0, mY - 2, SCR_W, mH + 4, true);   // 主卡选中: 外围框
+    drawRect(2, mY, 292, mH, true);   // 主卡仅信息展示, 不画选中框 (非按钮)
 
     // ── 导航 2行×3列 (y66-124) ──
-    // 位1-6: 文件/时钟/天气 | 配网/设置/返回
-    static const char *const navNames[6] = {"文件", "时钟", "天气", "配网", "设置", "返回"};
+    // 位0-5: 续读/文件/时钟 | 天气/配网/设置 (续读替换返回放第一位)
+    static const char *const navNames[6] = {"续读", "文件", "时钟", "天气", "配网", "设置"};
     static const int navX[3] = {2, 99, 196};
     static const int navY[2] = {66, 98};
     const int nw = 93, nh = 28;
     for (int i = 0; i < 6; i++) {
         int col = i % 3, row = i / 3;
         int nx = navX[col], ny = navY[row];
-        bool sel = homeSel == (i + 1);
+        bool sel = homeSel == i;
         fillRect(nx, ny, nw, nh, false);
         int tw = utf8Width(navNames[i]);
         // 图标(13) + 间距(4) + 文字 整体水平居中
@@ -1041,11 +1040,6 @@ void enterHomeCard() {
             appMode = APP_SETTINGS;
             renderSettingsPage(true);
             saveSleepRecord();   // 界面快照: 已进入设置页
-            break;
-        case 6:   // 返回: 进入时钟页 (默认待机界面)
-            appMode = APP_CLOCK_CONNECT;
-            clockManagerBegin(renderClockConnect, enterClockPage);
-            saveSleepRecord();
             break;
         default: showMsg("功能暂未实现", "稍后开放"); break;
     }
@@ -4977,10 +4971,10 @@ void loop() {
 
     if (appMode == APP_HOME) {
         if (r3 == 1) {
-            homeSel = (homeSel + 1) % 7;
+            homeSel = (homeSel + 1) % 6;
             renderHome(false);
         } else if (r2 == 1) {
-            homeSel = (homeSel + 6) % 7;
+            homeSel = (homeSel + 5) % 6;
             renderHome(false);
         } else if (r3 == 2) {
             enterHomeCard();
