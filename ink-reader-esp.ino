@@ -1227,7 +1227,7 @@ void renderSettingsPage(bool full) {
     const int rowH = 20;
     for (int i = 0; i < SETTINGS_ITEM_CNT; i++) {
         bool sel = (i == settingsSel);
-        fillRect(0, rowY[i], SCR_W, rowH, sel);
+        fillRect(0, rowY[i], SCR_W, rowH, false);   // 恒白底 (空心框样式)
         const char *name = nullptr;
         switch (i) {
             case 0: name = "时钟格式"; break;
@@ -1235,7 +1235,7 @@ void renderSettingsPage(bool full) {
             case 2: name = "一言"; break;
             case 3: name = "恢复默认"; break;
         }
-        drawTextUTF8(6, rowY[i] + 2, name, 110, !sel);
+        drawTextUTF8(6, rowY[i] + 2, name, 110, true);   // 恒黑字
         if (i == 0) {
             snprintf(line, sizeof(line), "%s", s.clockFormat ? "12小时制" : "24小时制");
         } else if (i == 1) {
@@ -1245,7 +1245,8 @@ void renderSettingsPage(bool full) {
         } else {
             snprintf(line, sizeof(line), "%s", "执行");
         }
-        drawTextUTF8(150, rowY[i] + 2, line, 140, !sel);
+        drawTextUTF8(150, rowY[i] + 2, line, 140, true);   // 恒黑字
+        if (sel) drawRect(0, rowY[i], SCR_W, rowH, true);   // 选中画空心框
     }
     if (settingsTzEdit) {
         // 编辑态指示条（覆盖底部，局部提示）
@@ -1815,10 +1816,10 @@ void renderListRow(int row, int idx) {
     int y = LIST_Y0 + row * ROW_H;
     FileItem *it = itemAt(idx);   // 窗口化: idx 可能在窗口外(滚动中), 返回 NULL 画空行
     bool selected = (idx == selIndex);
-    bool fg = !selected;   // 前景色: 选中时白字
-    // 整行底色
-    fillRect(0, y, SCR_W, ROW_H, selected);
-    if (!it) return;   // 窗口外: 只画底色
+    bool fg = true;   // 官方 A7 光标样式: 文字恒黑 (不再反色白字)
+    // 整行白底 (空心框样式: 选中=画框, 不填充反色底)
+    fillRect(0, y, SCR_W, ROW_H, false);
+    if (!it) return;   // 窗口外: 只画白底
     int x = 2;
     drawChar16(x, y, it->isDir ? '>' : ' ', fg);
     x += 16;
@@ -1840,6 +1841,7 @@ void renderListRow(int row, int idx) {
         int ex = drawTextUTF8(x, y, nameDisp, nameMaxW, fg);
         drawTextUTF8(ex, y, ext, extW + 4, fg);   // 后缀 16px
     }
+    if (selected) drawRect(0, y, SCR_W, ROW_H, true);   // 选中画空心框 (官方 A7 光标)
 }
 
 void renderList() {
@@ -3868,8 +3870,8 @@ void renderChapterList(bool full) {
     for (int i = 0; i < chapterCountLoaded; i++) {
         int y = 18 + i * 15;
         bool selected = i == chapterSel;
-        fillRect(0, y, SCR_W, 15, selected);
-        int fg = !selected;
+        fillRect(0, y, SCR_W, 15, false);   // 恒白底 (空心框样式)
+        int fg = true;   // 恒黑字
         char pageStr[12];
         snprintf(pageStr, sizeof(pageStr), "%lu", (unsigned long)chapterRows[i].page);
         int pageW = utf8Width(pageStr);
@@ -3878,6 +3880,7 @@ void renderChapterList(bool full) {
         utf8Truncate(chapterRows[i].title, disp, titleMax, sizeof(disp));
         drawTextUTF8(2, y, disp, titleMax, fg);
         drawTextUTF8(SCR_W - 4 - pageW, y, pageStr, pageW + 4, fg);
+        if (selected) drawRect(0, y, SCR_W, 15, true);   // 选中画空心框
     }
     // 底部栏: [页码 n1/n2] [上一页] [下一页] [x倍速]
     fillRect(0, 108, SCR_W, 20, false);
@@ -4481,8 +4484,8 @@ void renderMarkList(bool full) {
     for (int i = 0; i < markCountLoaded; i++) {
         int y = 18 + i * 15;
         bool selected = i == markSel;
-        fillRect(0, y, SCR_W, 15, selected);
-        int fg = !selected;
+        fillRect(0, y, SCR_W, 15, false);   // 恒白底 (空心框样式)
+        int fg = true;   // 恒黑字
         char name[16];
         snprintf(name, sizeof(name), "标记%lu", (unsigned long)((markPage - 1) * CHAPTER_ROWS + i + 1));
         uint64_t off = markOffsets[i];
@@ -4493,6 +4496,7 @@ void renderMarkList(bool full) {
         int pctW = utf8Width(pctStr);
         drawTextUTF8(2, y, name, SCR_W - 8 - pctW - 6, fg);
         drawTextUTF8(SCR_W - 4 - pctW, y, pctStr, pctW + 4, fg);
+        if (selected) drawRect(0, y, SCR_W, 15, true);   // 选中画空心框
     }
     fillRect(0, 108, SCR_W, 20, false);
     fillRect(0, 108, SCR_W, 1, true);
