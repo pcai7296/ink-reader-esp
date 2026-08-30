@@ -1356,11 +1356,7 @@ void renderSettingsPage(bool full) {
         }
         if (sel) drawRect(0, y, SCR_W, rowH, true);
     }
-    if (settingsTzEdit) {
-        drawTextUTF8(4, 104, "中/右短按调整 右长保存 中长取消", 288, true);
-    } else {
-        drawTextUTF8(4, 104, "右短:下/编辑 中短:上 右长:执行 中长:返回", 288, true);
-    }
+    // 底部按键描述已删除 (遮挡选项; 按键逻辑全局一致无需提醒)
     refresh(full);
 }
 
