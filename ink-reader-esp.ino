@@ -891,65 +891,101 @@ void openRecentRead() {
     startTxtReader(recentReadPath.c_str(), false);
 }
 
-void drawHomeCard(int x, int y, int w, int h, const char *title,
-                 const char *detail, bool selected) {
-    fillRect(x, y, w, h, false);   // 恒白底 (官方 A7 光标: 选中=空心框, 不反色底)
-    drawTextUTF8(x + 4, y + 1, title, w - 8, true);   // 恒黑字
-    drawTextUTF8(x + 4, y + 16, detail, w - 8, true);
-    if (selected) drawRect(x, y, w, h, true);   // 选中画空心框
-}
-
 void renderHome(bool full) {
     fillRect(0, 0, SCR_W, SCR_H, false);
-    drawTextUTF8(2, 0, "● ● ●", 64, true);
-    drawTextUTF8(70, 0, "MoShuiPing V2.9", 150, true);
-    {
-        char buf[16];
-        int mv = readBatteryMV();
-        if (isCharging()) drawLightningIcon(218, 1, true);  // 充电：画闪电图标
-        snprintf(buf, sizeof(buf), "电量%d%%", batPercent(mv));
-        drawTextUTF8(228, 0, buf, 66, true);
-    }
-    fillRect(0, 16, SCR_W, 1, true);
 
-    char recentTitle[96];
-    char recentDetail[96];
-    if (!sdAvailable) {
-        snprintf(recentTitle, sizeof(recentTitle), "● 上次阅读");
-        snprintf(recentDetail, sizeof(recentDetail), "请插入SD卡");
-    } else if (!recentReadValid) {
-        traceFmt("HOME_NOREC sd=%d path_len=%u", sdAvailable ? 1 : 0, (unsigned)recentReadPath.length());
-        snprintf(recentTitle, sizeof(recentTitle), "● 上次阅读");
-        snprintf(recentDetail, sizeof(recentDetail), "暂无阅读记录");
+    // ── 状态栏 y0-16: 时间 | 日期星期 | 城市温度 | 电量(充电) ──
+    time_t nowT = clockManagerNow();
+    struct tm *tmv = nowT > 1600000000UL ? localtime(&nowT) : nullptr;
+    char tbuf[12], dbuf[24];
+    if (tmv) {
+        snprintf(tbuf, sizeof(tbuf), "%02d:%02d", tmv->tm_hour, tmv->tm_min);
+        snprintf(dbuf, sizeof(dbuf), "%02d-%02d %s", tmv->tm_mon + 1, tmv->tm_mday, weekdayCn(tmv->tm_wday));
     } else {
-        const char *name = strrchr(recentReadPath.c_str(), '/');
-        name = name ? name + 1 : recentReadPath.c_str();
-        snprintf(recentTitle, sizeof(recentTitle), "● %s", name);
-        snprintf(recentDetail, sizeof(recentDetail), "上次阅读");
+        snprintf(tbuf, sizeof(tbuf), "--:--");
+        snprintf(dbuf, sizeof(dbuf), "-- -- ---");
     }
-    drawHomeCard(2, 24, 142, 32, recentTitle, recentDetail, homeSel == 0);
-    drawHomeCard(150, 24, 144, 32, "■ 文件管理器", "浏览 SD 卡文件", homeSel == 1);
-    drawHomeCard(2, 60, 94, 32, "◎ 时钟", "校准时间", homeSel == 2);
+    drawTextUTF8(4, 0, tbuf, 60, true);
+    drawTextUTF8(70, 0, dbuf, 90, true);
+    // 城市+温度 (城市=Web 配置 wc.city EEPROM 持久; 温度=内存 wActual.temp 或 SD 缓存兜底)
     {
-        char weatherDetail[24];
-        if (wDataValid) {
-            snprintf(weatherDetail, sizeof(weatherDetail), "%s %s℃", wActual.weatherName, wActual.temp);
+        WeatherConfig wc;
+        loadWeatherConfig(wc);
+        char wbuf[40];
+        if (wDataValid && wActual.temp[0]) {
+            snprintf(wbuf, sizeof(wbuf), "%s %s℃", wc.city[0] ? wc.city : "--", wActual.temp);
         } else {
-            // 内存无数据时读 SD 缓存（重启后仍显示上次天气摘要, 对齐 A7 主页）
             loadWeatherCache();
             char *sep = strchr(wCachedSummary, '|');
             if (sep && sep != wCachedSummary) {
-                *sep = '\0';
-                snprintf(weatherDetail, sizeof(weatherDetail), "%s %s℃", wCachedSummary, sep + 1);
-                *sep = '|';
+                snprintf(wbuf, sizeof(wbuf), "%s %s℃", wc.city[0] ? wc.city : "--", sep + 1);
             } else {
-                snprintf(weatherDetail, sizeof(weatherDetail), "未获取");
+                snprintf(wbuf, sizeof(wbuf), "%s --℃", wc.city[0] ? wc.city : "--");
             }
         }
-        drawHomeCard(101, 60, 94, 32, "○ 天气", weatherDetail, homeSel == 3);
+        drawTextUTF8(162, 0, wbuf, 88, true);
     }
-    drawHomeCard(200, 60, 94, 32, "※ 配网", "热点 / Wi-Fi", homeSel == 4);
-    drawHomeCard(2, 96, 292, 32, "◆ 设置", "设备参数", homeSel == 5);
+    int mv = readBatteryMV();
+    char bbuf[12];
+    snprintf(bbuf, sizeof(bbuf), "电量%d%%", batPercent(mv));
+    drawTextUTF8(228, 0, bbuf, 66, true);
+    if (isCharging()) drawLightningIcon(276, 1, true);  // 充电: 画闪电图标
+    fillRect(0, 15, SCR_W, 1, true);
+
+    // ── 主卡: 继续阅读 (y18-62, 高44) ──
+    const int mY = 18, mH = 44;
+    char recentTitle[96];
+    char recentDetail[56];
+    if (!sdAvailable) {
+        snprintf(recentTitle, sizeof(recentTitle), "请插入SD卡");
+        snprintf(recentDetail, sizeof(recentDetail), "上次阅读");
+    } else if (!recentReadValid) {
+        snprintf(recentTitle, sizeof(recentTitle), "暂无阅读记录");
+        snprintf(recentDetail, sizeof(recentDetail), "上次阅读");
+    } else {
+        const char *name = strrchr(recentReadPath.c_str(), '/');
+        name = name ? name + 1 : recentReadPath.c_str();
+        snprintf(recentTitle, sizeof(recentTitle), "%s", name);
+    }
+    fillRect(2, mY, 292, mH, false);
+    drawTextUTF8(6, mY, "继续阅读", 60, true);
+    drawTextUTF8(6, mY + 14, recentTitle, 250, true);
+    // 进度条 + 页码百分比
+    if (recentReadValid && recentReadTotalPages > 0) {
+        uint32_t pct = (uint32_t)(((uint64_t)recentReadPage * 100) / recentReadTotalPages);
+        if (pct > 100) pct = 100;
+        const int pbX = 6, pbY = mY + 32, pbW = 190, pbH = 6;
+        fillRect(pbX, pbY, pbW, pbH, false);
+        drawRect(pbX, pbY, pbW, pbH, true);
+        int fillW = (int)((uint64_t)pbW * pct / 100);
+        if (fillW > 0) fillRect(pbX + 1, pbY + 1, fillW - 1, pbH - 2, true);
+        char pr[20];
+        snprintf(pr, sizeof(pr), "%lu%%", (unsigned long)pct);
+        drawTextUTF8(pbX + pbW + 4, pbY - 8, pr, 40, true);
+        char pg[20];
+        snprintf(pg, sizeof(pg), "%lu/%lu页", (unsigned long)recentReadPage, (unsigned long)recentReadTotalPages);
+        drawTextUTF8(228, pbY - 8, pg, 68, true);
+    } else {
+        drawTextUTF8(6, mY + 30, recentDetail, 200, true);
+    }
+    drawRect(2, mY, 292, mH, true);
+    if (homeSel == 0) drawRect(0, mY - 2, SCR_W, mH + 4, true);   // 主卡选中: 外围框
+
+    // ── 导航 2行×3列 (y66-124) ──
+    // 位1-6: 文件/时钟/天气 | 配网/设置/返回
+    static const char *const navNames[6] = {"文件", "时钟", "天气", "配网", "设置", "返回"};
+    static const int navX[3] = {2, 99, 196};
+    static const int navY[2] = {66, 98};
+    const int nw = 93, nh = 28;
+    for (int i = 0; i < 6; i++) {
+        int col = i % 3, row = i / 3;
+        int nx = navX[col], ny = navY[row];
+        bool sel = homeSel == (i + 1);
+        fillRect(nx, ny, nw, nh, false);
+        int tw = utf8Width(navNames[i]);
+        drawTextUTF8(nx + (nw - tw) / 2, ny + (nh - 16) / 2, navNames[i], nw - 4, true);
+        if (sel) drawRect(nx, ny, nw, nh, true);
+    }
     refresh(full);
 }
 
@@ -988,6 +1024,11 @@ void enterHomeCard() {
             appMode = APP_SETTINGS;
             renderSettingsPage(true);
             saveSleepRecord();   // 界面快照: 已进入设置页
+            break;
+        case 6:   // 返回: 进入时钟页 (默认待机界面)
+            appMode = APP_CLOCK_CONNECT;
+            clockManagerBegin(renderClockConnect, enterClockPage);
+            saveSleepRecord();
             break;
         default: showMsg("功能暂未实现", "稍后开放"); break;
     }
@@ -4919,10 +4960,10 @@ void loop() {
 
     if (appMode == APP_HOME) {
         if (r3 == 1) {
-            homeSel = (homeSel + 1) % 6;
+            homeSel = (homeSel + 1) % 7;
             renderHome(false);
         } else if (r2 == 1) {
-            homeSel = (homeSel + 5) % 6;
+            homeSel = (homeSel + 6) % 7;
             renderHome(false);
         } else if (r3 == 2) {
             enterHomeCard();
