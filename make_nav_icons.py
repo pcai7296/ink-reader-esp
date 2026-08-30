@@ -77,13 +77,14 @@ def icon_weather():
     return img
 
 
-# 4 配网: 实心 WiFi (3 粗弧 + 底部单点)
+# 4 配网: 实心 WiFi (3 收紧弧 + 底部点, 点贴内弧不分离)
 def icon_wifi():
     img = new_img()
     d = ImageDraw.Draw(img)
-    d.ellipse([9, 15, 13, 19], fill=BLACK)   # 底部圆点
-    # 3 条粗弧 (同心, 下方张开)
-    for r, ytop in [(5, 9), (8, 5), (11, 1)]:
+    # 底部圆点 (信号源), 居中偏下
+    d.ellipse([9, 14, 13, 18], fill=BLACK)
+    # 3 条弧: 同心从下往上张开, 半径递增大, 最内弧贴近点
+    for r, ytop in [(6, 7), (9, 3), (12, -1)]:
         d.arc([11 - r, ytop, 11 + r, ytop + 2 * r], start=210, end=330, fill=BLACK, width=3)
     return img
 
