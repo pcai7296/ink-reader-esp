@@ -1028,7 +1028,12 @@ bool settingsSetLongPressMs(uint16_t v) {
   SettingsConfig s; loadSettingsConfig(s); s.longPressMs = v; return saveSettingsConfig(s);
 }
 const char* settingsGetNtpServer() {
-  SettingsConfig s; loadSettingsConfig(s); return s.ntpServer;
+  // ⚠️ 返回静态缓冲, 不能返回局部 SettingsConfig s.ntpServer (悬垂指针, %s 读野指针崩溃 Fatal exception:28)
+  static char buf[sizeof(SettingsConfig().ntpServer)];
+  SettingsConfig s; loadSettingsConfig(s);
+  strncpy(buf, s.ntpServer, sizeof(buf) - 1);
+  buf[sizeof(buf) - 1] = '\0';
+  return buf;
 }
 bool settingsSetNtpServer(const char *v) {
   if (!v || strlen(v) >= sizeof(SettingsConfig().ntpServer)) return false;
