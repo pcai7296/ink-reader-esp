@@ -40,6 +40,7 @@
 #include <user_interface.h>
 #include "reader_utils.h"   // 通用 (深睡 ESP.deepSleep 由 core 提供)
 #include "fb_gfx.h"         // FramebufferGfx 类型 + epd/gfx/u8g2Fonts/textRendererReady extern + 字体 extern
+#include "stats.h"          // 阅读行为统计 V1 (翻页/会话/连续/排行)
 
 
 EPD_290A epd;
@@ -498,7 +499,7 @@ String currentPath = "/";
 struct SleepRecord;   // 休眠记录 (定义在休眠区) — Arduino 自动原型需要此前向声明
 void saveSleepRecord();
 bool readSleepRecord(SleepRecord &rec);
-enum AppMode { APP_HOME = 0, APP_BROWSER = 1, APP_READER = 2, APP_CHAPTERS = 3, APP_NETWORK = 4, APP_CLOCK_CONNECT = 5, APP_CLOCK = 6, APP_WEATHER = 7, APP_SETTINGS = 8, APP_BMP = 9, APP_MARKS = 10, APP_CLOCK_DISGUISE = 11 };
+enum AppMode { APP_HOME = 0, APP_BROWSER = 1, APP_READER = 2, APP_CHAPTERS = 3, APP_NETWORK = 4, APP_CLOCK_CONNECT = 5, APP_CLOCK = 6, APP_WEATHER = 7, APP_SETTINGS = 8, APP_BMP = 9, APP_MARKS = 10, APP_CLOCK_DISGUISE = 11, APP_STATS = 12 };
 int appMode = APP_HOME;
 bool sdAvailable = false;
 // ---- 天气页面状态（本次开机缓存）----
@@ -702,6 +703,7 @@ void renderClockConnect(bool full);
 void enterClockPage();
 void renderClockPage(bool full);
 void renderSettingsPage(bool full);
+void renderStatsPage(bool full);
 void settingsHandleKeys(int r2, int r3);
 // 设置页状态（全局，供 enterHomeCard 初始化）
 #define SETTINGS_MAX_TABS 5
@@ -990,18 +992,19 @@ void renderHome(bool full) {
     } else {
         drawTextUTF8(6, mY + 25, recentDetail, 200, true);
     }
-    drawRect(2, mY, 292, mH, true);   // 主卡仅信息展示, 不画选中框 (非按钮)
+    drawRect(2, mY, 292, mH, true);   // 主卡 (homeSel==0 时画选中框, 可点按续读)
+    if (homeSel == 0) drawRect(0, mY - 2, SCR_W, mH + 4, true);   // 主卡选中: 外围框 (提示可点按续读)
 
     // ── 导航 2行×3列 (y58-124) ──
-    // 位0-5: 续读/文件/时钟 | 天气/配网/设置 (续读替换返回放第一位)
-    static const char *const navNames[6] = {"续读", "文件", "时钟", "天气", "配网", "设置"};
+    // 位1-6: 统计/文件/时钟 | 天气/配网/设置 (统计替换续读放第一位; 续读功能移到主卡)
+    static const char *const navNames[6] = {"统计", "文件", "时钟", "天气", "配网", "设置"};
     static const int navX[3] = {2, 99, 196};
     static const int navY[2] = {58, 94};
     const int nw = 93, nh = 32;
     for (int i = 0; i < 6; i++) {
         int col = i % 3, row = i / 3;
         int nx = navX[col], ny = navY[row];
-        bool sel = homeSel == i;
+        bool sel = homeSel == (i + 1);
         fillRect(nx, ny, nw, nh, false);
         int tw = utf8Width(navNames[i]);
         // 图标(22) + 间距(6) + 文字 整体水平居中; 图标与文字垂直中心对齐
@@ -1018,8 +1021,13 @@ void renderHome(bool full) {
 
 void enterHomeCard() {
     switch (homeSel) {
-        case 0: openRecentRead(); break;
-        case 1:
+        case 0: openRecentRead(); break;   // 主卡: 续读 (功能移到主卡)
+        case 1:                            // 统计 (替换续读的导航位)
+            appMode = APP_STATS;
+            renderStatsPage(true);
+            saveSleepRecord();
+            break;
+        case 2:
             currentPath = "/";
             selIndex = 0;
             topIndex = 0;
@@ -1029,15 +1037,15 @@ void enterHomeCard() {
             refresh(true);
             saveSleepRecord();   // 界面快照: 已进入文件管理器根目录
             break;
-        case 2:
+        case 3:
             appMode = APP_CLOCK_CONNECT;
             clockManagerBegin(renderClockConnect, enterClockPage);
             saveSleepRecord();   // 界面快照: 已进入配网时钟页
             break;
-        case 3:
+        case 4:
             enterWeatherPage();
             break;
-        case 4:
+        case 5:
             progressSyncFreeReaderHeap();   // 启动热点前腾堆: 关 txtFile + 清阅读行缓冲 (配网会话堆硬约束)
             freeItemList();   // 大目录 items≈34KB+ 是堆大户, 配网会话堆 ~5KB 必须释放
             fsCacheBuild();   // 进 AP 前扫描 SD 目录树 → LittleFS 缓存（/fs/list 浏览不碰 SD, 避开 SD×AP 崩溃）
@@ -1045,7 +1053,7 @@ void enterHomeCard() {
             appMode = APP_NETWORK;
             saveSleepRecord();   // 界面快照: 已进入配网页
             break;
-        case 5:
+        case 6:
             settingsTab = 0;
             settingsLevel = 0;
             settingsSel = 0;
@@ -1475,6 +1483,53 @@ void settingsHandleKeys(int r2, int r3) {
         }
     }
     delay(30);
+}
+
+// ---------- 阅读统计页 (V1: 翻页/会话/连续/排行) ----------
+void renderStatsPage(bool full) {
+    fillRect(0, 0, SCR_W, SCR_H, false);
+    drawTextUTF8(4, 2, "阅读统计", 100, true);
+    fillRect(0, 14, SCR_W, 1, true);
+    const StatsGlobal &g = statsGetGlobal();
+    const BookStat *books = statsGetBooks();
+
+    char line[48];
+    int y = 20;
+    // 今日 / 本周 / 累计 翻页+会话
+    snprintf(line, sizeof(line), "今日   %lu页  %lu次", (unsigned long)g.dayPageTurns, (unsigned long)g.daySessions);
+    drawTextUTF8(6, y, line, 280, true); y += 16;
+    snprintf(line, sizeof(line), "本周   %lu页  %lu次", (unsigned long)g.weekPageTurns, (unsigned long)g.weekSessions);
+    drawTextUTF8(6, y, line, 280, true); y += 16;
+    snprintf(line, sizeof(line), "累计   %lu页  %lu次", (unsigned long)g.totalPageTurns, (unsigned long)g.totalSessions);
+    drawTextUTF8(6, y, line, 280, true); y += 16;
+    snprintf(line, sizeof(line), "连续阅读  %lu天", (unsigned long)g.streak);
+    drawTextUTF8(6, y, line, 280, true); y += 18;
+
+    fillRect(0, y, SCR_W, 1, true); y += 4;
+    drawTextUTF8(6, y, "阅读最多", 100, true); y += 16;
+
+    // TOP8 按 pageTurns 降序, 同页数 lastReadTime 新优先 (简单插入排序)
+    int idx[MAX_BOOK_STATS];
+    for (int i = 0; i < MAX_BOOK_STATS; i++) idx[i] = i;
+    for (int i = 0; i < MAX_BOOK_STATS; i++)
+        for (int j = i + 1; j < MAX_BOOK_STATS; j++) {
+            int a = idx[i], b = idx[j];
+            bool swap = false;
+            if (books[b].pageTurns > books[a].pageTurns) swap = true;
+            else if (books[b].pageTurns == books[a].pageTurns && books[b].lastReadTime > books[a].lastReadTime) swap = true;
+            if (swap) { int t = idx[i]; idx[i] = idx[j]; idx[j] = t; }
+        }
+    int shown = 0;
+    for (int i = 0; i < MAX_BOOK_STATS && shown < 5 && y < 110; i++) {
+        int bi = idx[i];
+        if (!books[bi].path[0] || books[bi].pageTurns == 0) continue;
+        const char *nm = strrchr(books[bi].path, '/');
+        nm = nm ? nm + 1 : books[bi].path;
+        snprintf(line, sizeof(line), "%d. %s  %lu页", shown + 1, nm, (unsigned long)books[bi].pageTurns);
+        drawTextUTF8(6, y, line, 280, true); y += 16; shown++;
+    }
+    if (shown == 0) drawTextUTF8(6, y, "暂无阅读数据", 200, true);
+    refresh(full);
 }
 
 // ---------- 天气页面 ----------
@@ -2258,6 +2313,8 @@ void redrawCurrentPage() {
         renderMarkList(false);
     } else if (appMode == APP_SETTINGS) {
         renderSettingsPage(false);
+    } else if (appMode == APP_STATS) {
+        renderStatsPage(false);
     } else if (appMode == APP_CLOCK) {
         renderClockPage(false);
     } else if (appMode == APP_CLOCK_DISGUISE) {
@@ -3805,6 +3862,7 @@ void nextTxtPage() {
     readTxtPage(txtPageStart);
     writeProgress(txtPageStart);
     renderTxtPage(false);
+    statsOnPageTurn();   // 阅读统计: 成功显示新页, 计 1 翻页
 }
 
 void previousTxtPage() {
@@ -3818,6 +3876,7 @@ void previousTxtPage() {
     readTxtPage(txtPageStart);
     writeProgress(txtPageStart);
     renderTxtPage(false);
+    statsOnPageTurn();   // 阅读统计: 翻页(上一页也计, 指标=翻页次数)
 }
 
 void loadChapterRows(uint32_t offset) {
@@ -4110,6 +4169,7 @@ void closeTxtReader() {
         // 构建中退出: 保留构建句柄后台继续 (loop 公共 indexTaskStep 继续喂),
         // 只关 txtFile; finishTxtIndexBuild 用扫描句柄取 size, 不受影响。
         if (txtFile) txtFile.close();
+        statsOnSessionEnd();   // 阅读统计: 会话结束
         appMode = APP_BROWSER;
         listDir(currentPath.c_str());
         renderAll();
@@ -4123,6 +4183,7 @@ void closeTxtReader() {
     if (txtChapterBuildFile) txtChapterBuildFile.close();
     txtIndexBuilding = false;
     if (txtFile) txtFile.close();
+    statsOnSessionEnd();   // 阅读统计: 会话结束
     appMode = APP_BROWSER;
     listDir(currentPath.c_str());
     renderAll();
@@ -4209,6 +4270,7 @@ void startTxtReader(const char *path, bool forceRebuild) {
     }
     freeItemList();   // 大目录 items≈34KB+ 是堆大户, 进阅读器前释放 (浏览模式回退时 listDir 重建)
     debugFmt("TXT open path=%s rebuild=%d", path, forceRebuild ? 1 : 0);
+    statsOnSessionStart(path);   // 阅读统计: 会话开始, 记录当前书 + 今日/本周/连续天数检查
     // 旋转续读: 读走即清零 (任何路径都不残留; 失败提前 return 也安全)
     uint32_t rotateResume = gRotateResumeOffset;
     gRotateResumeOffset = 0;
@@ -4742,6 +4804,7 @@ void setup() {
 
     epd.init();
     initTextRenderer();
+    statsInit();   // 阅读行为统计: 读 LittleFS /stats/ (翻页/会话/连续/排行)
     // 注册上传状态回调: file_api_fs 上传(START/END/ABORTED)时调 renderUploadStatus 显示
     // "上传中/上传完毕/上传失败"(墨水屏), 对齐官方 A7 web 上传状态显示。
     ofsUpSetPhaseCallback(renderUploadStatus);
@@ -5064,10 +5127,10 @@ void loop() {
 
     if (appMode == APP_HOME) {
         if (r3 == 1) {
-            homeSel = (homeSel + 1) % 6;
+            homeSel = (homeSel + 1) % 7;
             renderHome(false);
         } else if (r2 == 1) {
-            homeSel = (homeSel + 5) % 6;
+            homeSel = (homeSel + 6) % 7;
             renderHome(false);
         } else if (r3 == 2) {
             enterHomeCard();
@@ -5137,6 +5200,17 @@ void loop() {
 
     if (appMode == APP_SETTINGS) {
         settingsHandleKeys(r2, r3);
+        return;
+    }
+
+    if (appMode == APP_STATS) {
+        // 阅读统计页: 中长返回首页 (只读页, 无编辑)
+        if (r2 == 2) {
+            appMode = APP_HOME;
+            renderHome(true);
+            saveSleepRecord();
+        }
+        delay(30);
         return;
     }
 
