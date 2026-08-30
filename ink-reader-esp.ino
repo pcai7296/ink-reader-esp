@@ -30,6 +30,7 @@
 #include "weather_data.h"
 #include "weather_icons.h"
 #include "weather_small_icons.h"
+#include "nav_icons.h"   // 首页导航 13x13 图标: 文件/时钟/天气/配网/设置/返回
 #include "hitokoto.h"
 #include "bmp_show.h"
 #include "progress_sync.h"
@@ -324,6 +325,18 @@ void drawSmallIcon(int x, int y, int idx, bool black) {
     for (int r = 0; r < 13; r++) {
         for (int c = 0; c < 13; c++) {
             uint8_t byte = pgm_read_byte(&wsIcons[idx][r * 2 + c / 8]);
+            if (byte & (0x80 >> (c % 8))) setPix(x + c, y + r, black);
+        }
+    }
+}
+
+// 13x13 首页导航图标：navIcons[6][26] PROGMEM，bit=1 黑像素，每行 2 字节 MSB left
+// 顺序: 0=文件 1=时钟 2=天气 3=配网 4=设置 5=返回
+void drawNavIcon(int x, int y, int idx, bool black) {
+    if (idx < 0 || idx > 5) return;
+    for (int r = 0; r < 13; r++) {
+        for (int c = 0; c < 13; c++) {
+            uint8_t byte = pgm_read_byte(&navIcons[idx][r * 2 + c / 8]);
             if (byte & (0x80 >> (c % 8))) setPix(x + c, y + r, black);
         }
     }
@@ -983,7 +996,11 @@ void renderHome(bool full) {
         bool sel = homeSel == (i + 1);
         fillRect(nx, ny, nw, nh, false);
         int tw = utf8Width(navNames[i]);
-        drawTextUTF8(nx + (nw - tw) / 2, ny + (nh - 16) / 2, navNames[i], nw - 4, true);
+        // 图标(13) + 间距(4) + 文字 整体水平居中
+        int blockW = 13 + 4 + tw;
+        int bx = nx + (nw - blockW) / 2;
+        drawNavIcon(bx, ny + (nh - 13) / 2, i, true);
+        drawTextUTF8(bx + 17, ny + (nh - 16) / 2, navNames[i], nw - 4, true);
         if (sel) drawRect(nx, ny, nw, nh, true);
     }
     refresh(full);
