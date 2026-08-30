@@ -893,10 +893,10 @@ void openRecentRead() {
 
 void drawHomeCard(int x, int y, int w, int h, const char *title,
                  const char *detail, bool selected) {
-    fillRect(x, y, w, h, selected);
-    drawRect(x, y, w, h, !selected);
-    drawTextUTF8(x + 4, y + 1, title, w - 8, !selected);
-    drawTextUTF8(x + 4, y + 16, detail, w - 8, !selected);
+    fillRect(x, y, w, h, false);   // 恒白底 (官方 A7 光标: 选中=空心框, 不反色底)
+    drawTextUTF8(x + 4, y + 1, title, w - 8, true);   // 恒黑字
+    drawTextUTF8(x + 4, y + 16, detail, w - 8, true);
+    if (selected) drawRect(x, y, w, h, true);   // 选中画空心框
 }
 
 void renderHome(bool full) {
