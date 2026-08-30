@@ -187,6 +187,8 @@ void statsOnPageTurn() {
         gGlobal.dayPageTurns++;
         gGlobal.weekPageTurns++;
     }
+    // 翻页即落盘: 用户可能随时复位键(掉电), closeTxtReader 不会执行, 不能只靠 sessionEnd 保存
+    statsSave();
 }
 
 void statsOnSessionEnd() {
