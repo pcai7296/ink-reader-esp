@@ -717,7 +717,7 @@ static const uint8_t kSettingsTabItemCnt[SETTINGS_MAX_TABS] = { 3, 2, 5, 5, 2 };
 static const char *const kSettingsTabNames[SETTINGS_MAX_TABS] = {"WIFI", "存储卡", "时钟", "天气", "电池"};
 int settingsTab = 0;        // 当前分类标签 0..4
 int settingsSel = 0;        // 当前分类下的项索引
-int settingsLevel = 0;      // 0=项列表 1=标签行(中长逐级退回, 复刻官方多级)
+int settingsLevel = 0;      // 0=右栏项列表(子层) 1=左栏父标签(父层; 进入设置默认光标在此=WIFI)
 bool settingsTzEdit = false;   // 时区编辑态（±30 分钟调整中）
 char yiyanText[64] = "";       // 一言（进入时钟页时联网获取；空=不显示）
 void showMsg(const char *msg, const char *msg2);
@@ -1053,8 +1053,8 @@ void enterHomeCard() {
             saveSleepRecord();   // 界面快照: 已进入配网页
             break;
         case 6:
-            settingsTab = 0;
-            settingsLevel = 0;
+            settingsTab = 0;      // 默认父标签 = WIFI
+            settingsLevel = 1;    // 进入时光标默认停在父标签层(WIFI), 右长进入项列表
             settingsSel = 0;
             settingsTzEdit = false;
             appMode = APP_SETTINGS;
@@ -1290,35 +1290,33 @@ void formatTzOffset(int16_t min, char *buf, size_t size) {
 
 void renderSettingsPage(bool full) {
     fillRect(0, 0, SCR_W, SCR_H, false);
-    drawTextUTF8(4, 2, "设备设置", 100, true);
-    fillRect(0, 14, SCR_W, 1, true);
 
-    // ── 顶部标签行 (5 分类) ──
-    const int tabY = 18, tabH = 16;
-    int tx = 4;
+    // ── 左栏: 5 个父标签分类 (竖排, 同级间分割线, 选中=选择框) ──
+    const int tabY0 = 4, tabH = 24;      // 5×24=120 → 底 124 ≤ 128
     for (int t = 0; t < SETTINGS_MAX_TABS; t++) {
-        bool tabSel = (settingsLevel == 1) ? (t == settingsTab) : (t == settingsTab);
-        int tw = utf8Width(kSettingsTabNames[t]);
-        fillRect(tx, tabY, tw + 8, tabH, false);
-        drawTextUTF8(tx + 4, tabY, kSettingsTabNames[t], tw + 4, true);
-        if (tabSel) drawRect(tx, tabY, tw + 8, tabH, true);
-        tx += tw + 12;
+        int y = tabY0 + t * tabH;
+        bool cur = (t == settingsTab);
+        const char *tn = kSettingsTabNames[t];
+        int nw = utf8Width(tn);
+        drawTextUTF8(8, y + 4, tn, 60, true);
+        if (cur) drawRect(2, y + 1, 64, tabH - 2, true);   // 选择框(非反色; 父层/子层均标识当前分类)
+        if (t < SETTINGS_MAX_TABS - 1) fillRect(0, y + tabH - 1, 70, 1, true);  // 同级分割线
     }
-    fillRect(0, tabY + tabH + 1, SCR_W, 1, true);
+    // ── 左右分隔线(左移: x=70) ──
+    fillRect(70, 0, 1, SCR_H, true);
 
-    // ── 项列表 (当前分类, 光标纵移) ──
+    // ── 右 2/3: 当前分类下的详细设置选项 (同级间分割线) ──
     int cnt = kSettingsTabItemCnt[settingsTab];
-    const int itemY0 = tabY + tabH + 8, rowH = 18;
+    const int itemX0 = 76, itemY0 = 4, rowH = 24;
     SettingsConfig s;
     loadSettingsConfig(s);
-    char lastDetail[64];
     for (int i = 0; i < cnt; i++) {
         bool sel = (settingsLevel == 0) && (i == settingsSel);
         int y = itemY0 + i * rowH;
         char name[24];
-        const char *val = nullptr;
+        char lastDetail[64];
+        lastDetail[0] = '\0';
         bool dev = false;   // 未开发
-        snprintf(lastDetail, sizeof(lastDetail), "%s", "");
         switch (settingsTab) {
             case SETTINGS_TAB_WIFI:
                 if (i == 0) { snprintf(name, sizeof(name), "输出功率"); snprintf(lastDetail, sizeof(lastDetail), "%udB", settingsGetOutputPower()); }
@@ -1352,16 +1350,15 @@ void renderSettingsPage(bool full) {
                 break;
             default: snprintf(name, sizeof(name), "?"); break;
         }
-        fillRect(0, y, SCR_W, rowH, false);
-        drawTextUTF8(6, y + 2, name, 110, true);
-        if (dev) {
-            drawTextUTF8(150, y + 2, "未开发", 140, true);
-        } else if (val) {
-            drawTextUTF8(150, y + 2, val, 140, true);
-        } else {
-            drawTextUTF8(150, y + 2, lastDetail, 140, true);
-        }
-        if (sel) drawRect(0, y, SCR_W, rowH, true);
+        int nw = utf8Width(name);
+        drawTextUTF8(itemX0, y + 4, name, SCR_W - itemX0 - 8, true);
+        int vx = itemX0 + nw + 12;
+        int vmax = SCR_W - 2 - vx;
+        if (vmax < 24) vmax = 24;
+        if (dev)      drawTextUTF8(vx, y + 4, "未开发", vmax, true);
+        else          drawTextUTF8(vx, y + 4, lastDetail, vmax, true);
+        if (sel) drawRect(itemX0 - 4, y + 1, SCR_W - itemX0 + 2, rowH - 2, true);  // 选择框(不压分割线)
+        if (i < cnt - 1) fillRect(70, y + rowH - 1, SCR_W - 70, 1, true);          // 同级分割线
     }
     // 底部按键描述已删除 (遮挡选项; 按键逻辑全局一致无需提醒)
     refresh(full);
