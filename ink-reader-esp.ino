@@ -53,6 +53,13 @@ EPD_290A epd;
 #ifndef BOOT_AP_MODE
 #define BOOT_AP_MODE 0
 #endif
+// ★ 条件编译: SERIAL_REMOTE=1 时进入"远程控制专用版"——
+//   GPIO3(RX/KEY3) 全程让给串口接收按键命令, 物理 KEY3 失效(摸不到设备无妨);
+//   物理 KEY2(GPIO0) 照常工作; 串口行命令注入按键事件 (复用现有 appMode 分发, 效果=真按)。
+// =0 时恢复标准硬件按键, 不影响正常使用。编译可覆盖: -DSERIAL_REMOTE=0。
+#ifndef SERIAL_REMOTE
+#define SERIAL_REMOTE 0
+#endif
 // 环形日志压缩 (2×128B): 串口实时输出不受影响; 静态 BSS 每减 1B 可用堆增 1B,
 // BearSSL TLS 同步需要大堆, 省下的 RAM 全部让给堆。
 #define DIAG_RING_COUNT 2
@@ -388,10 +395,62 @@ int readKey2() {
 }
 
 int readKey3() {
+#if SERIAL_REMOTE
+    // 远程控制专用版: GPIO3 是串口 RX, 全程让给串口 (接收命令字节), 不驱动。
+    // 物理 KEY3 因此失效 (摸不到设备时无所谓); 按键改由串口命令注入。
+    return 1;   // 恒视为"未按下" (不驱动总线, 保证 RX 能收命令)
+#else
     pinMode(KEY3_PIN, OUTPUT);
     digitalWrite(KEY3_PIN, HIGH);
     return digitalRead(KEY3_PIN);
+#endif
 }
+
+// ---------- 远程控制专用: 串口按键注入 (仅 SERIAL_REMOTE=1 编译) ----------
+// 物理 KEY3(GPIO3=RX) 让给串口后, 按键事件改由 PC 通过串口行命令注入。
+// 命令按行(以 \n 或 \r 结尾), 支持:
+//   K2S  中键短按   K2L  中键长按   K3S  右键短按   K3L  右键长按
+//   B    组合键(中短 → 右短 ≤1s)回主页   ?    帮助
+// 注入结果写入 gInjR2/gInjR3(0=无,1=短,2=长), 由 loop() 每圈消费一次并覆盖 r2/r3,
+// 从而 100% 复用现有 appMode 分发 —— 注入按键与物理按键效果完全一致。
+#if SERIAL_REMOTE
+static int gInjR2 = 0;      // 待注入的中键事件 (0=无,1=短,2=长)
+static int gInjR3 = 0;      // 待注入的右键事件 (0=无,1=短,2=长)
+static char gInjLine[24];   // 命令行缓冲
+static uint8_t gInjLineLen = 0;
+
+void serialRemoteInject(char c) {
+    if (c == '\n' || c == '\r') {
+        gInjLine[gInjLineLen] = '\0';
+        gInjLineLen = 0;
+        // 忽略空行
+        if (gInjLine[0] == '\0') return;
+        if (strcmp(gInjLine, "K2S") == 0) { gInjR2 = 1; }
+        else if (strcmp(gInjLine, "K2L") == 0) { gInjR2 = 2; }
+        else if (strcmp(gInjLine, "K3S") == 0) { gInjR3 = 1; }
+        else if (strcmp(gInjLine, "K3L") == 0) { gInjR3 = 2; }
+        else if (strcmp(gInjLine, "B") == 0) { gInjR2 = 1; gInjR3 = 1; }
+        else if (strcmp(gInjLine, "?") == 0) {
+            Serial.println("REMOTE_CMDS: K2S|K2L|K3S|K3L|B|?  (换行结尾)");
+        }
+        else {
+            traceFmt("REMOTE_UNKNOWN cmd=%s", gInjLine);
+        }
+        // 置脏后 loop() 消费
+    } else if (gInjLineLen < sizeof(gInjLine) - 1) {
+        gInjLine[gInjLineLen++] = c;
+    }
+    // 超长则丢弃(不解析)
+}
+
+void serialRemotePoll() {
+    while (Serial.available()) {
+        char c = (char)Serial.read();
+        serialRemoteInject(c);
+    }
+}
+#endif
+
 
 // ---------- 电池电量 ----------
 // V14 官方 Get_bat_vcc.ino: GPIO12 是电池分压开关, 采样前拉高, 采样后拉低。
@@ -3927,8 +3986,15 @@ bool checkLowBattery() {
     int v2 = readBatteryMV();
     if (v2 > BAT_LOW_MV) return false;
     traceFmt("LOWBAT detect v1=%d v2=%d", v1, v2);
+#if SERIAL_REMOTE
+    // 远程控制专用版: 低压深睡同样只能 KEY1 硬件复位唤醒, 摸不到设备时睡着不可逆。
+    // 远程调试多接 USB 供电, 电压检测常误判 → 只记日志不深睡, 保住串口远程通道。
+    traceFmt("LOWBAT_SKIP remote mode v1=%d v2=%d", v1, v2);
+    return false;
+#else
     enterLowBatterySleep();
     return true;
+#endif
 }
 
 void nextTxtPage() {
@@ -5162,6 +5228,12 @@ void loop() {
     int raw3 = readKey3();
     int r2 = scanKey(k2, raw2 == 0);
     int r3 = scanKey(k3, raw3 == 0);
+#if SERIAL_REMOTE
+    // 远程控制专用: 消费串口注入的按键事件, 覆盖物理扫描结果 → 走同一 appMode 分发。
+    serialRemotePoll();
+    if (gInjR2) { r2 = gInjR2; traceFmt("REMOTE_INJ key2=%d", gInjR2); gInjR2 = 0; }
+    if (gInjR3) { r3 = gInjR3; traceFmt("REMOTE_INJ key3=%d", gInjR3); gInjR3 = 0; }
+#endif
     notePhysicalKeyActivity(r2, r3);
     static uint32_t lastKeyLogMs = 0;
     static int lastRaw2 = -1, lastRaw3 = -1;
@@ -5200,6 +5272,11 @@ void loop() {
     }
 
     if (millis() - lastPhysicalKeyMs >= AUTO_SLEEP_MS) {
+#if SERIAL_REMOTE
+        // 远程控制专用版: 深睡只能靠 KEY1 硬件复位唤醒, 摸不到设备时一旦睡着就再也醒不来,
+        // 串口无法唤醒深睡 → 远程模式禁用自动休眠, 保证串口稳定在线。
+        (void)0;
+#else
         // 伪装模式 (老板快捷键) + AP 配网模式不自动休眠:
         //  - 伪装模式: 休眠会画"休眠"提示暴露非时钟功能, 且闹钟应持续显示
         //  - AP 配网(APP_NETWORK): 用户用手机管理页上传/浏览, 不按设备按键, 5 分钟无按键会
@@ -5210,6 +5287,7 @@ void loop() {
             enterSleepMode();
             return;
         }
+#endif
     }
 
     if (r2 == 1) debugLine("KEY middle short");
