@@ -25,6 +25,7 @@
 #include <U8g2_for_Adafruit_GFX.h>
 #include <SD.h>
 #include <SDFS.h>   // SDFS.openDir + Dir::next()（官方 A7 枚举同款; File::openNextFile 每项重开文件, 大目录枚举 0 根因, 弃用）
+#include <LittleFS.h>
 #include "wifi_manager.h"
 #include "fs_cache.h"   // SD 目录树 → LittleFS 缓存（进 AP 前扫描; /fs/list 读缓存不碰 SD）
 #include "weather_data.h"
@@ -331,14 +332,14 @@ void drawSmallIcon(int x, int y, int idx, bool black) {
     }
 }
 
-// 22x22 首页导航线条描边图标：navIcons[6][66] PROGMEM，bit=1 黑像素，每行 3 字节 MSB left
-// 顺序: 0=续读 1=文件 2=时钟 3=天气 4=配网 5=设置
+// 22x22 首页导航图标：navIcons[6][66] PROGMEM（本机实际编码: 位=1 黑 / 位=0 白, MSB left）
+// 顺序: 0=统计 1=文件 2=时钟 3=天气 4=配网 5=设置
 void drawNavIcon(int x, int y, int idx, bool black) {
     if (idx < 0 || idx > 5) return;
     for (int r = 0; r < 22; r++) {
         for (int c = 0; c < 22; c++) {
             uint8_t byte = pgm_read_byte(&navIcons[idx][r * 3 + c / 8]);
-            if (byte & (0x80 >> (c % 8))) setPix(x + c, y + r, black);
+            if (byte & (0x80 >> (c % 8))) setPix(x + c, y + r, black);   // 位=1 黑
         }
     }
 }
@@ -1037,6 +1038,13 @@ void enterHomeCard() {
             saveSleepRecord();   // 界面快照: 已进入文件管理器根目录
             break;
         case 3:
+            if (!wifiManagerHasCredentials()) {
+                // 未保存 WiFi 配置: 校准页显示"未配网", 自动跳过校准流程直接进入时钟页
+                appMode = APP_CLOCK_CONNECT;
+                renderClockNoWifi();   // 全刷提示"未配网"(停留≈1.5s)
+                enterClockPage();      // 直接进时钟(芯片/软件时间, 状态显示"未校准")
+                break;
+            }
             appMode = APP_CLOCK_CONNECT;
             clockManagerBegin(renderClockConnect, enterClockPage);
             saveSleepRecord();   // 界面快照: 已进入配网时钟页
@@ -1119,6 +1127,10 @@ void renderUploadStatus(int phase, const char *path) {
     refresh(false);
 }
 
+// 配网页底行常驻"Web 修改成功"消息（wifi_manager 保存端点回调写入; 左对齐可右溢出屏外自然裁剪,
+// 下一次修改到来前不消失; 退出配网时清空 → 恢复"中键长按退出"）
+char gWebNotifyLine[160] = "";
+
 void renderNetworkPage(bool full) {
     fillRect(0, 0, SCR_W, SCR_H, false);
     drawTextUTF8(4, 2, "网络配网", 120, true);
@@ -1129,7 +1141,10 @@ void renderNetworkPage(bool full) {
     drawTextUTF8(4, 62, "密码: 333333333", 288, true);
     drawTextUTF8(4, 82, "地址: 192.168.4.1", 288, true);
     const char *staIp = wifiManagerStaIp();
-    if (staIp && staIp[0]) {
+    if (gWebNotifyLine[0]) {
+        // 常驻修改消息: 左对齐, 超宽向右溢出屏幕(画布边界自然裁剪), 不换行
+        drawTextUTF8(4, 102, gWebNotifyLine, 2000, true);
+    } else if (staIp && staIp[0]) {
         snprintf(line, sizeof(line), "STA: %s", staIp);
         drawTextUTF8(4, 102, line, 288, true);
     } else {
@@ -1138,7 +1153,23 @@ void renderNetworkPage(bool full) {
     refresh(full);
 }
 
+// Web 设置修改成功提示（wifi_manager 回调）: 拼"修改成功：选项=值"写入底行常驻消息并局刷配网页
+void webSettingsNotify(const char *line1, const char *line2) {
+    gWebNotifyLine[0] = '\0';
+    if (line1 && line1[0]) snprintf(gWebNotifyLine, sizeof(gWebNotifyLine), "%s", line1);
+    if (line2 && line2[0]) {
+        size_t a = strlen(gWebNotifyLine);
+        snprintf(gWebNotifyLine + a, sizeof(gWebNotifyLine) - a, "%s%s",
+                 a ? "：" : "", line2);
+    }
+    Serial.printf("WEB_NOTIFY_LINE %s\n", gWebNotifyLine);
+    if (textRendererReady && appMode == APP_NETWORK) {
+        renderNetworkPage(false);   // 局刷底行(消息常驻, 下次修改才更新)
+    }
+}
+
 void exitNetworkPage() {
+    gWebNotifyLine[0] = '\0';   // 退出配网清空底行消息(下次进入显示"中键长按退出")
     int ret = gNetworkReturnMode;
     gNetworkReturnMode = APP_HOME;
     if (ret == APP_READER) {
@@ -1151,6 +1182,22 @@ void exitNetworkPage() {
         renderHome(true);
     }
     saveSleepRecord();
+}
+
+// 未保存 WiFi 配置: 校准页骨架 + "未配网" 提示（全刷 ≈1.5s 停留）, 不启动网络校准, 随后直接进时钟页
+void renderClockNoWifi() {
+    fillRect(0, 0, SCR_W, SCR_H, false);
+    drawTextUTF8(4, 2, "时间校准", 100, true);
+    const int y = 42;
+    drawTextUTF8(25, y, "设备", 42, true);
+    drawTextUTF8(126, y, "路由器", 56, false);
+    drawTextUTF8(238, y, "互联网", 56, false);
+    drawTextUTF8(66, y + 1, "···", 52, true);
+    drawTextUTF8(178, y + 1, "···", 52, true);
+    drawTextUTF8(4, 76, "未配网", 288, true);
+    drawTextUTF8(4, 96, "未保存 WiFi 配置，跳过校准", 288, true);
+    drawTextUTF8(4, 112, "进入时钟", 288, true);
+    refresh(true);   // 全刷呈现提示(约1.5s)后由调用方进入时钟页
 }
 
 void renderClockConnect(bool full) {
@@ -1754,6 +1801,19 @@ void fetchWeatherFlow(bool force) {
 
 void enterWeatherPage() {
     appMode = APP_WEATHER;
+    // 未保存天气密钥或城市 → 弹窗提示, 页面直接停在"请到配网页设置"错误态, 不发起天气获取
+    WeatherConfig wc;
+    loadWeatherConfig(wc);
+    if (wc.key[0] == '\0' || wc.city[0] == '\0') {
+        wFetching = false;
+        strncpy(wErrCode, "NOKEY", sizeof(wErrCode) - 1);
+        wErrCode[sizeof(wErrCode) - 1] = '\0';
+        showMsg("未配置天气", "未保存天气密钥或城市");
+        if (wDataValid) renderWeatherErrorOverlay(wErrCode);
+        else renderWeatherPage(true);
+        saveSleepRecord();
+        return;
+    }
     renderWeatherPage(true);        // 全刷一次（显示缓存或"获取中"）
     fetchWeatherFlow(false);        // 进入自动获取（内部含夜间判断，完成后局部刷新）
     saveSleepRecord();              // 界面快照: 已进入天气页
@@ -1837,18 +1897,32 @@ bool isWhitelistedFile(const char *name) {
            extIs(dot, ".ttf") || extIs(dot, ".bin");
 }
 
+// ---- SD 介质切换: 文件管理器可浏览 SD 或本地 LittleFS ----
+// gBrowseLocal=false(默认)=SD 介质(现行为, 零回归); true=本地 flash(LittleFS), 于 sdEnabled==0 或 SD 检测不到时置位
+bool gBrowseLocal = false;
+static fs::FS &browseFs() { return gBrowseLocal ? LittleFS : SDFS; }
+// 本地介质隐藏系统资源: web 界面文件/系统缓存/统计目录（仅本地浏览层过滤, 不写入共享黑名单以免污染 SD 同名目录）
+static bool localSystemEntry(const char *name) {
+    if (!name || !name[0]) return false;
+    if (name[0] == '.') return true;                              // 隐藏点文件/目录
+    if (strcmp(name, "fslist") == 0 || strcmp(name, "stats") == 0) return true;  // 系统缓存/统计
+    if (strcmp(name, "set.htm") == 0 || strcmp(name, "manager.htm") == 0) return true;  // web 界面文件
+    return false;
+}
+
 // 加载窗口: 从 startIdx 开始填充 winItems[0..LIST_WINDOW-1]
 // （openDir 从头扫, 纯目录项扫描 ~ms 级; 窗口化方案的核心, 大目录不占堆）
 void loadListWindow(const char *path, int startIdx) {
     winCount = 0;
     if (startIdx < 0) startIdx = 0;
     if (startIdx >= itemCount) startIdx = itemCount > 0 ? itemCount - 1 : 0;
-    Dir w = SDFS.openDir(path);
+    Dir w = browseFs().openDir(path);
     int skipped = 0;
     while (w.next()) {
       String baseName = w.fileName();   // fs::Dir 返回 String; 过滤函数已纯 C（零额外分配）
       const char *nm = baseName.c_str();
       if (isBlacklistedEntry(nm)) continue;
+      if (gBrowseLocal && localSystemEntry(nm)) continue;   // 本地介质: 隐藏系统资源
       // 白名单（SDFS._lfn 已扩 256B, 完整文件名正确判定）
       if (!w.isDirectory() && !isWhitelistedFile(nm)) continue;
       if (skipped < startIdx) { skipped++; continue; }   // 跳过窗口之前的项
@@ -1869,22 +1943,24 @@ void loadListWindow(const char *path, int startIdx) {
 bool listDir(const char *path) {
     uint32_t started = millis();
     itemCount = 0;
-    // EPD 与 SD 共用 SPI；每次目录操作前恢复 SD 的片选和总线状态。
-    digitalWrite(EPD_CS_PIN, HIGH);
-    digitalWrite(5, HIGH);
-    pinMode(5, OUTPUT);
-    SPI.begin();
-    bool sdBusOk = SD.begin(5, SD_SCK_MHZ(20));
-    traceFmtLevel(sdBusOk ? 'I' : 'E', "SD_REINIT path=%s ok=%d", path ? path : "(null)", sdBusOk ? 1 : 0);
-    if (!sdBusOk) return false;
-    // 使用官方 A7 同款枚举: SDFS.openDir + Dir::next()（纯目录项扫描, 零重开文件）。
+    // EPD 与 SD 共用 SPI；每次目录操作前恢复 SD 的片选和总线状态。（本地 LittleFS 介质无需 SD 总线）
+    if (!gBrowseLocal) {
+        digitalWrite(EPD_CS_PIN, HIGH);
+        digitalWrite(5, HIGH);
+        pinMode(5, OUTPUT);
+        SPI.begin();
+        bool sdBusOk = SD.begin(5, SD_SCK_MHZ(20));
+        traceFmtLevel(sdBusOk ? 'I' : 'E', "SD_REINIT path=%s ok=%d", path ? path : "(null)", sdBusOk ? 1 : 0);
+        if (!sdBusOk) return false;
+    }
+    // 使用官方 A7 同款枚举: openDir + Dir::next()（纯目录项扫描, 零重开文件）。
     // ⚠️ File::openNextFile() 内部每项 openFile("r") 重开文件 → 大目录(600+) O(n²) 路径解析 +
     //    低堆 malloc 失败 → 首次即 null（实测某些文件夹读不出）; rewindDirectory 是安慰剂, 已弃用。
     diagFlushSd(true);
     bool traceWasOpen = (bool)traceFile;
     if (traceWasOpen) traceFile.close();
     {
-      File probe = SD.open(path, FILE_READ);
+      File probe = browseFs().open(path, "r");
       bool okDir = probe && probe.isDirectory();
       if (probe) probe.close();
       if (!okDir) return false;
@@ -1894,12 +1970,13 @@ bool listDir(const char *path) {
     // 每文件仅此 1 次 String 分配, 大幅降低 15KB 堆碎片压力（原 3 次/文件导致 239 bug）
     {
       int rawCount = 0;
-      Dir cnt = SDFS.openDir(path);
+      Dir cnt = browseFs().openDir(path);
       while (cnt.next()) {
         rawCount++;
         String baseName = cnt.fileName();
         const char *nm = baseName.c_str();
         if (isBlacklistedEntry(nm)) continue;
+        if (gBrowseLocal && localSystemEntry(nm)) continue;   // 本地介质: 隐藏系统资源
         // 白名单: 目录始终显示; 文件只显示 txt/bmp/jpg/ttf/bin (对齐 A7 分类表 0x000ea8b4)
         // SDFS._lfn 已扩到 256B: 完整文件名, 长名 txt 不再因截断丢失扩展名被误过滤
         if (!cnt.isDirectory() && !isWhitelistedFile(nm)) continue;
@@ -2082,6 +2159,10 @@ bool isBmpFile(const char *name) {
 
 // 全屏显示 SD 卡 BMP：进入 APP_BMP，绘制后全刷；失败自动恢复文件管理器
 void showBmpFile(const char *path) {
+    if (gBrowseLocal) {   // 本地 LittleFS 介质仅浏览, 不支持图片查看
+        showMsg("本地空间", "仅浏览，不支持查看");
+        return;
+    }
     appMode = APP_BMP;
     fillRect(0, 0, SCR_W, SCR_H, false);   // 白底
     if (!bmpShowFromSd(path)) {
@@ -2194,7 +2275,7 @@ void execMenu() {
                     showMsg("文件夹删除", "暂不支持");
                 } else if (it) {
                     String path = currentPath + it->name;
-                    if (SD.remove(path.c_str())) {
+                    if (browseFs().remove(path.c_str())) {
                         clearRecentReadPathIfMatches(path);
                         // 删除成功: 刷新列表
                         listDir(currentPath.c_str());
@@ -2316,6 +2397,10 @@ void redrawCurrentPage() {
     } else if (appMode == APP_CLOCK_DISGUISE) {
         fbRot = 90;
         renderClockPage(false);   // 伪装模式保持时钟页
+    } else if (appMode == APP_NETWORK) {
+        renderNetworkPage(false);   // 配网页被提示框覆盖后恢复(局刷)
+    } else if (appMode == APP_WEATHER) {
+        renderWeatherPage(false);   // 天气页被提示框覆盖后恢复(局刷, 不触发网络动作)
     } else if (appMode == APP_BMP) {
         // 图片浏览被覆盖（如提示）后恢复：回文件管理器
         appMode = APP_BROWSER;
@@ -4259,6 +4344,10 @@ uint32_t findPageCeil(const String &indexPath, uint32_t saved) {
 }
 
 void startTxtReader(const char *path, bool forceRebuild) {
+    if (gBrowseLocal) {   // 本地 LittleFS 介质仅浏览, 不支持 TXT 阅读
+        showMsg("本地空间", "仅浏览，不支持阅读");
+        return;
+    }
     if (!isTxtPath(path)) {
         traceFmtLevel('W', "TXT unsupported path=%s", path ? path : "(null)");
         showMsg("不支持打开", "仅支持TXT文件");
@@ -4804,25 +4893,35 @@ void setup() {
     // 注册上传状态回调: file_api_fs 上传(START/END/ABORTED)时调 renderUploadStatus 显示
     // "上传中/上传完毕/上传失败"(墨水屏), 对齐官方 A7 web 上传状态显示。
     ofsUpSetPhaseCallback(renderUploadStatus);
+    // 注册 Web 设置修改回调: 配网页每次保存设置成功 → showMsg("修改成功", "选项=值") 局刷提示
+    wifiManagerSetWebNotifyCb(webSettingsNotify);
 
     // 启动阶段不先绘制首页/启动画面: 先完成 SD 初始化, 再统一按 KEY3/最近阅读分流。
     // 这样 KEY1 复位后不会短暂跳首页, 默认只全刷恢复页一次。
 
+    // ── 介质选择: 关闭 SD 启用(显式) → 只本地 flash; 否则尝试挂 SD, 检测不到也回退本地 flash ──
+    bool wantSd = (settingsGetSdEnabled() != 0);   // 默认(v2/首次)=1 启用 SD; 0=显式关闭→本地
     // 仅 SD 挂载期间短暂停软 WDT (防挂载超时触发), 挂载后立即恢复
     ESP.wdtDisable();
-    bool sdOk = SD.begin(5, SD_SCK_MHZ(20));
+    bool sdOk = wantSd ? SD.begin(5, SD_SCK_MHZ(20)) : false;
     ESP.wdtEnable(8000);   // 恢复软 WDT, 8s 超时; loop 里 delay(30) 会自动喂狗
+    gBrowseLocal = !sdOk;                    // 关闭 SD 或检测不到 → 浏览本地 LittleFS
     if (sdOk) {
         sdAvailable = true;
         traceOpen();
         traceFmt("BOOT reason=%s info=%s", ESP.getResetReason().c_str(), ESP.getResetInfo().c_str());
         traceFmt("SD_READY cs=5 speed=20MHz");
     }
-    debugFmt("SD begin=%d", sdOk ? 1 : 0);
+    debugFmt("SD begin=%d wantSd=%d local=%d", sdOk ? 1 : 0, wantSd ? 1 : 0, gBrowseLocal ? 1 : 0);
 
-    if (!sdOk) {
-        showMsg("SD挂载失败", "请检查SD卡");
-        while (1) delay(1000);
+    if (gBrowseLocal) {
+        // 本地 flash 介质: 不挂 SD 也无卡死循环, 直接进首页（跳过 SD 阅读恢复/引导）
+        sdAvailable = false;
+        appMode = APP_HOME;
+        renderHome(true);
+        epd.display(fb);
+        saveSleepRecord();
+        return;
     }
 
     if (!listDir("/")) {

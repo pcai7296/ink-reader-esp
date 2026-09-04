@@ -2,7 +2,7 @@
 // 契约: docs/file-api.md（S7 落盘）; 错误码枚举见 file_api.h
 //
 // 约定:
-// - 读端点开放, 变更端点必验 X-Admin-Pass（复用 requireAdminAuth）
+// - 读端点开放; 变更端点自管理密码机制废除后全部开放（仅 AP 配网会话可达）
 // - 入参路径 = server.arg() 已 percent 解码 → normalizeApiPath 规范化 → 拒绝即 400
 // - 大响应一律 chunked 流式（sendContent_P + (const char*)F() 驻留 flash,
 //   配网会话低堆实测教训: 裸字面量进 .rodata 吞 5KB RAM）
@@ -314,7 +314,7 @@ static void handleApiUploadStatus() {
   srv.send(200, "application/json; charset=utf-8", tmp);
 }
 
-// ---- 变更端点（全部必验 X-Admin-Pass; 401 unauthorized）----
+// ---- 变更端点（管理密码已废除, 开放直改）----
 // 传输并发锁: v1 服务器单客户端, 阻塞式传输期间天然互斥;
 // 该标志供后续协作式传输与跨请求防御（传输中其他变更端点 → 409 busy）
 static volatile bool gTransferActive = false;
@@ -342,7 +342,6 @@ static void sendSdErr(SdErr r) {
 // POST /api/mkdir?path=
 static void handleApiMkdir() {
   ESP8266WebServer &srv = wifiManagerServer();
-  if (!wifiManagerAdminPassValid()) { sendApiErr(401, "unauthorized"); return; }
   if (apiBusy()) { sendApiErr(409, "busy"); return; }
   String pathArg = srv.arg("path");
   if (pathArg.length() == 0) { sendApiErr(400, "invalid_path"); return; }
@@ -357,7 +356,6 @@ static void handleApiMkdir() {
 // POST /api/delete?path=
 static void handleApiDelete() {
   ESP8266WebServer &srv = wifiManagerServer();
-  if (!wifiManagerAdminPassValid()) { sendApiErr(401, "unauthorized"); return; }
   if (apiBusy()) { sendApiErr(409, "busy"); return; }
   String pathArg = srv.arg("path");
   if (pathArg.length() == 0) { sendApiErr(400, "invalid_path"); return; }
@@ -372,7 +370,6 @@ static void handleApiDelete() {
 // POST /api/rename?path=&name=  （同目录改名）
 static void handleApiRename() {
   ESP8266WebServer &srv = wifiManagerServer();
-  if (!wifiManagerAdminPassValid()) { sendApiErr(401, "unauthorized"); return; }
   if (apiBusy()) { sendApiErr(409, "busy"); return; }
   String pathArg = srv.arg("path");
   String nameArg = srv.arg("name");
@@ -399,7 +396,6 @@ static void handleApiRename() {
 // POST /api/move?path=&dest=  （跨目录; 防环）
 static void handleApiMove() {
   ESP8266WebServer &srv = wifiManagerServer();
-  if (!wifiManagerAdminPassValid()) { sendApiErr(401, "unauthorized"); return; }
   if (apiBusy()) { sendApiErr(409, "busy"); return; }
   String pathArg = srv.arg("path");
   String destArg = srv.arg("dest");

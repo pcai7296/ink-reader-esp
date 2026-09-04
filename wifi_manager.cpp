@@ -1,6 +1,7 @@
 #include "wifi_manager.h"
 #include "file_api.h"
 #include "file_api_fs.h"
+#include <LittleFS.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266HTTPUpdateServer.h>
@@ -312,6 +313,9 @@ String apSsid;
 String staIp;
 uint32_t deadline = 0;
 bool active = false;
+bool wifiConnectPending = false;   // 保存 WiFi 且响应已发出后置位, 由 loop 下一轮断 AP 连 STA(照官方"保存立即返回")
+int  wifiSaveResult = 0;           // 最近一次"保存并连接"结果: 0=进行中 1=成功 2=失败(前端轮询 /status 读取; 照官方 getData2 轮询)
+char wifiSaveIp[16] = "";          // 连接成功时的 STA IP
 void (*renderPage)(bool) = nullptr;
 void (*exitPage)() = nullptr;
 void (*clockRender)(bool) = nullptr;
@@ -368,7 +372,7 @@ const uint8_t ADMIN_VERSION = 1;
 struct AdminConfig {
   uint32_t magic;
   uint8_t version;
-  char password[32];    // 管理密码（空=未设置; 未设置时写端点 fail-closed 拒绝）
+  char password[32];    // ⚠️ 已废弃（管理密码机制删除）; 保留字段仅为 EEPROM 布局/checksum 兼容, 永不再用于鉴权
   char otaPass[32];     // OTA 升级密码（空=未设置; 未设置时 /update 不可用）
   uint16_t checksum;
 };
@@ -407,29 +411,26 @@ bool saveAdminConfig(const AdminConfig &in) {
   return EEPROM.commit();
 }
 
-// 取请求携带的管理密码: X-Admin-Pass 头优先, 其次 apass 表单字段
-static String adminPassFromRequest() {
-  if (server.hasHeader("X-Admin-Pass")) return server.header("X-Admin-Pass");
-  if (server.hasArg("apass")) return server.arg("apass");
-  return String("");
+// ---- Web 设置修改 → 墨水屏提示（每次保存成功回调墨水瓶: line1=标题 line2=变更摘要）----
+static WebSettingsNotifyCb g_webNotifyCb = nullptr;   // 匿名区内部回调
+void webNotifyCbSet(WebSettingsNotifyCb cb) { g_webNotifyCb = cb; }   // 匿名区名, 导出区转发调用
+static void fireWebNotify(const char *l1, const char *l2) {
+  Serial.printf("WEB_NOTIFY %s | %s\n", l1 ? l1 : "", l2 ? l2 : "");
+  if (g_webNotifyCb) g_webNotifyCb(l1, l2 ? l2 : "");
 }
-
-// 受保护 POST 端点统一认证入口: 未设置管理密码（提示先设置）或密码缺失/错误 → 401 并返回 false
-static bool requireAdminAuth() {
-  AdminConfig a;
-  loadAdminConfig(a);
-  if (a.password[0] == '\0') {
-    server.send(401, "text/plain; charset=utf-8",
-                "未设置管理密码：请先在配网页设置管理密码");
-    return false;
-  }
-  String given = adminPassFromRequest();
-  if (given.length() == 0 || given.length() >= sizeof(a.password) ||
-      strcmp(given.c_str(), a.password) != 0) {
-    server.send(401, "text/plain; charset=utf-8", "管理密码缺失或错误");
-    return false;
-  }
-  return true;
+// 摘要缓冲: 各保存 handler 逐项 webNotifyAdd("选项=值 ") 后 webNotifyDone(标题) 统一回调
+static char g_webNotifySum[72];
+static void webNotifyReset() { g_webNotifySum[0] = '\0'; }
+static void webNotifyAdd(const char *item) {
+  size_t b = strlen(item);
+  if (b == 0) return;   // 空串直接忽略(防 memcpy 截断已有摘要)
+  size_t a = strlen(g_webNotifySum);
+  if (a + b >= sizeof(g_webNotifySum)) return;   // 超长丢弃尾部, 保前段
+  memcpy(g_webNotifySum + a, item, b + 1);
+}
+static void webNotifyDone(const char *title) {
+  fireWebNotify(title, g_webNotifySum[0] ? g_webNotifySum : "");   // l2 空=只显示标题(如"正在连接"), 不再 fallback 杂文案
+  g_webNotifySum[0] = '\0';
 }
 
 // 天气 KEY 掩码: 已配置显示 "****…****<尾4>", 未配置返回空; 配网页不回显明文
@@ -599,131 +600,6 @@ static String jsonEscape(const char *s) {
   return out;
 }
 
-void handleRoot() {
-  Serial.printf("HTTP_ROOT heap=%u\n", (unsigned)ESP.getFreeHeap());
-  // 流式输出（chunked）: 配网模式 heap 紧张（实测 handleRoot 时仅 ~5.8KB），整页 String(~8KB)
-  // 分配会 OOM 崩溃（Exception 29）。逐段 sendContent_P 直发 flash 字面量, 不占大堆。
-  server.chunkedResponseModeStart_P(200, (const char*)F("text/html; charset=utf-8"));
-  server.sendContent_P((const char*)F("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>MoShuiPing</title></head><body><h2>MoShuiPing 配网</h2><p>状态："));
-  server.sendContent(stateText());
-  server.sendContent_P((const char*)F("</p><p>热点："));
-  server.sendContent(apSsid);
-  server.sendContent_P((const char*)F("<br>密码：333333333<br>地址：192.168.4.1</p>"));
-  // 管理密码: 除 /admin 首次设置外, 所有保存/清除操作必须携带; JS 经 syncPass 注入各表单/请求
-  server.sendContent_P((const char*)F("<p>管理密码（保存/清除等操作需填写）<br><input type='password' id='apassInput' maxlength='31' autocomplete='off'></p>"));
-  server.sendContent_P((const char*)F("<form method='POST' action='/wifi' onsubmit='syncPass(this)'><input type='hidden' name='apass'>WiFi 名称<br><input name='ssid' id='ssid' maxlength='32' required> <button type='button' onclick='scanWifi()'>扫描</button><br><select id='wifiList' onchange='useWifi()'><option value=''>-- 点扫描列出附近 WiFi --</option></select><br>WiFi 密码<br><input name='password' type='password' maxlength='64' required><br><button>保存并连接</button></form><form method='POST' action='/clear' onsubmit='syncPass(this)'><input type='hidden' name='apass'><button>清除配置</button></form>"));
-  server.sendContent_P((const char*)F("<h3>天气设置</h3><form method='POST' action='/wifi' onsubmit='syncPass(this)'><input type='hidden' name='apass'>城市<br><input name='city' maxlength='31' value='"));
-  WeatherConfig wc;
-  loadWeatherConfig(wc);
-  server.sendContent(escapeHtml(wc.city));
-  server.sendContent_P((const char*)F("'><br>心知天气 Key（已配置只显示掩码，留空/掩码值不覆盖）<br><input name='wkey' maxlength='31' value='"));
-  server.sendContent(escapeHtml(maskWeatherKey(wc.key).c_str()));
-  server.sendContent_P((const char*)F("'><br><label><input type='checkbox' name='night' value='1'"));
-  if (wc.nightUpdata) server.sendContent_P((const char*)F(" checked"));
-  server.sendContent_P((const char*)F("> 夜间不自动更新</label><br><button>保存天气</button></form>"));
-  // 管理密码 / OTA 密码设置（POST /admin; 首次设置无需旧密码, 已设置后修改需当前管理密码）
-  AdminConfig ad;
-  bool adSet = loadAdminConfig(ad) && ad.password[0] != '\0';
-  server.sendContent_P((const char*)F("<h3>管理密码 / OTA 密码</h3><p>管理密码："));
-  server.sendContent_P(adSet ? (const char*)F("已设置") : (const char*)F("未设置（未设置时所有保存/清除操作会被拒绝）"));
-  server.sendContent_P((const char*)F(" ｜ OTA："));
-  server.sendContent_P((ad.otaPass[0] != '\0') ? (const char*)F("已设置") : (const char*)F("未设置（/update 不可用）"));
-  server.sendContent_P((const char*)F("</p><form method='POST' action='/admin'>当前管理密码（已设置后修改需填写）<br><input name='apass' type='password' maxlength='31'><br>新管理密码（留空保持不变）<br><input name='adminpass' type='password' maxlength='31'><br>OTA 升级密码（留空保持不变）<br><input name='otapass' type='password' maxlength='31'><br><button>保存</button></form>"));
-  // 设备设置表单（时钟格式/时区/一言）——与 /settings 端点对接
-  SettingsConfig s;
-  loadSettingsConfig(s);
-  server.sendContent_P((const char*)F("<h3>设备设置</h3><form method='POST' action='/settings' onsubmit='syncPass(this)'><input type='hidden' name='apass'>时钟格式 <select name='clockFormat'><option value='0'"));
-  if (s.clockFormat == 0) server.sendContent_P((const char*)F(" selected"));
-  server.sendContent_P((const char*)F(">24小时制</option><option value='1'"));
-  if (s.clockFormat == 1) server.sendContent_P((const char*)F(" selected"));
-  server.sendContent_P((const char*)F(">12小时制</option></select><br>时区偏移（分钟）<input name='tz' type='number' min='-720' max='840' value='"));
-  server.sendContent(String(s.tzOffsetMin));
-  server.sendContent_P((const char*)F("'><br>一言 <select name='hitokoto'><option value='1'"));
-  if (s.hitokotoEnabled == 1) server.sendContent_P((const char*)F(" selected"));
-  server.sendContent_P((const char*)F(">开启</option><option value='0'"));
-  if (s.hitokotoEnabled == 0) server.sendContent_P((const char*)F(" selected"));
-  server.sendContent_P((const char*)F(">关闭</option></select><br>旋转方向 <select name='portrait'><option value='0'"));
-  if (s.portrait == 0) server.sendContent_P((const char*)F(" selected"));
-  server.sendContent_P((const char*)F(">0° 横屏</option><option value='3'"));
-  if (s.portrait == 3) server.sendContent_P((const char*)F(" selected"));
-  server.sendContent_P((const char*)F(">90° 竖翻</option><option value='2'"));
-  if (s.portrait == 2) server.sendContent_P((const char*)F(" selected"));
-  server.sendContent_P((const char*)F(">180° 横翻</option><option value='1'"));
-  if (s.portrait == 1) server.sendContent_P((const char*)F(" selected"));
-  server.sendContent_P((const char*)F(">270° 竖屏</option></select><br>"));
-  // ---- 新增设置字段 (官方设置项) ----
-  server.sendContent_P((const char*)F("输出功率 <select name='outputPower'><option value='19'"));
-  if (s.outputPower == 19) server.sendContent_P((const char*)F(" selected"));
-  server.sendContent_P((const char*)F(">19dB</option><option value='20'"));
-  if (s.outputPower == 20) server.sendContent_P((const char*)F(" selected"));
-  server.sendContent_P((const char*)F(">20dB</option><option value='18'"));
-  if (s.outputPower == 18) server.sendContent_P((const char*)F(" selected"));
-  server.sendContent_P((const char*)F(">18dB</option></select><br>NTP服务器 <input name='ntpServer' type='text' maxlength='31' value='"));
-  server.sendContent(String(s.ntpServer));
-  server.sendContent_P((const char*)F("'><br>SD频率 <input name='sdFrequency' type='number' min='5' max='40' value='"));
-  server.sendContent(String(s.sdFrequency));
-  server.sendContent_P((const char*)F("'><br>时钟全刷间隔（分钟）<input name='fullRefresh' type='number' min='1' max='120' value='"));
-  server.sendContent(String(s.fullRefreshMin));
-  server.sendContent_P((const char*)F("'><br>时钟校准间隔（分钟）<input name='calibInterval' type='number' min='1' max='720' value='"));
-  server.sendContent(String(s.calibIntervalMin));
-  server.sendContent_P((const char*)F("'><br>电池显示 <select name='batDisplay'><option value='1'"));
-  if (s.batDisplayType == 1) server.sendContent_P((const char*)F(" selected"));
-  server.sendContent_P((const char*)F(">百分比</option><option value='0'"));
-  if (s.batDisplayType == 0) server.sendContent_P((const char*)F(" selected"));
-  server.sendContent_P((const char*)F(">电压</option></select><br>夜间更新 <select name='nightUpdate'><option value='1'"));
-  if (s.nightUpdate == 1) server.sendContent_P((const char*)F(" selected"));
-  server.sendContent_P((const char*)F(">更新</option><option value='0'"));
-  if (s.nightUpdate == 0) server.sendContent_P((const char*)F(" selected"));
-  server.sendContent_P((const char*)F(">不更新</option></select><br>快速翻页 <select name='fastFlip'><option value='1'"));
-  if (s.fastFlip == 1) server.sendContent_P((const char*)F(" selected"));
-  server.sendContent_P((const char*)F(">开</option><option value='0'"));
-  if (s.fastFlip == 0) server.sendContent_P((const char*)F(" selected"));
-  server.sendContent_P((const char*)F(">关</option></select><br>屏幕旋转(0-3) <input name='setRotation' type='number' min='0' max='3' value='"));
-  server.sendContent(String(s.setRotation));
-  server.sendContent_P((const char*)F("'><br><button>保存设置</button></form>"));
-  // 未开发项提示（误差补偿/相册/电压校准/时钟风格 后续版本）
-  server.sendContent_P((const char*)F("<p style='color:#888'>误差补偿、时钟风格、相册自动播放、电压校准：未开发（后续版本开放)</p>"));
-  // 连接设备: 局域网/热点下各选一台(运行进度服务器 App 的手机)作为连接对象, 配网时自动推送本机地址
-  server.sendContent_P((const char*)F("<h3>连接设备（配网后自动向选中设备推送本机地址）</h3><button type='button' onclick='scanDevices()'>扫描设备</button> <span id='devHint'></span><br>局域网设备 <select id='lanSel'></select><br>热点设备 <select id='apSel'></select><br><button type='button' onclick='saveTarget()'>保存连接对象</button>"));
-  server.sendContent_P((const char*)F("<p><a href='/fs/edit'>文件管理</a> · <a href='/status'>状态 JSON</a> · <a href='/info'>设置 JSON</a> · <a href='/update'>固件升级</a></p>"));
-  server.sendContent_P((const char*)F("<script>"
-            "function $(id){return document.getElementById(id);}"
-            "function syncPass(f){var h=f.querySelector('input[name=apass]');if(h)h.value=$('apassInput').value;}"
-            "async function scanWifi(){"
-            "try{"
-            "var r=await fetch('/scanwifi');var j=await r.json();"
-            "var sel=$('wifiList');sel.innerHTML='';"
-            "if(!j.networks||!j.networks.length){var o=document.createElement('option');o.text='未扫描到 WiFi';sel.appendChild(o);return;}"
-            "j.networks.forEach(function(n){var o=document.createElement('option');o.value=n.ssid;o.text=n.ssid+(n.secure?' (加密)':' (开放)');sel.appendChild(o);});"
-            "}catch(e){alert('扫描失败:'+e);}"
-            "}"
-            "function useWifi(){var s=$('wifiList');if(s&&s.value)$('ssid').value=s.value;}"
-            "async function scanDevices(){"
-            "try{"
-            "$('devHint').textContent='扫描中(约3秒)...';"
-            "var r=await fetch('/scandevices');var j=await r.json();"
-            "fill('lanSel',j.lan);fill('apSel',j.ap);"
-            "$('devHint').textContent='完成';"
-            "}catch(e){$('devHint').textContent='扫描失败:'+e;}"
-            "}"
-            "function fill(id,list){"
-            "var sel=$(id);sel.innerHTML='';"
-            "var o=document.createElement('option');o.value='';o.text='(未选择)';sel.appendChild(o);"
-            "(list||[]).forEach(function(d){var o=document.createElement('option');o.value=d.ip;o.text=(d.name||'未知')+(d.model?' '+d.model:'')+' ('+d.ip+')';sel.appendChild(o);});"
-            "}"
-            "async function saveTarget(){"
-            "var b=new URLSearchParams();b.set('staIp',$('lanSel').value);b.set('apIp',$('apSel').value);b.set('apass',$('apassInput').value);"
-            "try{var r=await fetch('/target',{method:'POST',body:b});if(r.ok){alert('连接对象已保存');loadTarget();}else{alert(r.status==401?'需要管理密码':'保存失败');}}catch(e){alert('保存失败:'+e);}"
-            "}"
-            "async function loadTarget(){"
-            "try{var r=await fetch('/target');var j=await r.json();preselect('lanSel',j.staIp);preselect('apSel',j.apIp);}catch(e){}"
-            "}"
-            "function preselect(id,ip){var sel=$(id);for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===ip){sel.selectedIndex=i;break;}}}"
-            "loadTarget();"
-            "</script></body></html>"));
-  server.chunkedResponseFinalize();
-}
-
 void handleStatus() {
   String json = F("{\"state\":\"");
   json += stateText();
@@ -733,12 +609,15 @@ void handleStatus() {
   json += (WiFi.status() == WL_CONNECTED) ? F("true") : F("false");
   json += F(",\"staIp\":\"");
   json += WiFi.localIP().toString();
+  json += F("\",\"wifiSaveResult\":");
+  json += wifiSaveResult;
+  json += F(",\"wifiSaveIp\":\"");
+  json += wifiSaveIp;
   json += F("\"}");
   server.send(200, "application/json; charset=utf-8", json);
 }
 
 void handleSave() {
-  if (!requireAdminAuth()) return;
   bool hasWeather = server.hasArg("city") || server.hasArg("wkey") || server.hasArg("night");
   if (hasWeather) {
     WeatherConfig wc;
@@ -760,10 +639,15 @@ void handleSave() {
     Serial.printf("WEATHER_WEB_SAVE cityLen=%u night=%u\n",
                   static_cast<unsigned>(city.length()),
                   static_cast<unsigned>(wc.nightUpdata));
+    webNotifyReset();
+    char wnb[64];
+    if (city.length() > 0) { snprintf(wnb, sizeof(wnb), "城市=%s ", city.c_str()); webNotifyAdd(wnb); }
+    if (key.length() > 0) webNotifyAdd("私钥=已保存 ");
   }
   if (!server.hasArg("ssid") || !server.hasArg("password")) {
     if (hasWeather) {
       server.send(200, "text/html; charset=utf-8", "<meta charset='utf-8'><p>天气设置已保存。</p><a href='/'>返回</a>");
+      webNotifyDone("修改成功");
       return;
     }
     server.send(400, "text/plain; charset=utf-8", "缺少 WiFi 名称或密码");
@@ -775,15 +659,17 @@ void handleSave() {
     server.send(400, "text/plain; charset=utf-8", "输入长度无效");
     return;
   }
-  // 配网会话不连接 STA、保持纯 AP（同 wifiManagerBegin: AP+STA 共存触发 Exception 29 崩溃）。
-  // 凭据已入 EEPROM, 验证走校时/进度同步会话。
+  // ★ 照官方"保存立即返回 + 后台连接": 此处只保存凭据并【先发响应】(保持 AP), 不断 AP——避免停 AP 截断 HTTP 响应。
+  //   断 AP → 切 STA → 连接 交给 loop 下一轮 wifiConnectPending 处理(响应已发出, fetch 不再 Failed to fetch)。
   Serial.printf("WIFI_WEB_SAVE ssidLen=%u\n", static_cast<unsigned>(ssid.length()));
-  server.send(200, "text/html; charset=utf-8", "<meta charset='utf-8'><p>已保存。</p><a href='/'>返回</a>");
-  if (renderPage) renderPage(false);
+  server.send(200, "text/html; charset=utf-8", "<meta charset='utf-8'><p>已保存，正在连接 WiFi…</p><a href='/'>返回</a>");
+  wifiSaveResult = 0; wifiSaveIp[0] = '\0';   // 重置为"进行中"
+  webNotifyReset();
+  webNotifyDone("正在连接");   // 只显示标题, 不出现"WIFI=连接中"之类生硬前缀
+  wifiConnectPending = true;   // 响应送完后由 loop 断 AP 连 STA
 }
 
 void handleClear() {
-  if (!requireAdminAuth()) return;
   clearConfig();
   WiFi.disconnect();
   WiFi.mode(WIFI_AP);
@@ -791,6 +677,9 @@ void handleClear() {
   Serial.println(F("WIFI_WEB_CLEAR"));
   server.sendHeader("Location", "/");
   server.send(303);
+  webNotifyReset();
+  webNotifyAdd("配置=已清除 ");
+  webNotifyDone("修改成功");
 }
 
 // DHCP 固定租约: 仅 192.168.0.100 (手机热点模式固定地址, 规避 AP 池随机分配)。
@@ -815,23 +704,16 @@ void startAp() {
   char name[16];
   snprintf(name, sizeof(name), "MSP-%02X%02X", mac[4], mac[5]);
   apSsid = name;
-  // s0_verify4 验证过的组合（唯一 heap≈7.3KB + 手机 DHCP 正常 + 150s 稳定的配置）:
-  // mode(WIFI_AP) 在前 → softAPConfig → softAP → wifiManagerBegin 里二次 WiFi.mode(WIFI_AP)。
-  // 之后的尝试（纯 AP mode-后置/A7 顺序/AP_STA 过渡）要么 heap 塌到 ~2.3KB（AP 结构重复分配）
-  // 要么 DHCP 不工作/崩溃 —— 均已实测否决。绝不启用 STA 接口（任何 STA 启用都会触发
-  // Exception 29 崩溃/堆塌陷, 见 wifiManagerBegin 注释）。
-  auditHeap("ap_before");   // 审计: AP 创建前
-  WiFi.mode(WIFI_AP);
-  // 配网页 AP 网段必须与局域网（STA 同网段）不同：AP/STA 同子网会导致 lwIP 路由歧义，
-  // TCP SYN 被丢弃（ping 通但 80 端口 connect 超时）。选 192.168.4.1 避开常见 192.168.0.x/1.x。
+  // ★ 分阶段 WiFi 模式(用户定稿): 常态/扫描 = 纯 AP(WIFI_AP, 堆低, 扫描不 OOM);
+  //   仅"保存连接"时临时切共存(WIFI_AP_STA) 连 STA; 连接成功/失败后回纯 AP(关 STA, 管理 web 在线)。
+  //   避 core 3.1.2 WiFi.mode L430 memcpy(wifi_station_hostname) 空指针崩: 先 wifi_fpm_set_sleep_type(NONE_SLEEP_T),
+  //   顺序用官方 initAp(): softAPConfig → softAP → mode 最后。
+  auditHeap("ap_before");
+  wifi_fpm_set_sleep_type(NONE_SLEEP_T);
   WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
-  // 官方 A7 实测 AP 参数: softAP(ssid, psk, channel=1, hidden=0, max_connection=1)。
-  // max_connection=1 显著减少 AP 每连接的缓冲/结构预留（SDK 按 max_connection 预留）,
-  // 让中断里的 esf_buf_alloc 有更多 DRAM 可用（官方所有版本都坚持 1, 我们原用默认 4）。
   bool ok = WiFi.softAP(apSsid.c_str(), AP_PASSWORD, 1, 0, 1);
-  auditHeap("ap_created");   // 审计: AP 创建后
-  // 配网页不设固定租约（DHCP 默认池在 4.x 网段内即可；固定租约 192.168.0.100 属于
-  // 同步纯 AP 模式 startApOnly，见 apSetFixedLease）。
+  WiFi.mode(WIFI_AP);
+  auditHeap("ap_created");
   Serial.printf("WIFI_AP_START ssid=%s ok=%d ip=%s\n", apSsid.c_str(), ok ? 1 : 0, WiFi.softAPIP().toString().c_str());
 }
 
@@ -925,28 +807,32 @@ void settingsFillDefaults(SettingsConfig &s) {
   if (s.fastFlip > 1) s.fastFlip = 1;
   if (s.setRotation > 3) s.setRotation = 1;
   if (s.outputPower == 0 || s.outputPower > 20) s.outputPower = 19;
-  if (s.sdEnabled > 1) s.sdEnabled = 0;
+  if (s.sdEnabled > 1) s.sdEnabled = 1;   // 非法残留/旧默认0 → 归一为启用SD（本地介质仅显式关闭时启用）
   if (s.albumAuto > 1) s.albumAuto = 0;
 }
 
 bool loadSettingsConfig(SettingsConfig &out) {
   EEPROM.begin(EEPROM_SIZE);
   EEPROM.get(SETTINGS_EEPROM_ADDR, out);
-  if (out.magic != SETTINGS_MAGIC || out.version != 1 ||
+  if (out.magic != SETTINGS_MAGIC || (out.version != 1 && out.version != 2) ||
       settingsChecksum(out) != out.checksum) {
-    // 首次使用/损坏：填默认值（24 小时制 / UTC+8 / 一言开）
+    // 首次使用/损坏：填默认值（24 小时制 / UTC+8 / 一言开 / 默认启用 SD）
     memset(&out, 0, sizeof(out));
     out.magic = SETTINGS_MAGIC;
-    out.version = 1;
+    out.version = 2;
     out.clockFormat = 0;
     out.tzOffsetMin = DEFAULT_TZ_OFFSET_MIN;
     out.hitokotoEnabled = 1;
+    out.sdEnabled = 1;   // 默认启用 SD（关介质需显式设置 → 本地 flash）
     settingsFillDefaults(out);
     return false;
   }
   // 兼容旧数据：checksum 之后的新字段可能是 EEPROM 残留（0xFF 或旧 padding）
   if (out.hitokotoEnabled > 1) out.hitokotoEnabled = 1;
   if (out.portrait > 3) out.portrait = 0;   // 四向: 0横/1竖/2横翻/3竖翻; 非法残留(如 0xFF)→旧默认横屏
+  // v1→v2: 旧固件无"SD 介质"开关, sdEnabled 残留默认 0 视作"未显式设置" → 迁移为启用 SD;
+  // v2 之后用户显式关闭(0) 才保持本地介质。本迁移仅于内存, 下轮真正 save 以 v2 写回持久。
+  if (out.version == 1) out.sdEnabled = 1;
   // 新字段: 非法残留/无值 → 填默认(0xFF 或 0 均视为未设置)
   settingsFillDefaults(out);
   return true;
@@ -955,7 +841,7 @@ bool loadSettingsConfig(SettingsConfig &out) {
 bool saveSettingsConfig(const SettingsConfig &in) {
   SettingsConfig cfg = in;
   cfg.magic = SETTINGS_MAGIC;
-  cfg.version = 1;
+  cfg.version = 2;
   if (cfg.hitokotoEnabled > 1) cfg.hitokotoEnabled = 1;
   if (cfg.portrait > 3) cfg.portrait = 0;   // 四向: 0横/1竖/2横翻/3竖翻
   cfg.checksum = settingsChecksum(cfg);
@@ -1044,7 +930,7 @@ uint8_t settingsGetSdFrequency() {
   SettingsConfig s; loadSettingsConfig(s); return s.sdFrequency;
 }
 bool settingsSetSdFrequency(uint8_t v) {
-  if (v < 5 || v > 40) return false;
+  if (v < 1 || v > 80) return false;
   SettingsConfig s; loadSettingsConfig(s); s.sdFrequency = v; return saveSettingsConfig(s);
 }
 uint8_t settingsGetFullRefreshMin() {
@@ -1114,94 +1000,163 @@ bool settingsSetAlbumAuto(uint8_t v) {
 // ---- Web 端点：设备设置（/settings）与系统信息（/info） ----
 // 与 handleSave 分离：/wifi 管网络与天气，/settings 管设置页字段（时钟格式/时区/一言）
 void handleSettingsSave() {
-  if (!requireAdminAuth()) return;
   bool any = false;
+  webNotifyReset();
+  char tb[64];
   if (server.hasArg("clockFormat")) {
     int v = server.arg("clockFormat").toInt();
-    if (settingsSetClockFormat(static_cast<uint8_t>(v == 1 ? 1 : 0))) any = true;
+    uint8_t nv = static_cast<uint8_t>(v == 1 ? 1 : 0);
+    if (settingsGetClockFormat() != nv && settingsSetClockFormat(nv)) {
+      any = true;
+      snprintf(tb, sizeof(tb), "时钟格式=%s ", nv ? "12小时制" : "24小时制");
+      webNotifyAdd(tb);
+    }
   }
   if (server.hasArg("tz")) {
     int v = server.arg("tz").toInt();
-    if (v >= -720 && v <= 840 && settingsSetTzOffsetMin(static_cast<int16_t>(v))) any = true;
+    if (v >= -720 && v <= 840 && settingsGetTzOffsetMin() != v &&
+        settingsSetTzOffsetMin(static_cast<int16_t>(v))) {
+      any = true;
+      int sign = v < 0 ? -1 : 1;
+      int h = (v < 0 ? -v : v) / 60, m = (v < 0 ? -v : v) % 60;
+      if (m == 0) snprintf(tb, sizeof(tb), "时区=UTC%c%d ", sign > 0 ? '+' : '-', h);
+      else snprintf(tb, sizeof(tb), "时区=UTC%c%d:%02d ", sign > 0 ? '+' : '-', h, m);
+      webNotifyAdd(tb);
+    }
   }
   if (server.hasArg("hitokoto")) {
     int v = server.arg("hitokoto").toInt();
-    if (settingsSetHitokotoEnabled(static_cast<uint8_t>(v == 1 ? 1 : 0))) any = true;
+    uint8_t nv = static_cast<uint8_t>(v == 1 ? 1 : 0);
+    if (settingsGetHitokotoEnabled() != nv && settingsSetHitokotoEnabled(nv)) {
+      any = true;
+      snprintf(tb, sizeof(tb), "一言=%s ", nv ? "开" : "关");
+      webNotifyAdd(tb);
+    }
   }
-  if (server.hasArg("portrait")) {   // 阅读旋转方向 0横/1竖/2横翻/3竖翻 (全局持久, 非法值由 setter 拒绝)
+  if (server.hasArg("portrait")) {   // 阅读旋转方向 (全局持久, 非法值由 setter 拒绝); 通知显示度数
     int v = server.arg("portrait").toInt();
-    if (settingsSetPortrait(static_cast<uint8_t>(v))) any = true;
+    uint8_t nv = static_cast<uint8_t>(v);
+    if (settingsGetPortrait() != nv && settingsSetPortrait(nv)) {
+      any = true;
+      int deg = (nv == 1) ? 270 : (nv == 2) ? 180 : (nv == 3) ? 90 : 0;
+      snprintf(tb, sizeof(tb), "阅读旋转=%d° ", deg);
+      webNotifyAdd(tb);
+    }
   }
-  // ---- 新增设置字段 (官方设置项) ----
   if (server.hasArg("longPress")) {
     int v = server.arg("longPress").toInt();
-    if (settingsSetLongPressMs(static_cast<uint16_t>(v))) any = true;
+    if (settingsGetLongPressMs() != v && settingsSetLongPressMs(static_cast<uint16_t>(v))) {
+      any = true;
+      snprintf(tb, sizeof(tb), "长按=%ums ", static_cast<unsigned>(v));
+      webNotifyAdd(tb);
+    }
   }
-  if (server.hasArg("ntpServer")) settingsSetNtpServer(server.arg("ntpServer").c_str());
+  if (server.hasArg("ntpServer")) {
+    String ns = server.arg("ntpServer");
+    if (strcmp(settingsGetNtpServer(), ns.c_str()) != 0 && settingsSetNtpServer(ns.c_str())) {
+      any = true;
+      snprintf(tb, sizeof(tb), "NTP=%s ", ns.c_str());
+      webNotifyAdd(tb);
+    }
+  }
   if (server.hasArg("sdFrequency")) {
     int v = server.arg("sdFrequency").toInt();
-    if (settingsSetSdFrequency(static_cast<uint8_t>(v))) any = true;
+    if (settingsGetSdFrequency() != v && settingsSetSdFrequency(static_cast<uint8_t>(v))) {
+      any = true;
+      snprintf(tb, sizeof(tb), "SD频率=%uMHz ", static_cast<unsigned>(v));
+      webNotifyAdd(tb);
+    }
   }
   if (server.hasArg("fullRefresh")) {
     int v = server.arg("fullRefresh").toInt();
-    if (settingsSetFullRefreshMin(static_cast<uint8_t>(v))) any = true;
+    if (settingsGetFullRefreshMin() != v && settingsSetFullRefreshMin(static_cast<uint8_t>(v))) {
+      any = true;
+      snprintf(tb, sizeof(tb), "全刷间隔=%u分钟 ", static_cast<unsigned>(v));
+      webNotifyAdd(tb);
+    }
   }
   if (server.hasArg("calibInterval")) {
     int v = server.arg("calibInterval").toInt();
-    if (settingsSetCalibIntervalMin(static_cast<uint8_t>(v))) any = true;
+    if (settingsGetCalibIntervalMin() != v && settingsSetCalibIntervalMin(static_cast<uint8_t>(v))) {
+      any = true;
+      snprintf(tb, sizeof(tb), "校准间隔=%u分钟 ", static_cast<unsigned>(v));
+      webNotifyAdd(tb);
+    }
   }
   if (server.hasArg("batDisplay")) {
     int v = server.arg("batDisplay").toInt();
-    if (settingsSetBatDisplayType(static_cast<uint8_t>(v == 1 ? 1 : 0))) any = true;
+    uint8_t nv = static_cast<uint8_t>(v == 1 ? 1 : 0);
+    if (settingsGetBatDisplayType() != nv && settingsSetBatDisplayType(nv)) {
+      any = true;
+      snprintf(tb, sizeof(tb), "电量显示=%s ", nv ? "百分比" : "电压");
+      webNotifyAdd(tb);
+    }
   }
   if (server.hasArg("nightUpdate")) {
     int v = server.arg("nightUpdate").toInt();
-    if (settingsSetNightUpdate(static_cast<uint8_t>(v == 1 ? 1 : 0))) any = true;
+    uint8_t nv = static_cast<uint8_t>(v == 1 ? 1 : 0);
+    if (settingsGetNightUpdate() != nv && settingsSetNightUpdate(nv)) {
+      any = true;
+      snprintf(tb, sizeof(tb), "夜间更新=%s ", nv ? "更新" : "不更新");
+      webNotifyAdd(tb);
+    }
   }
   if (server.hasArg("fastFlip")) {
     int v = server.arg("fastFlip").toInt();
-    if (settingsSetFastFlip(static_cast<uint8_t>(v == 1 ? 1 : 0))) any = true;
+    uint8_t nv = static_cast<uint8_t>(v == 1 ? 1 : 0);
+    if (settingsGetFastFlip() != nv && settingsSetFastFlip(nv)) {
+      any = true;
+      snprintf(tb, sizeof(tb), "快速翻页=%s ", nv ? "开" : "关");
+      webNotifyAdd(tb);
+    }
   }
   if (server.hasArg("setRotation")) {
     int v = server.arg("setRotation").toInt();
-    if (settingsSetSetRotation(static_cast<uint8_t>(v))) any = true;
+    if (settingsGetSetRotation() != v && settingsSetSetRotation(static_cast<uint8_t>(v))) {
+      any = true;
+      snprintf(tb, sizeof(tb), "屏幕旋转=方向%u ", static_cast<unsigned>(v));
+      webNotifyAdd(tb);
+    }
   }
   if (server.hasArg("outputPower")) {
     int v = server.arg("outputPower").toInt();
-    if (settingsSetOutputPower(static_cast<uint8_t>(v))) any = true;
+    if (settingsGetOutputPower() != v && settingsSetOutputPower(static_cast<uint8_t>(v))) {
+      any = true;
+      snprintf(tb, sizeof(tb), "功率=%udB ", static_cast<unsigned>(v));
+      webNotifyAdd(tb);
+    }
   }
   if (server.hasArg("sdEnabled")) {
     int v = server.arg("sdEnabled").toInt();
-    if (settingsSetSdEnabled(static_cast<uint8_t>(v == 1 ? 1 : 0))) any = true;
+    uint8_t nv = static_cast<uint8_t>(v == 1 ? 1 : 0);
+    if (settingsGetSdEnabled() != nv && settingsSetSdEnabled(nv)) {
+      any = true;
+      snprintf(tb, sizeof(tb), "SD卡=%s ", nv ? "启用" : "未启用");
+      webNotifyAdd(tb);
+    }
   }
   if (!any) {
-    server.send(400, "text/plain; charset=utf-8", "缺少有效参数");
+    server.send(200, "text/plain; charset=utf-8", "no_change");   // 无实际变化: 不写 EEPROM 也不提示
     return;
   }
   configTime(settingsGetTzOffsetMin() * 60, 0, NTP_SERVER);   // 时区立即生效
   Serial.println(F("SETTINGS_WEB_SAVE"));
   server.send(200, "text/html; charset=utf-8",
               "<meta charset='utf-8'><p>设置已保存。</p><a href='/'>返回</a>");
+  webNotifyDone("修改成功");
 }
 
-// ---- 管理密码 / OTA 密码端点 (/admin) ----
-// 首次设置（尚未设置过管理密码）无需旧密码; 已设置后修改必须携带当前管理密码（X-Admin-Pass 或 apass 字段）。
-// 新密码字段留空 = 保持不变（不提供"清空密码"操作, fail-closed）。
+// ---- OTA 升级密码端点 (/admin) ----
+// 管理密码机制已删除; 此处仅维护 OTA 升级密码。新密码留空 = 保持不变。
 void handleAdminSave() {
   AdminConfig a;
   loadAdminConfig(a);
-  if (a.password[0] != '\0' && !requireAdminAuth()) return;
-  String newPass = server.arg("adminpass");
   String newOta = server.arg("otapass");
-  if (newPass.length() >= sizeof(a.password) || newOta.length() >= sizeof(a.otaPass)) {
+  if (newOta.length() >= sizeof(a.otaPass)) {
     server.send(400, "text/plain; charset=utf-8", "密码长度无效");
     return;
   }
   bool otaChanged = false;
-  if (newPass.length() > 0) {
-    memset(a.password, 0, sizeof(a.password));
-    newPass.toCharArray(a.password, sizeof(a.password));
-  }
   if (newOta.length() > 0) {
     memset(a.otaPass, 0, sizeof(a.otaPass));
     newOta.toCharArray(a.otaPass, sizeof(a.otaPass));
@@ -1212,12 +1167,12 @@ void handleAdminSave() {
     return;
   }
   Serial.println(F("ADMIN_WEB_SAVE"));
+  server.send(200, "text/html; charset=utf-8",
+              "<meta charset='utf-8'><p>已保存（OTA 密码修改后，重启进入配网才生效）。</p><a href='/'>返回</a>");
   if (otaChanged) {
-    server.send(200, "text/html; charset=utf-8",
-                "<meta charset='utf-8'><p>已保存（OTA 密码修改后，重启进入配网才生效）。</p><a href='/'>返回</a>");
-  } else {
-    server.send(200, "text/html; charset=utf-8",
-                "<meta charset='utf-8'><p>管理密码已保存。</p><a href='/'>返回</a>");
+    webNotifyReset();
+    webNotifyAdd("OTA密码=已保存 ");
+    webNotifyDone("修改成功");
   }
 }
 
@@ -1262,6 +1217,69 @@ void handleInfo() {
   json += ESP.getFreeSketchSpace();
   json += F("}");
   server.send(200, "application/json; charset=utf-8", json);
+}
+
+// ---- /settings.json: 全量只读设置快照（官方设置面板 /set 回显用, 零副作用）----
+void handleSettingsJson() {
+  SettingsConfig s;
+  loadSettingsConfig(s);
+  WeatherConfig wc;
+  loadWeatherConfig(wc);
+  String json = F("{\"clockFormat\":");
+  json += s.clockFormat;
+  json += F(",\"tzOffsetMin\":");
+  json += s.tzOffsetMin;
+  json += F(",\"hitokotoEnabled\":");
+  json += s.hitokotoEnabled;
+  json += F(",\"longPressMs\":");
+  json += s.longPressMs;
+  json += F(",\"ntpServer\":\"");
+  json += settingsGetNtpServer();
+  json += F("\",\"sdFrequency\":");
+  json += s.sdFrequency;
+  json += F(",\"fullRefreshMin\":");
+  json += s.fullRefreshMin;
+  json += F(",\"calibIntervalMin\":");
+  json += s.calibIntervalMin;
+  json += F(",\"batDisplayType\":");
+  json += s.batDisplayType;
+  json += F(",\"nightUpdate\":");
+  json += s.nightUpdate;
+  json += F(",\"setRotation\":");
+  json += s.setRotation;
+  json += F(",\"outputPower\":");
+  json += s.outputPower;
+  json += F(",\"sdEnabled\":");
+  json += s.sdEnabled;
+  json += F(",\"portrait\":");
+  json += s.portrait;
+  json += F(",\"fastFlip\":");
+  json += s.fastFlip;
+  json += F(",\"city\":\"");
+  json += wc.city[0] ? wc.city : "";
+  json += F("\",\"weatherKey\":");
+  json += (wc.key[0] != '\0') ? F("1") : F("0");
+  AdminConfig ad;
+  loadAdminConfig(ad);
+  json += F(",\"otaSet\":");
+  json += (ad.otaPass[0] != '\0') ? F("1") : F("0");
+  json += F("}");
+  server.send(200, "application/json; charset=utf-8", json);
+}
+
+// ---- GET /set: 官方设置面板静态页（LittleFS /set.htm, 懒挂载同 /fs/edit）----
+void handleSetStatic() {
+  if (!fileApiEnsureLfsMount()) {
+    server.send(500, "text/plain; charset=utf-8", "LittleFS mount failed");
+    return;
+  }
+  File f = LittleFS.open("/set.htm", "r");
+  if (!f) {
+    server.send(404, "text/plain; charset=utf-8", "set page not found");
+    return;
+  }
+  server.streamFile(f, "text/html; charset=utf-8");
+  f.close();
 }
 
 bool wifiManagerHasCredentials() {
@@ -1311,19 +1329,11 @@ void handleTargetSave();
 void handleTargetAny();   // GET+POST 合并（省路由堆）
 static bool pushDone = false;
 
+// Web 设置修改 → 墨水屏提示回调注册（转发到匿名区 webNotifyCbSet; 墨水瓶 setup 调用）
+void wifiManagerSetWebNotifyCb(WebSettingsNotifyCb cb) { webNotifyCbSet(cb); }
+
 // 导出 server 实例（匿名命名空间内, 内部链接; 供 file_api 等模块经 wifiManagerServer() 复用）
 ESP8266WebServer &wifiManagerServer() { return server; }
-
-// 供 file_api 用的纯校验（不发送响应, 由调用方按需回 JSON 401）:
-// 未设置管理密码 → false（fail-closed）; X-Admin-Pass/apass 与密码不符 → false
-bool wifiManagerAdminPassValid() {
-  AdminConfig a;
-  loadAdminConfig(a);
-  if (a.password[0] == '\0') return false;
-  String given = adminPassFromRequest();
-  return given.length() > 0 && given.length() < sizeof(a.password) &&
-         strcmp(given.c_str(), a.password) == 0;
-}
 
 void wifiManagerBegin(void (*renderCallback)(bool), void (*exitCallback)()) {
   renderPage = renderCallback;
@@ -1353,9 +1363,10 @@ void wifiManagerBegin(void (*renderCallback)(bool), void (*exitCallback)()) {
     if (fileApiTryDispatch()) return;   // /api/* /fs/* /fm/*（零路由对象堆, 见 file_api.cpp）
     String uri = server.uri();
     HTTPMethod m = server.method();
-    if (uri == "/")                           { handleRoot(); return; }
+    if (uri == "/" || uri == "/set")          { handleSetStatic(); return; }
     if (uri == "/status" && m == HTTP_GET)    { handleStatus(); return; }
     if (uri == "/info" && m == HTTP_GET)      { handleInfo(); return; }
+    if (uri == "/settings.json" && m == HTTP_GET) { handleSettingsJson(); return; }
     if (uri == "/settings" && m == HTTP_POST) { handleSettingsSave(); return; }
     if (uri == "/wifi" && m == HTTP_POST)     { handleSave(); return; }
     if (uri == "/clear" && m == HTTP_POST)    { handleClear(); return; }
@@ -1381,8 +1392,8 @@ void wifiManagerBegin(void (*renderCallback)(bool), void (*exitCallback)()) {
     Serial.printf("HTTP_404 uri=%s heap=%u\n", uriBuf, (unsigned)ESP.getFreeHeap());
     server.send(404, "text/plain; charset=utf-8", "Not Found");
   });
-  // 收集 X-Admin-Pass 请求头（管理密码校验用, 见 requireAdminAuth）+ 上传协议头（file_api）
-  server.collectHeaders("X-Admin-Pass", "X-File-Size", "X-Resume", "X-Resume-Offset", "Range");
+  // 收集上传协议头（file_api; 管理密码已废除, 不再收集 X-Admin-Pass）
+  server.collectHeaders("X-File-Size", "X-Resume", "X-Resume-Offset", "Range");
   // Web 固件升级（OTA）：/update GET=上传页 POST=固件上传。
   // 认证用独立 OTA 密码（EEPROM 管理区, 与 AP 密码/管理密码分离）; 未设置 OTA 密码 → /update 不可用。
   {
@@ -1394,7 +1405,7 @@ void wifiManagerBegin(void (*renderCallback)(bool), void (*exitCallback)()) {
     // 未设置 OTA 密码: 不注册 /update 路由（省 2 个路由对象堆）, 由 onNotFound 兜底提示。
   }
   // 文件管理 API + LittleFS Web UI（/fm/）：统一 API 供 Web/Android/Legado 使用
-  // ⚠️ 二次 WiFi.mode(WIFI_AP) 提前到路由/挂载之前执行: AP 结构在堆充足时初始化,
+  // 二次 WiFi.mode(WIFI_AP) 提前到路由/挂载之前执行: AP 结构在堆充足时初始化,
   // 路由注册(1.8KB)+LFS 挂载(~1KB)之后只剩 ~3KB, AP 后台延迟分配(实测 5s 内 -2.9KB)
   // 会把手机关联/DHCP 处理的堆压到 OOM（Unhandled C++ exception: OOM 实测）。
   WiFi.mode(WIFI_AP);
@@ -1424,6 +1435,16 @@ static uint32_t gAuditTs = 0;
 void wifiManagerLoop() {
   if (!active) return;
   server.handleClient();
+  // 分阶段: 常态纯 AP; 仅"保存连接"时临时切共存(WIFI_AP_STA)连 STA, 连完回纯 AP(管理 web 在线)。
+  if (wifiConnectPending) {
+    wifiConnectPending = false;
+    loadConfig();
+    WiFi.mode(WIFI_AP_STA);   // 临时共存: AP 仍在(管理页可达), 同时启用 STA 接口去连路由器
+    WiFi.begin(config.ssid, config.password);
+    state = CONNECTING;
+    deadline = millis() + 15000UL;
+    Serial.println(F("WIFI_CONNECT_START"));
+  }
   // 请求边界探针: /fs/list handler 在 handleClient 内执行完（gFsListJustHandled=true）,
   // 回到此处即"handleClient 收尾完成 + 下一轮 loop 前"状态, 打印堆/块/栈。
   if (gFsListJustHandled) {
@@ -1434,14 +1455,28 @@ void wifiManagerLoop() {
   static uint32_t gAbTs = 0;
   if (state == CONNECTING) {
     if (WiFi.status() == WL_CONNECTED) {
-      WiFi.mode(WIFI_AP_STA);
+      // 连接成功: 先在 STA 态记录 IP, 再【关 STA 回纯 AP】(IP 在切回 AP 后已失效, 必须前置取值)
       staIp = WiFi.localIP().toString();
-      state = STA_AP;
+      wifiSaveResult = 1;
+      snprintf(wifiSaveIp, sizeof(wifiSaveIp), "%s", staIp.c_str());
+      WiFi.mode(WIFI_AP);
+      WiFi.disconnect();
+      state = AP_ONLY;
+      Serial.printf("WIFI_STA_CONNECTED(back-AP) ip=%s heap=%u\n", staIp.c_str(), (unsigned)ESP.getFreeHeap());
+      webNotifyReset();
+      webNotifyAdd(wifiSaveIp);
+      webNotifyDone("连接成功");
       if (renderPage) renderPage(false);
     } else if (static_cast<int32_t>(millis() - deadline) >= 0) {
-      WiFi.disconnect();   // 干净拆除 STA 再切纯 AP（避免 mode 切换撞 beacon 解析崩溃, 同 handleClear 模式）
+      // 超时失败: 关 STA 回纯 AP(AP 没关过, 无须重建), 反馈失败, 管理 web 持续可达。
       WiFi.mode(WIFI_AP);
-      state = ERROR;
+      WiFi.disconnect();
+      state = AP_ONLY;
+      wifiSaveResult = 2;
+      Serial.println(F("WIFI_STA_FAIL(AP_ONLY)"));
+      webNotifyReset();
+      webNotifyAdd("请检查WiFi密码/信号");
+      webNotifyDone("连接失败");
       if (renderPage) renderPage(false);
     }
   }
@@ -1804,6 +1839,8 @@ static bool validIpv4(const String &s) {
 void handleScanWifi() {
   WiFi.scanDelete();
   int8_t n = WiFi.scanNetworks(false, true);
+  // 分阶段后常态是纯 AP(堆~7K), String 一次性拼接安全(此前共存模式才 OOM; chunked 流式实测会让前端
+  // JSON 在 580 处截断 → SyntaxError: Unterminated string)。沿用 String + 一次性 send。
   String json = F("{\"networks\":[");
   if (n >= 0) {
     for (int8_t i = 0; i < n; i++) {
@@ -1943,7 +1980,6 @@ void handleTargetGet() {
 }
 
 void handleTargetSave() {
-  if (!requireAdminAuth()) return;
   TargetConfig t;
   loadTargetConfig(t);
   String sta = server.arg("staIp");
@@ -1968,6 +2004,9 @@ void handleTargetSave() {
   wifiManagerPushDeviceInfo();   // 保存后立即推送设备信息给选中 App (App 收到自动更新设备地址)
   server.send(200, "text/html; charset=utf-8",
               "<meta charset='utf-8'><p>连接对象已保存。</p><a href='/'>返回</a>");
+  webNotifyReset();
+  webNotifyAdd("连接对象=已保存 ");
+  webNotifyDone("修改成功");
 }
 
 // ---- 配网模式开启后向连接对象推送设备信息 (HTTP POST, 3s 超时, 失败静默) ----

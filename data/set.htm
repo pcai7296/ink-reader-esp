@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>墨水屏管理设置</title>
+<style>
+  :root{--line:#d8d8d8;--dim:#999;--warn:#b33;--ok:#1a7f37;}
+  *{box-sizing:border-box;}
+  body{font:15px/1.6 system-ui,"Segoe UI",Roboto,sans-serif;margin:0;background:#fafafa;color:#222;}
+  .wrap{max-width:760px;margin:0 auto;padding:14px;}
+  h1{font-size:20px;margin:6px 0 2px;}
+  .sub{color:var(--dim);font-size:13px;margin:0 0 8px;}
+  .toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:10px 0;}
+  .toolbar .sp{flex:1;}
+  .conn{width:100%;color:#555;font-size:13px;}
+  .btn{display:inline-block;border:1px solid #bbb;border-radius:6px;padding:5px 12px;background:#fff;color:#222;text-decoration:none;cursor:pointer;font-size:14px;}
+  .btn.primary{background:#2b6cb0;border-color:#2b6cb0;color:#fff;}
+  .btn.danger{color:var(--warn);border-color:var(--warn);}
+  .btn:hover{filter:brightness(.96);}
+  .btn.mock{color:var(--warn);border-color:var(--warn);}
+  input[type=text],input[type=number],input[type=password],select,textarea{font:inherit;padding:4px 6px;border:1px solid var(--line);border-radius:5px;background:#fff;}
+  .card{background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px 14px;margin:12px 0;}
+  .card>h2{font-size:16px;margin:8px 0 4px;border-bottom:2px solid #eee;padding-bottom:4px;}
+  .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:7px 0;border-bottom:1px dashed #eee;}
+  .row:last-child{border-bottom:none;}
+  .row .lbl{min-width:170px;font-weight:600;}
+  .row .hint{width:100%;color:var(--dim);font-size:12.5px;}
+  .row .state{color:var(--dim);font-size:13px;}
+  .tag{font-size:11px;border:1px solid var(--line);border-radius:4px;padding:0 5px;color:#555;}
+  .tag.mock{color:var(--warn);border-color:var(--warn);}
+  .msg{display:none;border-radius:6px;padding:7px 10px;margin:8px 0;font-size:14px;}
+  .msg.ok{display:block;background:#e7f6ec;color:var(--ok);}
+  .msg.err{display:block;background:#fdeaea;color:var(--warn);}
+  .msg.dim{display:block;background:#f1f1f1;color:#555;}
+  details{margin:2px 0;}
+  summary{color:#2b6cb0;font-size:13px;cursor:pointer;}
+  .help{background:#f6f8fa;border-radius:6px;padding:6px 10px;font-size:13px;color:#444;}
+  footer{color:var(--dim);font-size:12px;margin:16px 0 30px;text-align:center;}
+  nav.links{margin:6px 0;font-size:14px;}
+  nav.links a{margin-right:14px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>墨水屏管理设置</h1>
+  <p class="sub">设备全部设置项集中于此；标注 <span class="tag mock">不可设置</span> 的项后端开发中，修改后保存将提示不可设置。</p>
+
+  <div class="toolbar">
+    <a class="btn primary" href="/fs/edit">📁 文件管理</a>
+    <a class="btn" href="/update">固件升级</a>
+    <span class="sp"></span>
+\n  </div>
+
+  <div id="msg" class="msg"></div>
+
+  <!-- ① WiFi 配置 -->
+  <div class="card">
+    <h2>WiFi 配置</h2>
+    <div class="row">
+\n    </div>
+    <div class="row">
+      <span class="lbl">周边网络</span>
+      <select id="wifiList" style="min-width:220px"><option value="">-- 点扫描列出附近 WiFi --</option></select>
+      <button type="button" class="btn" onclick="scanWifi()">扫描</button>
+      <button type="button" class="btn" onclick="useWifi()">选用</button>
+      <span class="hint">可扫描选用，也可手动输入网络名</span>
+    </div>
+    <div class="row">
+      <span class="lbl">WiFi 名称</span>
+      <input type="text" id="ssid" maxlength="32" style="min-width:220px">
+    </div>
+    <div class="row">
+      <span class="lbl">WiFi 密码</span>
+      <input type="password" id="wpass" maxlength="64" style="min-width:220px">
+    </div>
+    <div class="row"><span class="sp"></span><button type="button" class="btn primary" onclick="saveWifi()">保存并连接</button></div>
+  </div>
+
+  <!-- ② 天气配置 -->
+  <div class="card">
+    <h2>天气配置</h2>
+    <div class="row">
+      <span class="lbl">当前城市</span><span class="state" id="cityState">-</span>
+      <span class="lbl" style="min-width:170px">私钥状态</span><span class="state" id="keyState">-</span>
+    </div>
+    <div class="row">
+      <span class="lbl">私钥 (WeatherKey)</span>
+      <input type="text" id="wkey" maxlength="31" style="min-width:220px" placeholder="已配置时留空不覆盖">
+      <span class="hint">心知天气私钥；已配置只显示状态，留空提交不覆盖</span>
+    </div>
+    <div class="row">
+      <span class="lbl">城市</span>
+      <input type="text" id="city" maxlength="31" style="min-width:220px" placeholder="中文或拼音">
+    </div>
+    <div class="row"><span class="sp"></span><button type="button" class="btn primary" onclick="saveWeather()">保存天气</button></div>
+  </div>
+
+  <!-- ③ 更多设置 · 开关类 -->
+  <div class="card">
+    <h2>更多设置 · 开关类</h2>
+    <div class="row">
+      <span class="lbl">夜间更新</span>
+      <input type="checkbox" id="sw_night" onchange="saveField('nightUpdate',this.checked?'1':'0')"> <label for="sw_night" class="state" id="st_night">更新</label>
+\n    </div>
+    <div class="row">
+      <span class="lbl">电量显示类型</span>
+      <select id="sw_bat" onchange="saveField('batDisplay',this.value)"><option value="1">百分比</option><option value="0">电压</option></select>
+\n    </div>
+    <div class="row">
+      <span class="lbl">历史记录</span>
+      <span class="tag mock">不可设置</span>
+      <button type="button" class="btn mock" onclick="mockBlocked('历史记录')">切换</button>
+    </div>
+    <div class="row">
+      <span class="lbl">时钟强制校准</span>
+      <span class="tag mock">不可设置</span>
+      <button type="button" class="btn mock" onclick="mockBlocked('时钟强制校准')">切换</button>
+      <details><summary>说明</summary><div class="help">每天 23:30 静默联网校准；开启=校准失败停机休眠 / 关闭=校准失败不停机。</div></details>
+    </div>
+    <div class="row">
+      <span class="lbl">时钟格式</span>
+      <select id="sw_fmt" onchange="saveField('clockFormat',this.value)"><option value="0">24 小时制</option><option value="1">12 小时制</option></select>
+\n    </div>
+    <div class="row">
+      <span class="lbl">时钟类型</span>
+      <span class="tag mock">不可设置</span>
+      <button type="button" class="btn mock" onclick="mockBlocked('时钟类型')">切换</button>
+      <details><summary>说明</summary><div class="help">简洁=大时间小温湿度无一言；精美=中置时间大温湿度、支持一言自定义句；均支持倒计时与 B 粉。</div></details>
+    </div>
+    <div class="row">
+      <span class="lbl">SD 卡启用</span>
+      <select id="sw_sd" onchange="saveField('sdEnabled',this.value)"><option value="1">启用</option><option value="0">未启用</option></select>
+      <span class="hint">与墨水屏设置页“SD 卡启用”同字段</span>
+    </div>
+  </div>
+
+  <!-- ④ 更多设置 · 数值类 -->
+  <div class="card">
+    <h2>更多设置 · 数值类</h2>
+    <div class="row">
+      <span class="lbl">SD 卡频率</span>
+      <input type="number" id="nm_sd" min="1" max="80" style="width:90px"> MHz
+      <span class="hint">范围 1-80MHz</span>
+    </div>
+    <div class="row">
+      <span class="lbl">NTP 服务器地址</span>
+      <input type="text" id="t_ntp" maxlength="31" style="min-width:220px" placeholder="留空=恢复默认">
+      <span class="hint">留空恢复默认 cn.pool.ntp.org</span>
+    </div>
+    <div class="row">
+      <span class="lbl">时区</span>
+      <input type="number" id="nm_tz" min="-12" max="14" step="0.5" style="width:90px"> 小时
+      <span class="hint">可为负、可带小数（如 -5.5）</span>
+    </div>
+    <div class="row">
+      <span class="lbl">时钟补偿</span>
+      <span class="tag mock">不可设置</span>
+      <button type="button" class="btn mock" onclick="mockBlocked('时钟补偿')">保存</button>
+      <details><summary>说明</summary><div class="help">软硬件时钟补偿值，需按换算公式设置；后端开发中。</div></details>
+    </div>
+    <div class="row">
+      <span class="lbl">时钟校准间隔</span>
+      <input type="number" id="nm_cal" min="1" max="720" style="width:90px"> 分钟
+      <span class="hint">外挂时钟芯片存在时此项无效（本机走芯片时间）</span>
+    </div>
+    <div class="row">
+      <span class="lbl">时钟全刷间隔</span>
+      <input type="number" id="nm_fr" min="1" max="120" style="width:90px"> 分钟
+    </div>
+    <div class="row">
+      <span class="lbl">长按触发时间</span>
+      <input type="number" id="nm_lp" min="300" max="5000" step="100" style="width:90px"> ms
+      <span class="hint">范围 300-5000ms；按键长按识别共用</span>
+    </div>
+    <div class="row">
+      <span class="lbl">发射功率</span>
+      <select id="nm_op" onchange="saveField('outputPower',this.value)"></select>
+      <span class="hint">范围 10-20dBm，重启后生效</span>
+    </div>
+    <div class="row"><span class="sp"></span><button type="button" class="btn primary" onclick="saveNumerics()">保存数值类</button></div>
+  </div>
+
+  <!-- ⑤ 设备设置 -->
+  <div class="card">
+    <h2>设备设置</h2>
+    <div class="row">
+      <span class="lbl">阅读旋转方向</span>
+      <select id="dev_rot" onchange="saveField('portrait',this.value)">
+        <option value="0">0° 横屏</option><option value="3">90° 竖翻</option>
+        <option value="2">180° 横翻</option><option value="1">270° 竖屏</option>
+      </select>
+      <span class="hint">0° 横屏为默认；TXT 阅读方向（全局持久，与阅读菜单“旋转”联动）</span>
+    </div>
+    <div class="row">
+      <span class="lbl">快速翻页</span>
+      <select id="dev_ffl" onchange="saveField('fastFlip',this.value)"><option value="1">开</option><option value="0">关</option></select>
+\n    </div>
+    <div class="row">
+      <span class="lbl">一言</span>
+      <select id="dev_hito" onchange="saveField('hitokoto',this.value)"><option value="1">开启</option><option value="0">关闭</option></select>
+      <span class="hint">时钟页显示一言；自定义内容请在下方多功能输入框（开发中）</span>
+    </div>
+  </div>
+
+  <!-- ⑥ 多功能输入框 -->
+  <div class="card">
+    <h2>多功能输入框（InAWord） <span class="tag mock">不可设置</span></h2>
+    <div class="row">
+      <textarea id="ta_word" maxlength="64" rows="2" style="width:100%" placeholder="一言模式…"></textarea>
+    </div>
+    <div class="row">
+      <span class="hint">语法：空白=一言模式 · 自定义句 ≤21 汉字 · “倒+年月日+事件”（补 0，如 倒20230607高考）=倒计时 · “B粉+UID”=B站粉丝 · 文本“重置系统”=恢复出厂。后端开发中。</span>
+    </div>
+    <div class="row"><button type="button" class="btn mock" onclick="mockBlocked('多功能输入框 InAWord')">保存</button></div>
+  </div>
+
+  <!-- ⑦ 系统管理 -->
+  <div class="card">
+    <h2>系统管理</h2>
+    <div class="row">
+      <span class="lbl">清除配置</span>
+      <button type="button" class="btn danger" onclick="clearConfig()">清除全部配置</button>
+      <span class="hint">清除 WiFi/设置/凭据，恢复默认</span>
+    </div>
+  </div>
+
+  <footer>
+    <nav class="links"><a href="/status">状态 JSON</a> · <a href="/info">信息 JSON</a> · <a href="/settings.json">设置快照</a></nav>
+    <div style="margin-top:6px">面板 v1 · “不可设置”项后端开发中</div>
+  </footer>
+</div>
+
+<script>
+var $=function(id){return document.getElementById(id);};
+var MSG=$('msg');
+function msg(t,cls){MSG.className='msg '+(cls||'ok');MSG.textContent=t;}
+function clearMsg(){MSG.className='msg';}
+
+// ---- 状态回显 ----
+function loadAll(){
+  fetch('/settings.json').then(function(r){return r.json();}).then(function(S){
+    $('sw_night').checked = S.nightUpdate==1;  $('st_night').textContent = S.nightUpdate?'更新':'不更新';
+    $('sw_bat').value=String(S.batDisplayType);
+    $('sw_fmt').value=String(S.clockFormat);    $('sw_sd').value=String(S.sdEnabled);
+    $('nm_sd').value=S.sdFrequency;  $('t_ntp').value=S.ntpServer;
+    $('nm_tz').value=(Math.round(S.tzOffsetMin/30)/2);
+    $('nm_cal').value=S.calibIntervalMin; $('nm_fr').value=S.fullRefreshMin;
+    $('nm_lp').value=S.longPressMs;     $('nm_op').value=String(S.outputPower);
+    $('dev_rot').value=String(S.portrait); $('dev_ffl').value=String(S.fastFlip);
+    $('dev_hito').value=String(S.hitokotoEnabled);
+    $('cityState').textContent=S.city||'(未设置，默认深圳)';
+    $('keyState').textContent=(S.weatherKey==1)?'已配置':'未配置';
+  }).catch(function(e){msg('设置回显失败:'+e,'err');});
+  fetch('/status').then(function(r){return r.json();}).then(function(j){
+  }).catch(function(){});
+}
+(function(){var op=$('nm_op');for(var v=20;v>=10;v--){var o=document.createElement('option');o.value=v;o.textContent=v+' dB';op.appendChild(o);}})();
+
+// ---- WiFi ----
+function scanWifi(){
+  fetch('/scanwifi').then(function(r){return r.json();}).then(function(j){
+    var sel=$('wifiList');sel.innerHTML='';
+    if(!j.networks||!j.networks.length){var o=document.createElement('option');o.text='未扫描到 WiFi';sel.appendChild(o);return;}
+    j.networks.forEach(function(n){var o=document.createElement('option');o.value=n.ssid;o.text=n.ssid+(n.secure?' (加密)':' (开放)');sel.appendChild(o);});
+  }).catch(function(e){msg('扫描失败:'+e,'err');});
+}
+function useWifi(){var s=$('wifiList');if(s&&s.value)$('ssid').value=s.value;}
+
+// ---- 通用 POST ----
+function post(url,fd,okText){
+  fetch(url,{method:'POST',body:fd}).then(function(r){
+    // ⚠️ 成功后不调 loadAll(): 配网页堆仅 ~6KB, 保存后再拉 /settings.json+/status 两个大响应会连锁
+    //    分配耗尽堆 → Unhandled C++ exception: OOM 崩溃重启(实测 22:38:48-51)。页面保留用户所选值, 刷新用 F5。
+    if(r.ok){msg(okText||'已保存','ok');}
+    else {r.text().then(function(t){msg('保存失败 '+(t||r.status),'err');});}
+  }).catch(function(e){msg('保存失败:'+e,'err');});
+}
+
+// ---- 保存：候选(select/checkbox)改动即保存；自定义输入(text/number)经保存按钮 ----
+function saveField(name,val){
+  var fd=new FormData();fd.set(name,val);
+  post('/settings',fd,'已保存');
+}
+function saveNumerics(){
+  var fd=new FormData();
+  fd.set('sdFrequency',$('nm_sd').value);
+  fd.set('ntpServer',$('t_ntp').value);
+  fd.set('tz',String(Math.round(parseFloat($('nm_tz').value||0)*60)));
+  fd.set('calibInterval',$('nm_cal').value);
+  fd.set('fullRefresh',$('nm_fr').value);
+  fd.set('longPress',$('nm_lp').value);
+  fd.set('outputPower',$('nm_op').value);
+  post('/settings',fd,'设置已保存');
+}
+function saveWifi(){
+  var fd=new FormData();
+  if($('ssid').value)fd.set('ssid',$('ssid').value);
+  if($('wpass').value)fd.set('password',$('wpass').value);
+  post('/wifi',fd,'已保存，正在连接 WiFi…');
+  startWifiPoll();
+}
+// 照官方 getData2: 保存后每 3s 轮询 /status 读连接结果(wifiSaveResult 0=进行中/1=成功/2=失败), 读到后显示并停止
+function startWifiPoll(){
+  if(window.__wifiPoll) clearInterval(window.__wifiPoll);
+  var n=0;
+  window.__wifiPoll=setInterval(function(){
+    n++;
+    fetch('/status').then(function(r){return r.json();}).then(function(j){
+      if(j.wifiSaveResult==1){ clearInterval(window.__wifiPoll); msg('连接成功 '+(j.wifiSaveIp||''),'ok'); }
+      else if(j.wifiSaveResult==2){ clearInterval(window.__wifiPoll); msg('连接失败：请检查WiFi密码/信号','err'); }
+      else if(n>20){ clearInterval(window.__wifiPoll); msg('连接结果超时','dim'); }
+    }).catch(function(){ if(n>20){ clearInterval(window.__wifiPoll); } });
+  },3000);
+}
+function saveWeather(){
+  var fd=new FormData();
+  if($('city').value)fd.set('city',$('city').value);
+  if($('wkey').value)fd.set('wkey',$('wkey').value);
+  
+  post('/wifi',fd,'天气配置已保存');
+}
+function clearConfig(){
+  if(!confirm('确认清除全部配置（WiFi/设置/凭据）？'))return;
+  var fd=new FormData();
+  post('/clear',fd,'配置已清除');
+}
+
+// ---- mock 拦截 ----
+function mockBlocked(name){
+  clearMsg();
+  msg('“'+name+'”不可设置：后端开发中','dim');
+}
+
+loadAll();
+</script>
+</body>
+</html>

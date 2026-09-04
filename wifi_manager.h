@@ -7,8 +7,9 @@
 // 其他模块（file_api 等）必须经此访问器复用, 不能 extern）
 ESP8266WebServer &wifiManagerServer();
 
-// 文件 API 用: 校验请求携带的管理密码（X-Admin-Pass/apass）; 未设置密码或错误 → false
-bool wifiManagerAdminPassValid();
+// Web 设置修改 → 墨水屏提示回调（墨水瓶注册; 每次设置保存成功时回调 line1=标题/line2=变更摘要）
+typedef void (*WebSettingsNotifyCb)(const char *line1, const char *line2);
+void wifiManagerSetWebNotifyCb(WebSettingsNotifyCb cb);
 
 // 配网堆预算审计探针（临时, 审计完成后移除）
 void auditHeap(const char *phase);
