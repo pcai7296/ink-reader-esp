@@ -701,9 +701,9 @@ int chapterCountLoaded = 0;
 static const int CHAPTER_PAGE_TABLE_MAX = 1024;   // 最多 1024 页 (= 6144 章, 覆盖《武炼巅峰》947 页)
 static uint32_t chapterPageOffsets[CHAPTER_PAGE_TABLE_MAX];   // pageOffsets[p-1] = 第 p 页首行偏移 (4KB RAM)
 
-// ---------- 阅读器菜单 (局部刷新弹窗, 对齐 A7 7 项) ----------
+// ---------- 阅读器菜单 (局部刷新弹窗, 对齐 A7 7 项 + 扩展) ----------
 bool readerMenuOpen = false;
-int readerMenuSel = 0;             // 0..9: 字体选择/退出/自动翻页/全刷间隔：/旋转/跳转/标签/休眠/进度同步/配网
+int readerMenuSel = 0;             // 0..11: 字体选择/退出/自动翻页/全刷间隔：/旋转/跳转/章节/标签/休眠/进度同步/配网/重建索引
 char readerMenuNote[32] = "";     // 提示 (覆盖底部信息行)
 int gNetworkReturnMode = APP_HOME; // 配网模式退出后返回的界面 (阅读菜单进入=APP_READER, 首页进入=APP_HOME)
 uint8_t autoFlipSpeed = 0;        // 自动翻页: 0=关, 1/2/5/10/25/50/100 (倍率)
@@ -3393,13 +3393,13 @@ void renderReaderMenu() {
     fillRect(MX, MY, MW, MH, false);
     drawRect(MX, MY, MW, MH, true);
 
-    // ---- 菜单项按钮 (含当前值): 流式排布, 12px 小字 + 小按钮, 容纳 11 项 ----
-    // 11 项: 字体选择/退出/自动翻页/全刷间隔：/旋转/跳转/章节/标签/休眠/进度同步/配网
+    // ---- 菜单项按钮 (含当前值): 流式排布, 12px 小字 + 小按钮, 容纳 12 项 ----
+    // 12 项: 字体选择/退出/自动翻页/全刷间隔：/旋转/跳转/章节/标签/休眠/进度同步/配网/重建索引
     // (12px 中文字库 u8g2_font_wqy12_t_gb2312: 修复 10 项时 i<9 漏渲染末项的幽灵选项问题,
-    //  且缩小字体/按钮面积使 11 项在横竖屏面板内放得下)
-    static const char *const itemNames[11] = {"字体选择", "退出", "自动翻页", "全刷间隔：", "旋转", "跳转", "章节", "标签", "休眠", "进度同步", "配网"};
-    char itemText[11][24];
-    for (int i = 0; i < 11; i++) {
+    //  且缩小字体/按钮面积使 12 项在横竖屏面板内放得下)
+    static const char *const itemNames[12] = {"字体选择", "退出", "自动翻页", "全刷间隔：", "旋转", "跳转", "章节", "标签", "休眠", "进度同步", "配网", "重建索引"};
+    char itemText[12][24];
+    for (int i = 0; i < 12; i++) {
         switch (i) {
             case 0: snprintf(itemText[i], sizeof(itemText[i]), "%s%s", itemNames[i], fontExternal ? " 外" : " 自"); break;
             case 2: snprintf(itemText[i], sizeof(itemText[i]), "%s%s", itemNames[i], autoFlipSpeed ? " 开" : " 关"); break;
@@ -3413,10 +3413,10 @@ void renderReaderMenu() {
     // 必须重新 setFontMode(1) 透明模式, 否则字形背景用 bg_color(默认白) 填充 → 选中黑底上出现白矩形。
     u8g2Fonts.setFont(u8g2_font_wqy12_t_gb2312);
     u8g2Fonts.setFontMode(1);
-    const int btnH = 17, btnGap = 4, btnPad = 6;
+    const int btnH = 15, btnGap = 3, btnPad = 5;
     int x = MX + 4, y = MY + 4;
     int maxY = y;
-    for (int i = 0; i < 11; i++) {
+    for (int i = 0; i < 12; i++) {
         int bw = utf8Width(itemText[i]) + btnPad * 2;
         if (x + bw > MX + MW - 4) { x = MX + 4; y += btnH + btnGap; }
         bool sel = readerMenuSel == i;
@@ -3646,6 +3646,26 @@ void execReaderMenu() {
             appMode = APP_NETWORK;
             saveSleepRecord();
             wifiManagerBegin(renderNetworkPage, exitNetworkPage);
+            break;
+        }
+        case 11: {  // 重建索引: 对齐文件管理器"重建" — 删除当前使用的索引 → 回第一页 → 后台重建
+            if (txtPath.length() == 0 || txtIndexPath.length() == 0) {
+                snprintf(readerMenuNote, sizeof(readerMenuNote), "无索引可重建");
+                renderReaderMenu();
+                break;
+            }
+            traceFmt("REBUILD_READER path=%s", txtPath.c_str());
+            readerMenuOpen = false;
+            // 关键: 重建会 SD.remove 当前 .i1/.z1(+p), 必须先在阅读器内关掉旧句柄
+            // (txtFile/txtIndexScanFile 等; 关 txtFile 后 startTxtReader 会重开)。
+            if (txtIndexScanFile) txtIndexScanFile.close();
+            if (txtIndexBuildFile) txtIndexBuildFile.close();
+            if (txtChapterBuildFile) txtChapterBuildFile.close();
+            if (txtFile) txtFile.close();
+            txtIndexBuilding = false;
+            // startTxtReader(forceRebuild=true): 内部 SD.remove 索引/章节/sidecar
+            // → txtPage=1 → 渲染第一页 → beginTxtIndexBuild() 后台全量重建 (indexTaskStep 继续喂)。
+            startTxtReader(txtPath.c_str(), true);
             break;
         }
     }
@@ -5503,11 +5523,11 @@ void loop() {
         } else if (readerMenuOpen) {
             // 菜单光标: 右键下移 1 / 中键上移 2 (用户设计: 中键跨 2 个选项, 右键跨 1 个)
             if (r3 == 1) {
-                readerMenuSel = (readerMenuSel + 1) % 11;
+                readerMenuSel = (readerMenuSel + 1) % 12;
                 readerMenuNote[0] = '\0';
                 renderReaderMenu();
             } else if (r2 == 1) {
-                readerMenuSel = (readerMenuSel + 9) % 11;   // +9 ≡ -2 (mod 11): 上移 2 个
+                readerMenuSel = (readerMenuSel + 10) % 12;   // +10 ≡ -2 (mod 12): 上移 2 个
                 readerMenuNote[0] = '\0';
                 renderReaderMenu();
             } else if (r2 == 2) {
