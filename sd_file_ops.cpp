@@ -38,6 +38,11 @@ static void fillEntry(const char *fullPath, bool isDir, uint64_t size, SdEntry *
 // 挤占配网会话堆——配网入口 AP 后堆仅 ~240B, 静态 RAM 90% 是主因）
 static SdEntry *gScratchEntry = NULL;
 
+// /fs/list 实时路径 scratch（2026-09: 该 handler 深链实测 stack=0, 每帧 SdEntry(650B)+full(420B)
+// 栈局部必溢出→panic/SoftWDT; HTTP 单线程顺序执行, 文件级 static 安全且零分配）
+static SdEntry gPagedEntry;
+static char gPagedFull[420];
+
 // ⚠️★ 枚举根因（2026-09 确认, 见 docs/ 与 reverse_a7_a01/reports/CONCLUSION_BIG_DIR_ROOTCAUSE.md）:
 // 官方 A7 枚举 = SDFS.openDir + Dir::next()（纯目录项扫描: File32::openNext + getName(_lfn,64) + close,
 // 零堆分配、零路径解析）。File::openNextFile()（core FS.cpp）内部每项都会 _fakeDir->openFile("r")
@@ -103,7 +108,6 @@ int sdListDirPaged(const char *path, size_t startOffset, size_t count,
   if (hasMore) *hasMore = false;
   if (!dirProbe(path)) return -1;
   Dir root = SDFS.openDir(path);
-  SdEntry localEntry;
   size_t skipped = 0;
   size_t e = 0;
   // 阶段1: 跳过 startOffset 项（SD 目录无随机跳转, 只能顺序 next()）
@@ -117,11 +121,11 @@ int sdListDirPaged(const char *path, size_t startOffset, size_t count,
     if (!root.next()) break;
     String nm = root.fileName();
     bool isDir = root.isDirectory();
-    char full[420];
-    joinFull(path, nm, full, sizeof(full));
-    fillEntry(full, isDir, isDir ? 0 : (uint64_t)root.fileSize(), &localEntry);
+    char *full = gPagedFull;                 // static scratch, 深链 stack≈0 下禁栈大局部
+    joinFull(path, nm, full, sizeof(gPagedFull));
+    fillEntry(full, isDir, isDir ? 0 : (uint64_t)root.fileSize(), &gPagedEntry);
     if (e < count) {
-      if (cb) cb(&localEntry, ctx);
+      if (cb) cb(&gPagedEntry, ctx);
       e++;
     } else {
       // 第 count+1 项: 存在但不再送 cb → 有更多

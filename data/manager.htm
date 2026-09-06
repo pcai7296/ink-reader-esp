@@ -277,6 +277,16 @@
         var mkfile = document.createElement("button");
         mkfile.innerHTML = "新建文件"; header.appendChild(mkfile);
 
+        // 显示开关(2026-09): 隐藏/显示设备自动生成文件(索引/章节/标签等后缀), localStorage 记忆
+        var autoHideNow = (localStorage.getItem('fsAutoHide') === '0') ? 0 : 1;
+        var autof = document.createElement("button");
+        autof.innerHTML = autoHideNow ? "隐藏自动文件:开" : "隐藏自动文件:关";
+        autof.onclick = function() {
+          localStorage.setItem('fsAutoHide', autoHideNow ? '0' : '1');
+          location.reload();   // 简化: 整页重载按新开关列目录
+        };
+        header.appendChild(autof);
+
         var status = document.createElement("span");
         status.id = "status"; status.innerHTML = "(加载)"; header.appendChild(status);
 
@@ -314,8 +324,20 @@
         document.getElementById(element).appendChild(treeRoot);
 
         function loadDownload(path) {
-          document.getElementById("download-frame").src =
-            "file?path=" + encodeURIComponent(path) + "&download=true";
+          // 下载改为 <a download> 触发(浏览器原生下载管理, 独立连接):
+          // iframe 导航下载在"页面保持 list/status 连接 + 慢速 STA 链路"时会饿死断连
+          // (实测 Chrome iframe 下载 ~0.2MB 即断, curl/独立导航可下完)。
+          var a = document.getElementById("download-anchor");
+          if (!a) {
+            a = document.createElement("a");
+            a.id = "download-anchor";
+            a.style.display = "none";
+            document.body.appendChild(a);
+          }
+          a.href = "file?path=" + encodeURIComponent(path) + "&download=true";
+          a.download = "";
+          document.body.appendChild(a);
+          a.click();
         }
 
         function loadImgPreview(path) {
@@ -608,7 +630,8 @@
           setLoading(true, "Listing '" + parentPath + "'...");
           var xmlHttp = new XMLHttpRequest();
           xmlHttp.onload = onListReceived(xmlHttp, parentPath, remainingPaths);
-          xmlHttp.open("GET", "list?dir=" + encodeURIComponent(parentPath) + "&start=0&count=25", true);
+          var auto = (localStorage.getItem('fsAutoHide') === '0') ? '0' : '1';
+          xmlHttp.open("GET", "list?dir=" + encodeURIComponent(parentPath) + "&start=0&count=25&auto=" + auto, true);
           xmlHttp.send(null);
         }
 
@@ -616,7 +639,8 @@
           setLoading(true, "Loading more '" + parentPath + "'...");
           var xmlHttp = new XMLHttpRequest();
           xmlHttp.onload = onListMoreReceived(xmlHttp, parentPath);
-          xmlHttp.open("GET", "list?dir=" + encodeURIComponent(parentPath) + "&start=" + start + "&count=50", true);
+          var auto = (localStorage.getItem('fsAutoHide') === '0') ? '0' : '1';
+          xmlHttp.open("GET", "list?dir=" + encodeURIComponent(parentPath) + "&start=" + start + "&count=50&auto=" + auto, true);
           xmlHttp.send(null);
         }
 

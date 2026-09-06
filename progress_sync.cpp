@@ -17,17 +17,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <stdio.h>
+#include <pgmspace.h>
 
 // ---------- 调试 ----------
 #define PROG_SYNC_DEBUG 1
 #if PROG_SYNC_DEBUG
 // 简短的同步调试输出 (Serial @115200, 不影响器件逻辑)
-static void syncDbg(const char* fmt, ...) {
+// (2026-09 Step D): 格式串进 flash (调用点 PSTR), vsnprintf_P 读 flash fmt; %s 实参仍须 RAM
+static void syncDbg(PGM_P fmt, ...) {
   char buf[220];
   va_list args; va_start(args, fmt);
-  vsnprintf(buf, sizeof(buf), fmt, args);
+  vsnprintf_P(buf, sizeof(buf), fmt, args);
   va_end(args);
-  Serial.printf("[SYNC][%lu] %s\n", (unsigned long)millis(), buf);
+  Serial.printf_P(PSTR("[SYNC][%lu] %s\n"), (unsigned long)millis(), buf);
 }
 static const char* syncStateName(int s) {
   switch (s) {
@@ -114,7 +117,7 @@ static uint16_t gTargetPort = 8384;  // 手机进度服务器端口 (默认 8384
 
 static void syncDisconnect() {
   gWiFi.stop();
-  syncDbg("DISCONNECT heap=%lu", (unsigned long)ESP.getFreeHeap());
+  syncDbg(PSTR("DISCONNECT heap=%lu"), (unsigned long)ESP.getFreeHeap());
 }
 
 // 连接阶段 (SYNC_CONNECT 与 SYNC_UPLOAD 断线重连共用):
@@ -130,19 +133,19 @@ static int syncConnectPhase() {
   gRetryAtMs = 0;
   IPAddress tip;
   if (!tip.fromString(gTarget.c_str())) {
-    gStatus = "手机地址无效";
+    gStatus = F("手机地址无效");
     return -1;
   }
-  syncDbg("CONNECT attempt=%d target=[%s] port=%u", gConnectAttempt, gTarget.c_str(), (unsigned)gTargetPort);
-  gStatus = "正在连接手机…";
+  syncDbg(PSTR("CONNECT attempt=%d target=[%s] port=%u"), gConnectAttempt, gTarget.c_str(), (unsigned)gTargetPort);
+  gStatus = F("正在连接手机…");
   bool ok = gWiFi.connect(tip, gTargetPort);    // 阻塞 ≤5s (默认超时), 失败立即返回
   ESP.wdtFeed();
   if (ok) {
     gWiFi.setTimeout(3000);       // 读超时 3s
-    syncDbg("CONNECT ok heap=%lu", (unsigned long)ESP.getFreeHeap());
+    syncDbg(PSTR("CONNECT ok heap=%lu"), (unsigned long)ESP.getFreeHeap());
     return 1;
   }
-  syncDbg("CONNECT fail attempt=%d", gConnectAttempt);
+  syncDbg(PSTR("CONNECT fail attempt=%d"), gConnectAttempt);
   if (gConnectAttempt < 2) {
     gConnectAttempt++;
     gRetryAtMs = millis() + 2000UL;   // 2s 后重试
@@ -167,7 +170,7 @@ static int phoneReadStatus() {
         int sp1 = line.indexOf(' ');
         int sp2 = line.indexOf(' ', sp1 + 1);
         int code = (sp1 > 0 && sp2 > sp1) ? line.substring(sp1 + 1, sp2).toInt() : -1;
-        syncDbg("RSP status=[%s] code=%d", line.c_str(), code);
+        syncDbg(PSTR("RSP status=[%s] code=%d"), line.c_str(), code);
         if (!phoneSkipHeaders()) return -1;   // 消费该响应剩余头部
         return code;
       }
@@ -241,9 +244,9 @@ static bool phoneReadBody(uint16_t max) {
 }
 
 static void setState(SyncState s) {
-  syncDbg("STATE %s -> %s%s", syncStateName((int)gState), syncStateName((int)s),
+  syncDbg(PSTR("STATE %s -> %s%s"), syncStateName((int)gState), syncStateName((int)s),
           (s == SYNC_ERROR || s == SYNC_FINISH) ? " [status]" : "");
-  if (s == SYNC_ERROR || s == SYNC_FINISH) syncDbg("STATUS %s", gStatus.c_str());
+  if (s == SYNC_ERROR || s == SYNC_FINISH) syncDbg(PSTR("STATUS %s"), gStatus.c_str());
   gState = s;
   progressSyncRender((int)s);
 }
@@ -261,7 +264,7 @@ static void loadSyncCfg() {
   gCfgSsid[0] = gCfgPass[0] = gCfgIp[0] = '\0';
   gTargetPort = 8384;   // 默认端口; 有 port= 行则覆盖
   File f = SD.open("/sync.cfg", "r");
-  if (!f) { syncDbg("SYNC_CFG none"); return; }
+  if (!f) { syncDbg(PSTR("SYNC_CFG none")); return; }
   char line[70];
   uint8_t li = 0;
   while (f.available()) {
@@ -294,7 +297,7 @@ static void loadSyncCfg() {
     }
   }
   f.close();
-  syncDbg("SYNC_CFG ssid=[%s] ip=[%s] port=%u", gCfgSsid[0] ? gCfgSsid : "(无)", gCfgIp[0] ? gCfgIp : "(无)", (unsigned)gTargetPort);
+  syncDbg(PSTR("SYNC_CFG ssid=[%s] ip=[%s] port=%u"), gCfgSsid[0] ? gCfgSsid : "(无)", gCfgIp[0] ? gCfgIp : "(无)", (unsigned)gTargetPort);
 }
 
 // ---------- UDP 发现辅助 ----------
@@ -313,7 +316,7 @@ static void discoverySendPings() {
     gDiscUdp.write((const uint8_t*)"LUMIDISC", 8);
     gDiscUdp.endPacket();
   }
-  syncDbg("DISCOVER ping ip=%s port=%u", staIp.toString().c_str(), (unsigned)DISC_PORT);
+  syncDbg(PSTR("DISCOVER ping ip=%s port=%u"), staIp.toString().c_str(), (unsigned)DISC_PORT);
 }
 
 // 返回 >0 且 ack 以 "LUMIACK " 开头 → 合法响应; 其余返回 0
@@ -344,7 +347,7 @@ static void fpRegion(uint64_t start, uint64_t end, char* out) {
     got += (uint32_t)r;
   }
   if (got < len || !sok) {
-    syncDbg("FP read-short start=%llu want=%lu got=%lu seek=%d pos=%lu size=%lu",
+    syncDbg(PSTR("FP read-short start=%llu want=%lu got=%lu seek=%d pos=%lu size=%lu"),
             (unsigned long long)start, (unsigned long)len, (unsigned long)got, (int)sok,
             (unsigned long)txtFile.position(), (unsigned long)txtFile.size());
     gFpValid = false;
@@ -358,9 +361,9 @@ static void fpRegion(uint64_t start, uint64_t end, char* out) {
 static void computeFileFingerprint() {
   gFpValid = false;
   gFpSize = 0; gFpH0[0] = gFpH1[0] = gFpH2[0] = '\0';
-  if (!txtFile) { syncDbg("FP FAIL no-txtfile"); return; }
+  if (!txtFile) { syncDbg(PSTR("FP FAIL no-txtfile")); return; }
   gFpSize = txtFile.size();
-  if (gFpSize == 0) { syncDbg("FP FAIL size=0"); return; }
+  if (gFpSize == 0) { syncDbg(PSTR("FP FAIL size=0")); return; }
   uint64_t size = gFpSize;
   uint64_t h0e = (size < 1024) ? size : 1024;
   uint64_t cen = size / 2;
@@ -368,21 +371,21 @@ static void computeFileFingerprint() {
   uint64_t h1e = (size < cen + 512) ? size : (cen + 512);
   uint64_t h2s = (size > 1024) ? (size - 1024) : 0;
   fpRegion(0, h0e, gFpH0);
-  if (!gFpValid) { syncDbg("FP FAIL region0 start=0 len=%lu", (unsigned long)h0e); return; }
+  if (!gFpValid) { syncDbg(PSTR("FP FAIL region0 start=0 len=%lu"), (unsigned long)h0e); return; }
   fpRegion(h1s, h1e, gFpH1);
-  if (!gFpValid) { syncDbg("FP FAIL region1 start=%llu len=%lu", (unsigned long long)h1s, (unsigned long)(h1e - h1s)); return; }
+  if (!gFpValid) { syncDbg(PSTR("FP FAIL region1 start=%llu len=%lu"), (unsigned long long)h1s, (unsigned long)(h1e - h1s)); return; }
   fpRegion(h2s, size, gFpH2);
-  if (!gFpValid) { syncDbg("FP FAIL region2 start=%llu len=%lu", (unsigned long long)h2s, (unsigned long)(size - h2s)); return; }
+  if (!gFpValid) { syncDbg(PSTR("FP FAIL region2 start=%llu len=%lu"), (unsigned long long)h2s, (unsigned long)(size - h2s)); return; }
   gFpValid = true;
-  syncDbg("FP size=%llu h0=[%s] h1=[%s] h2=[%s]",
+  syncDbg(PSTR("FP size=%llu h0=[%s] h1=[%s] h2=[%s]"),
           (unsigned long long)gFpSize, gFpH0, gFpH1, gFpH2);
 }
 
 void progressSyncBegin(const String& txtPath) {
-  syncDbg("BEGIN path=[%s]", txtPath.c_str());
+  syncDbg(PSTR("BEGIN path=[%s]"), txtPath.c_str());
   gTxtPath = txtPath;
   gFilename = basenameOf(txtPath);
-  gStatus = "";
+  gStatus = F("");
   gCloudExists = false;
   gRemoteOffset = 0; gRemoteSize = 0; gRemotePercent = 0; gRemoteTsMs = 0;
   gCompareSel = 0;
@@ -411,12 +414,12 @@ void progressSyncLoop() {
     case SYNC_PREPARE: {
       // 快照本地进度 (沿用 progressSyncSnapshot 宿主钩子)
       if (!progressSyncSnapshot(gTxtPath, gLocalOffset, gLocalSize, gLocalPercent)) {
-        gStatus = "本地进度读取失败"; setState(SYNC_ERROR); break;
+        gStatus = F("本地进度读取失败"); setState(SYNC_ERROR); break;
       }
       if (gLocalSize == 0) {
-        gStatus = "进度同步失败"; setState(SYNC_ERROR); break;
+        gStatus = F("进度同步失败"); setState(SYNC_ERROR); break;
       }
-      syncDbg("PREPARE local offset=%lu size=%lu pct=%.2f",
+      syncDbg(PSTR("PREPARE local offset=%lu size=%lu pct=%.2f"),
               (unsigned long)gLocalOffset, (unsigned long)gLocalSize, (double)gLocalPercent);
       loadSyncCfg();          // SD 总线已由 progressSyncSnapshot 恢复, 读 /sync.cfg
       computeFileFingerprint();  // v3: 文件指纹快照 (同一 txtFile 句柄; 失败整组无效)
@@ -426,7 +429,7 @@ void progressSyncLoop() {
     case SYNC_WIFI: {
       if (wifiManagerIsStaUp()) {
         // 局域网模式: STA 已连 → 目标= /sync.cfg ip → UDP 发现 → TargetConfig 兜底
-        syncDbg("WIFI sta-up ip=%s", WiFi.localIP().toString().c_str());
+        syncDbg(PSTR("WIFI sta-up ip=%s"), WiFi.localIP().toString().c_str());
         gConnectAttempt = 0; gRetryAtMs = 0;
         if (gCfgIp[0]) { gTarget = String(gCfgIp); setState(SYNC_CONNECT); break; }
         setState(SYNC_DISCOVER);
@@ -435,17 +438,17 @@ void progressSyncLoop() {
       // 未连 STA：优先 /sync.cfg 凭据直连, 否则 EEPROM 配网页凭据 (均限时 20s, 失败切热点)
       if (!gStaAttempted) {
         gStaAttempted = true;
-        gStatus = "正在连接 Wi-Fi...";
+        gStatus = F("正在连接 Wi-Fi...");
         if (gCfgSsid[0]) {
           WiFi.persistent(false);        // 不把 /sync.cfg 凭据写进 flash 配网区
           WiFi.mode(WIFI_STA);
           WiFi.begin(gCfgSsid, gCfgPass);
-          syncDbg("WIFI try-sta via /sync.cfg ssid=[%s]", gCfgSsid);
+          syncDbg(PSTR("WIFI try-sta via /sync.cfg ssid=[%s]"), gCfgSsid);
         } else {
           wifiManagerStartSta();
         }
         gDeadline = millis() + 20000UL;
-        syncDbg("WIFI try-sta start");
+        syncDbg(PSTR("WIFI try-sta start"));
         break;
       }
       if (wifiManagerIsStaUp()) {
@@ -458,13 +461,13 @@ void progressSyncLoop() {
       if ((int32_t)(millis() - gDeadline) >= 0) {
         // 热点模式: 纯 AP (STA 断开, 规避 AP/STA 同子网路由歧义), 等手机连上热点
         gStaAttempted = false;
-        syncDbg("WIFI sta-timeout -> AP-only");
+        syncDbg(PSTR("WIFI sta-timeout -> AP-only"));
         if (!wifiManagerStartApOnly()) {
-          gStatus = "热点启动失败"; setState(SYNC_ERROR); break;
+          gStatus = F("热点启动失败"); setState(SYNC_ERROR); break;
         }
         gDeadline = millis() + 15000UL;   // 等手机接入超时 15s
         gLastPollMs = 0;
-        gStatus = "热点已开，等待手机连接…";
+        gStatus = F("热点已开，等待手机连接…");
         setState(SYNC_WAIT_CLIENT);
         break;
       }
@@ -476,7 +479,7 @@ void progressSyncLoop() {
         gDiscStarted = true;
         gDiscDeadline = millis() + DISC_TIMEOUT_MS;
         gDiscPollMs = 0;
-        gStatus = "正在发现手机…";
+        gStatus = F("正在发现手机…");
         discoverySendPings();
         break;
       }
@@ -496,10 +499,10 @@ void progressSyncLoop() {
             IPAddress tip;
             if (tip.fromString(ips)) {
               gTarget = String(ips);
-              syncDbg("DISCOVER ok ip=%s", gTarget.c_str());
+              syncDbg(PSTR("DISCOVER ok ip=%s"), gTarget.c_str());
               discoveryStop();
               gConnectAttempt = 0; gRetryAtMs = 0;
-              gStatus = "正在连接手机…";
+              gStatus = F("正在连接手机…");
               setState(SYNC_CONNECT);
               break;
             }
@@ -508,11 +511,11 @@ void progressSyncLoop() {
       }
       if ((int32_t)(millis() - gDiscDeadline) >= 0) {
         discoveryStop();
-        syncDbg("DISCOVER timeout -> fallback");
+        syncDbg(PSTR("DISCOVER timeout -> fallback"));
         gTarget = String(wifiManagerSyncTarget());
-        if (gTarget.length() == 0) { gStatus = "未配置手机地址"; setState(SYNC_ERROR); break; }
+        if (gTarget.length() == 0) { gStatus = F("未配置手机地址"); setState(SYNC_ERROR); break; }
         gConnectAttempt = 0; gRetryAtMs = 0;
-        gStatus = "正在连接手机…";
+        gStatus = F("正在连接手机…");
         setState(SYNC_CONNECT);
         break;
       }
@@ -524,27 +527,27 @@ void progressSyncLoop() {
       if ((int32_t)(millis() - gLastPollMs) >= 500) {
         gLastPollMs = millis();
         int n = WiFi.softAPgetStationNum();
-        syncDbg("WAIT_CLIENT stations=%d", n);
+        syncDbg(PSTR("WAIT_CLIENT stations=%d"), n);
         if (n > 0) {
           gTarget = String(wifiManagerSyncTarget());   // STA 未连 → apIp (192.168.0.100)
-          if (gTarget.length() == 0) { gStatus = "未配置手机地址"; setState(SYNC_ERROR); break; }
+          if (gTarget.length() == 0) { gStatus = F("未配置手机地址"); setState(SYNC_ERROR); break; }
           gConnectAttempt = 0; gRetryAtMs = 0;
-          gStatus = "正在连接手机…";
+          gStatus = F("正在连接手机…");
           setState(SYNC_CONNECT);
           break;
         }
       }
       if ((int32_t)(millis() - gDeadline) >= 0) {
-        syncDbg("WAIT_CLIENT timeout");
-        gStatus = "无法连接手机"; setState(SYNC_ERROR); break;
+        syncDbg(PSTR("WAIT_CLIENT timeout"));
+        gStatus = F("无法连接手机"); setState(SYNC_ERROR); break;
       }
       break;
     }
     case SYNC_CONNECT: {
       int r = syncConnectPhase();
       if (r == 0) break;                 // 等重试间隔 (保持本状态, 下一轮再试)
-      if (r < 0) { syncDisconnect(); gStatus = "无法连接手机"; setState(SYNC_ERROR); break; }
-      gStatus = "已连接，获取进度中…";
+      if (r < 0) { syncDisconnect(); gStatus = F("无法连接手机"); setState(SYNC_ERROR); break; }
+      gStatus = F("已连接，获取进度中…");
       setState(SYNC_GET);
       break;
     }
@@ -556,31 +559,31 @@ void progressSyncLoop() {
       req += "\r\nHost: ";
       req += gTarget;
       req += "\r\nConnection: close\r\n\r\n";
-      syncDbg("REQ %s", reqLine);
+      syncDbg(PSTR("REQ %s"), reqLine);
       gWiFi.print(req);
       int code = phoneReadStatus();       // 读状态行 + 头部, 3s 超时
-      syncDbg("GET code=%d heap=%lu", code, (unsigned long)ESP.getFreeHeap());
+      syncDbg(PSTR("GET code=%d heap=%lu"), code, (unsigned long)ESP.getFreeHeap());
       if (code == 200) {
         if (phoneReadBody(sizeof(gBuf))) {
-          syncDbg("GET body bytes=%u", (unsigned)gBufLen);
+          syncDbg(PSTR("GET body bytes=%u"), (unsigned)gBufLen);
           setState(SYNC_PARSE);
         } else {
-          syncDisconnect(); gStatus = "手机数据异常"; setState(SYNC_ERROR);
+          syncDisconnect(); gStatus = F("手机数据异常"); setState(SYNC_ERROR);
         }
       } else if (code == 404) {
-        syncDisconnect(); gStatus = "手机无此书进度"; setState(SYNC_ERROR);
+        syncDisconnect(); gStatus = F("手机无此书进度"); setState(SYNC_ERROR);
       } else {
-        syncDisconnect(); gStatus = "连接失败 ✗"; setState(SYNC_ERROR);
+        syncDisconnect(); gStatus = F("连接失败 ✗"); setState(SYNC_ERROR);
       }
       break;
     }
     case SYNC_PARSE: {
       // lumiParse 按长度解析，不要求 null 结尾（规范 docs/progress-lumi1.md）
-      syncDbg("PARSE raw bytes=%u", (unsigned)gBufLen);
+      syncDbg(PSTR("PARSE raw bytes=%u"), (unsigned)gBufLen);
       LumiProgress cp;
       bool parsed = (gBufLen > 0) && lumiParse((const char*)gBuf, gBufLen, cp);
-      if (!parsed) { syncDisconnect(); gStatus = "手机进度无效"; setState(SYNC_ERROR); break; }
-      if (cp.offset > gLocalSize) { syncDisconnect(); gStatus = "手机进度无效"; setState(SYNC_ERROR); break; }
+      if (!parsed) { syncDisconnect(); gStatus = F("手机进度无效"); setState(SYNC_ERROR); break; }
+      if (cp.offset > gLocalSize) { syncDisconnect(); gStatus = F("手机进度无效"); setState(SYNC_ERROR); break; }
       gCloudExists = true;
       gRemoteOffset = cp.offset;
       gRemoteSize = cp.size;
@@ -595,12 +598,12 @@ void progressSyncLoop() {
         if (strcmp(gFpH1, cp.h1) != 0) gFileMismatch |= 4;
         if (strcmp(gFpH2, cp.h2) != 0) gFileMismatch |= 8;
         gFileFpState = (gFileMismatch == 0) ? FINGERPRINT_MATCH : FINGERPRINT_MISMATCH;
-        syncDbg("FP state=%d mask=%u", gFileFpState, (unsigned)gFileMismatch);
+        syncDbg(PSTR("FP state=%d mask=%u"), gFileFpState, (unsigned)gFileMismatch);
       }
-      syncDbg("PARSE ok ts=%llu size=%lu offset=%lu pct=%.2f", (unsigned long long)cp.ts,
+      syncDbg(PSTR("PARSE ok ts=%llu size=%lu offset=%lu pct=%.2f"), (unsigned long long)cp.ts,
               (unsigned long)cp.size, (unsigned long)cp.offset, (double)cp.pct);
       syncDisconnect();                 // 比较页等待按键, 连接不再复用 (GET 已 Connection: close)
-      gStatus = "请选择同步方向";
+      gStatus = F("请选择同步方向");
       setState(SYNC_COMPARE);
       break;
     }
@@ -622,53 +625,53 @@ void progressSyncLoop() {
       if (gLocalSize > 0 && gRemotePercent >= 0.0f && gRemotePercent <= 100.0f && diff > 1.0) {
         target = (uint32_t)((double)gRemotePercent / 100.0 * (double)gLocalSize);
         if (target > gLocalSize) target = gLocalSize;
-        syncDbg("APPLY pct-convert offset=%lu -> %lu (offPct=%.2f poPct=%.2f)",
+        syncDbg(PSTR("APPLY pct-convert offset=%lu -> %lu (offPct=%.2f poPct=%.2f)"),
                 (unsigned long)gRemoteOffset, (unsigned long)target,
                 offsetPct, (double)gRemotePercent);
       } else {
-        syncDbg("APPLY use-offset %lu (offPct=%.2f poPct=%.2f)",
+        syncDbg(PSTR("APPLY use-offset %lu (offPct=%.2f poPct=%.2f)"),
                 (unsigned long)target, offsetPct, (double)gRemotePercent);
       }
       if (progressSyncApplyRemote(target)) {
-        gStatus = "同步成功 ✓";
+        gStatus = F("同步成功 ✓");
         setState(SYNC_FINISH);   // loop 顶部 disconnect + done
-      } else { syncDisconnect(); gStatus = "本地写入失败"; setState(SYNC_ERROR); }
+      } else { syncDisconnect(); gStatus = F("本地写入失败"); setState(SYNC_ERROR); }
       break;
     }
     case SYNC_UPLOAD: {
       // PUT 推送本地进度 (覆盖): 比较页期间连接已断开 → 需要时重新连接(带重试)
       if (!gWiFi.connected()) {
-        gStatus = "正在连接手机…";
+        gStatus = F("正在连接手机…");
         int r = syncConnectPhase();
         if (r == 0) break;
-        if (r < 0) { syncDisconnect(); gStatus = "无法连接手机"; setState(SYNC_ERROR); break; }
+        if (r < 0) { syncDisconnect(); gStatus = F("无法连接手机"); setState(SYNC_ERROR); break; }
       }
-      gStatus = "正在推送进度…";
+      gStatus = F("正在推送进度…");
       char lumi[320];
       bool made = lumiMakeEx(lumi, sizeof(lumi), gSyncStartMs, gLocalSize, gLocalOffset, gLocalPercent,
                              gFpValid ? gFpSize : 0,
                              gFpValid ? gFpH0 : NULL,
                              gFpValid ? gFpH1 : NULL,
                              gFpValid ? gFpH2 : NULL);
-      if (!made) { syncDisconnect(); gStatus = "进度数据过大"; setState(SYNC_ERROR); break; }
+      if (!made) { syncDisconnect(); gStatus = F("进度数据过大"); setState(SYNC_ERROR); break; }
       String body = String(lumi);
       body += "file=";
       body += gFilename;            // 文件名原始 UTF-8, body 内不需要编码
       body += "\n";
-      String req = "PUT /progress HTTP/1.1\r\nHost: ";
+      String req = F("PUT /progress HTTP/1.1\r\nHost: ");
       req += gTarget;
       req += "\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ";
       req += String(body.length());
       req += "\r\nConnection: close\r\n\r\n";
       req += body;
-      syncDbg("REQ PUT /progress body=[%s]", body.c_str());
+      syncDbg(PSTR("REQ PUT /progress body=[%s]"), body.c_str());
       gWiFi.print(req);
       int code = phoneReadStatus();
-      syncDbg("PUT code=%d heap=%lu", code, (unsigned long)ESP.getFreeHeap());
+      syncDbg(PSTR("PUT code=%d heap=%lu"), code, (unsigned long)ESP.getFreeHeap());
       syncDisconnect();
-      if (code == 200) { gStatus = "同步成功 ✓"; setState(SYNC_FINISH); }
-      else if (code == 400) { gStatus = "手机拒绝进度"; setState(SYNC_ERROR); }
-      else { gStatus = "连接失败 ✗"; setState(SYNC_ERROR); }
+      if (code == 200) { gStatus = F("同步成功 ✓"); setState(SYNC_FINISH); }
+      else if (code == 400) { gStatus = F("手机拒绝进度"); setState(SYNC_ERROR); }
+      else { gStatus = F("连接失败 ✗"); setState(SYNC_ERROR); }
       break;
     }
     default: break;
@@ -698,7 +701,7 @@ bool progressSyncConfirmUploadPending() { return gConfirmUpload; }
 
 void progressSyncCancel() {
   syncDisconnect();   // 归还连接
-  gStatus = "已取消";
+  gStatus = F("已取消");
   progressSyncDone(false);
   gState = SYNC_IDLE;
 }

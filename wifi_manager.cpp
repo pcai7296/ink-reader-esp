@@ -187,18 +187,18 @@ static bool rtc8025Init() {
         rtc8025TimeValid = true;
         rtc8025NowEpoch = t;
       }
-      Serial.printf("CLOCK_8025T pin=%d/%d mode=%d type=%s valid=%d epoch=%lu raw=%02X %02X %02X %02X %02X %02X %02X\n",
+      Serial.printf_P(PSTR("CLOCK_8025T pin=%d/%d mode=%d type=%s valid=%d epoch=%lu raw=%02X %02X %02X %02X %02X %02X %02X\n"),
                     sdaPin, sclPin, rtc8025LastMode, rtc8025TypeRX ? "RX" : "BL",
                     rtc8025TimeValid ? 1 : 0, (unsigned long)rtc8025NowEpoch,
                     buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6]);
     } else {
       // 诊断: 打印该引脚对的 SDA 状态 + 扫描 I2C 地址
       int sdaLevel = digitalRead(sdaPin);
-      Serial.printf("CLOCK_8025T_DIAG pin=%d/%d reqN=%d mode=%d sda=%d", sdaPin, sclPin, rtc8025LastReqN, rtc8025LastMode, sdaLevel);
+      Serial.printf_P(PSTR("CLOCK_8025T_DIAG pin=%d/%d reqN=%d mode=%d sda=%d"), sdaPin, sclPin, rtc8025LastReqN, rtc8025LastMode, sdaLevel);
       for (uint8_t addr = 0x30; addr <= 0x77; addr++) {
         Wire.beginTransmission(addr);
         uint8_t ack = Wire.endTransmission();
-        if (ack == 0) Serial.printf(" addr=0x%02X", addr);
+        if (ack == 0) Serial.printf_P(PSTR(" addr=0x%02X"), addr);
       }
       Serial.println();
     }
@@ -227,7 +227,7 @@ static bool rtc8025Init() {
   }
   // 恢复 SPI 总线 (GPIO13/14 归 SPI, 供 EPD/SD 使用)
   SPI.begin();
-  Serial.printf("CLOCK_8025T present=%d type=%s valid=%d epoch=%lu\n",
+  Serial.printf_P(PSTR("CLOCK_8025T present=%d type=%s valid=%d epoch=%lu\n"),
                 rtc8025Present ? 1 : 0, rtc8025TypeRX ? "RX" : "BL",
                 rtc8025TimeValid ? 1 : 0, (unsigned long)rtc8025NowEpoch);
   return rtc8025Present;
@@ -253,7 +253,7 @@ static bool rtc8025WriteEpoch(time_t epochUtc) {
   Wire.setClock(100000);
   bool ok = rtc8025WriteRaw(data);
   SPI.begin();  // 恢复 SPI
-  Serial.printf("CLOCK_8025T_SAVE ok=%d epoch=%lu\n", ok ? 1 : 0, (unsigned long)epochUtc);
+  Serial.printf_P(PSTR("CLOCK_8025T_SAVE ok=%d epoch=%lu\n"), ok ? 1 : 0, (unsigned long)epochUtc);
   return ok;
 }
 
@@ -339,7 +339,7 @@ struct PersistClockRecord {
   uint16_t checksum;
 };
 
-enum State { IDLE, CONNECTING, AP_ONLY, STA_AP, ERROR };
+enum State { IDLE, TRY_STA, STA_ONLY, CONNECTING, AP_ONLY, STA_AP, ERROR };
 State state = IDLE;
 enum ClockState { CLOCK_IDLE, CLOCK_STA, CLOCK_NTP, CLOCK_WEATHER, CLOCK_SUCCESS, CLOCK_SKIPPED, CLOCK_FAILED };
 ClockState clockState = CLOCK_IDLE;
@@ -415,7 +415,7 @@ bool saveAdminConfig(const AdminConfig &in) {
 static WebSettingsNotifyCb g_webNotifyCb = nullptr;   // 匿名区内部回调
 void webNotifyCbSet(WebSettingsNotifyCb cb) { g_webNotifyCb = cb; }   // 匿名区名, 导出区转发调用
 static void fireWebNotify(const char *l1, const char *l2) {
-  Serial.printf("WEB_NOTIFY %s | %s\n", l1 ? l1 : "", l2 ? l2 : "");
+  Serial.printf_P(PSTR("WEB_NOTIFY %s | %s\n"), l1 ? l1 : "", l2 ? l2 : "");
   if (g_webNotifyCb) g_webNotifyCb(l1, l2 ? l2 : "");
 }
 // 摘要缓冲: 各保存 handler 逐项 webNotifyAdd("选项=值 ") 后 webNotifyDone(标题) 统一回调
@@ -462,14 +462,14 @@ bool loadRtcClock() {
   syncedRtcTicks = ticks;
   rtcBaseValid = true;
   syncedAtMs = millis();
-  Serial.printf("CLOCK_RTC_READ epoch=%lu ticks=%lu\n", (unsigned long)syncedTime, (unsigned long)ticks);
+  Serial.printf_P(PSTR("CLOCK_RTC_READ epoch=%lu ticks=%lu\n"), (unsigned long)syncedTime, (unsigned long)ticks);
   return true;
 }
 
 void saveRtcClock(time_t epoch) {
   RtcClockRecord record = { RTC_CLOCK_MAGIC, static_cast<uint32_t>(epoch), system_get_rtc_time() };
   bool rtcOk = ESP.rtcUserMemoryWrite(RTC_CLOCK_OFFSET, reinterpret_cast<uint32_t *>(&record), sizeof(record));
-  if (rtcOk) Serial.printf("CLOCK_RTC_SAVE epoch=%lu ticks=%lu\n", (unsigned long)epoch, (unsigned long)record.rtcTicks);
+  if (rtcOk) Serial.printf_P(PSTR("CLOCK_RTC_SAVE epoch=%lu ticks=%lu\n"), (unsigned long)epoch, (unsigned long)record.rtcTicks);
   else Serial.println(F("CLOCK_RTC_SAVE_FAIL"));
   syncedTime = epoch;
   lastCalibrationTime = epoch;
@@ -493,7 +493,7 @@ bool loadPersistedClock() {
   syncedTime = (record.savedAt > record.epoch) ? record.savedAt : record.epoch;
   rtcBaseValid = false;
   syncedAtMs = millis();
-  Serial.printf("CLOCK_EEPROM_READ epoch=%lu savedAt=%lu\n", (unsigned long)record.epoch, (unsigned long)record.savedAt);
+  Serial.printf_P(PSTR("CLOCK_EEPROM_READ epoch=%lu savedAt=%lu\n"), (unsigned long)record.epoch, (unsigned long)record.savedAt);
   return true;
 }
 
@@ -501,7 +501,7 @@ void savePersistedClock(time_t epoch, time_t savedAt) {
   PersistClockRecord record = { CLOCK_EEPROM_MAGIC, static_cast<uint32_t>(epoch), static_cast<uint32_t>(savedAt), 0 };
   record.checksum = persistChecksum(record);
   EEPROM.put(CLOCK_EEPROM_ADDR, record);
-  if (EEPROM.commit()) Serial.printf("CLOCK_EEPROM_SAVE epoch=%lu savedAt=%lu\n", (unsigned long)epoch, (unsigned long)savedAt);
+  if (EEPROM.commit()) Serial.printf_P(PSTR("CLOCK_EEPROM_SAVE epoch=%lu savedAt=%lu\n"), (unsigned long)epoch, (unsigned long)savedAt);
   else Serial.println(F("CLOCK_EEPROM_SAVE_FAIL"));
 }
 
@@ -552,6 +552,8 @@ void clearConfig() {
 
 const char *stateText() {
   switch (state) {
+    case TRY_STA: return "正在连接 WiFi";
+    case STA_ONLY: return "WiFi 已连接(局域网管理)";
     case CONNECTING: return "正在连接 WiFi";
     case AP_ONLY: return "热点配网模式";
     case STA_AP: return "WiFi 已连接，热点保持开启";
@@ -633,10 +635,10 @@ void handleSave() {
     }
     wc.nightUpdata = (server.arg("night") == "1") ? 1 : 0;
     if (!saveWeatherConfig(wc)) {
-      server.send(400, "text/plain; charset=utf-8", "天气配置长度无效");
+      server.send_P(400, PSTR("text/plain; charset=utf-8"), PSTR("天气配置长度无效"));
       return;
     }
-    Serial.printf("WEATHER_WEB_SAVE cityLen=%u night=%u\n",
+    Serial.printf_P(PSTR("WEATHER_WEB_SAVE cityLen=%u night=%u\n"),
                   static_cast<unsigned>(city.length()),
                   static_cast<unsigned>(wc.nightUpdata));
     webNotifyReset();
@@ -646,23 +648,23 @@ void handleSave() {
   }
   if (!server.hasArg("ssid") || !server.hasArg("password")) {
     if (hasWeather) {
-      server.send(200, "text/html; charset=utf-8", "<meta charset='utf-8'><p>天气设置已保存。</p><a href='/'>返回</a>");
+      server.send_P(200, PSTR("text/html; charset=utf-8"), PSTR("<meta charset='utf-8'><p>天气设置已保存。</p><a href='/'>返回</a>"));
       webNotifyDone("修改成功");
       return;
     }
-    server.send(400, "text/plain; charset=utf-8", "缺少 WiFi 名称或密码");
+    server.send_P(400, PSTR("text/plain; charset=utf-8"), PSTR("缺少 WiFi 名称或密码"));
     return;
   }
   String ssid = server.arg("ssid");
   String password = server.arg("password");
   if (!saveConfig(ssid, password)) {
-    server.send(400, "text/plain; charset=utf-8", "输入长度无效");
+    server.send_P(400, PSTR("text/plain; charset=utf-8"), PSTR("输入长度无效"));
     return;
   }
   // ★ 照官方"保存立即返回 + 后台连接": 此处只保存凭据并【先发响应】(保持 AP), 不断 AP——避免停 AP 截断 HTTP 响应。
   //   断 AP → 切 STA → 连接 交给 loop 下一轮 wifiConnectPending 处理(响应已发出, fetch 不再 Failed to fetch)。
-  Serial.printf("WIFI_WEB_SAVE ssidLen=%u\n", static_cast<unsigned>(ssid.length()));
-  server.send(200, "text/html; charset=utf-8", "<meta charset='utf-8'><p>已保存，正在连接 WiFi…</p><a href='/'>返回</a>");
+  Serial.printf_P(PSTR("WIFI_WEB_SAVE ssidLen=%u\n"), static_cast<unsigned>(ssid.length()));
+  server.send_P(200, PSTR("text/html; charset=utf-8"), PSTR("<meta charset='utf-8'><p>已保存，正在连接 WiFi…</p><a href='/'>返回</a>"));
   wifiSaveResult = 0; wifiSaveIp[0] = '\0';   // 重置为"进行中"
   webNotifyReset();
   webNotifyDone("正在连接");   // 只显示标题, 不出现"WIFI=连接中"之类生硬前缀
@@ -694,7 +696,7 @@ static bool apSetFixedLease() {
   lease.end_ip.addr   = IPAddress(192, 168, 0, 100).v4();
   ok = wifi_softap_set_dhcps_lease(&lease);
   wifi_softap_dhcps_start();
-  Serial.printf("WIFI_AP_LEASE fixed=192.168.0.100 ok=%d\n", ok ? 1 : 0);
+  Serial.printf_P(PSTR("WIFI_AP_LEASE fixed=192.168.0.100 ok=%d\n"), ok ? 1 : 0);
   return ok;
 }
 
@@ -714,7 +716,7 @@ void startAp() {
   bool ok = WiFi.softAP(apSsid.c_str(), AP_PASSWORD, 1, 0, 1);
   WiFi.mode(WIFI_AP);
   auditHeap("ap_created");
-  Serial.printf("WIFI_AP_START ssid=%s ok=%d ip=%s\n", apSsid.c_str(), ok ? 1 : 0, WiFi.softAPIP().toString().c_str());
+  Serial.printf_P(PSTR("WIFI_AP_START ssid=%s ok=%d ip=%s\n"), apSsid.c_str(), ok ? 1 : 0, WiFi.softAPIP().toString().c_str());
 }
 
 }
@@ -1136,13 +1138,12 @@ void handleSettingsSave() {
     }
   }
   if (!any) {
-    server.send(200, "text/plain; charset=utf-8", "no_change");   // 无实际变化: 不写 EEPROM 也不提示
+    server.send_P(200, PSTR("text/plain; charset=utf-8"), PSTR("no_change"));   // 无实际变化: 不写 EEPROM 也不提示
     return;
   }
   configTime(settingsGetTzOffsetMin() * 60, 0, NTP_SERVER);   // 时区立即生效
   Serial.println(F("SETTINGS_WEB_SAVE"));
-  server.send(200, "text/html; charset=utf-8",
-              "<meta charset='utf-8'><p>设置已保存。</p><a href='/'>返回</a>");
+  server.send_P(200, PSTR("text/html; charset=utf-8"), PSTR("<meta charset='utf-8'><p>设置已保存。</p><a href='/'>返回</a>"));
   webNotifyDone("修改成功");
 }
 
@@ -1153,7 +1154,7 @@ void handleAdminSave() {
   loadAdminConfig(a);
   String newOta = server.arg("otapass");
   if (newOta.length() >= sizeof(a.otaPass)) {
-    server.send(400, "text/plain; charset=utf-8", "密码长度无效");
+    server.send_P(400, PSTR("text/plain; charset=utf-8"), PSTR("密码长度无效"));
     return;
   }
   bool otaChanged = false;
@@ -1163,12 +1164,11 @@ void handleAdminSave() {
     otaChanged = true;
   }
   if (!saveAdminConfig(a)) {
-    server.send(400, "text/plain; charset=utf-8", "保存失败");
+    server.send_P(400, PSTR("text/plain; charset=utf-8"), PSTR("保存失败"));
     return;
   }
   Serial.println(F("ADMIN_WEB_SAVE"));
-  server.send(200, "text/html; charset=utf-8",
-              "<meta charset='utf-8'><p>已保存（OTA 密码修改后，重启进入配网才生效）。</p><a href='/'>返回</a>");
+  server.send_P(200, PSTR("text/html; charset=utf-8"), PSTR("<meta charset='utf-8'><p>已保存（OTA 密码修改后，重启进入配网才生效）。</p><a href='/'>返回</a>"));
   if (otaChanged) {
     webNotifyReset();
     webNotifyAdd("OTA密码=已保存 ");
@@ -1179,13 +1179,11 @@ void handleAdminSave() {
 // ---- WebDAV 设置端点 (/webdav): ⚠️ 已弃用 (D0 起进度同步改直连手机 HTTP) ----
 // 结构/EEPROM/保存函数保留 (WebdavConfig/loadWebdavConfig/saveWebdavConfig), 端点仅返回弃用提示。
 void handleWebdavGet() {
-  server.send(200, "text/html; charset=utf-8",
-              "<meta charset='utf-8'><p>WebDAV 配置已弃用（改用手机直连同步）。</p><a href='/'>返回</a>");
+  server.send_P(200, PSTR("text/html; charset=utf-8"), PSTR("<meta charset='utf-8'><p>WebDAV 配置已弃用（改用手机直连同步）。</p><a href='/'>返回</a>"));
 }
 
 void handleWebdavSave() {
-  server.send(200, "text/html; charset=utf-8",
-              "<meta charset='utf-8'><p>WebDAV 配置已弃用（改用手机直连同步），未保存任何更改。</p><a href='/'>返回</a>");
+  server.send_P(200, PSTR("text/html; charset=utf-8"), PSTR("<meta charset='utf-8'><p>WebDAV 配置已弃用（改用手机直连同步），未保存任何更改。</p><a href='/'>返回</a>"));
 }
 
 // GET+POST 合并（省路由对象堆——配网会话堆仅 ~1KB）
@@ -1270,12 +1268,12 @@ void handleSettingsJson() {
 // ---- GET /set: 官方设置面板静态页（LittleFS /set.htm, 懒挂载同 /fs/edit）----
 void handleSetStatic() {
   if (!fileApiEnsureLfsMount()) {
-    server.send(500, "text/plain; charset=utf-8", "LittleFS mount failed");
+    server.send_P(500, PSTR("text/plain; charset=utf-8"), PSTR("LittleFS mount failed"));
     return;
   }
   File f = LittleFS.open("/set.htm", "r");
   if (!f) {
-    server.send(404, "text/plain; charset=utf-8", "set page not found");
+    server.send_P(404, PSTR("text/plain; charset=utf-8"), PSTR("set page not found"));
     return;
   }
   server.streamFile(f, "text/html; charset=utf-8");
@@ -1341,7 +1339,23 @@ void wifiManagerBegin(void (*renderCallback)(bool), void (*exitCallback)()) {
   active = true;
   Serial.println(F("NET_ENTER"));
   auditHeap("config_enter");   // 审计: 点击配网后、AP 前
-  startAp();
+  // 进配网: 若已存 WiFi 凭据 → 先试连路由器 1 次(纯 STA, 不起 AP, 避开 AP+STA 共存崩溃),
+  // 连上=局域网管理(显示IP); 失败/超时 → 回热点模式(AP)。无凭据 → 直接热点。
+  // ★ 共存(WIFI_AP_STA)已判死刑: STA beacon 解析/共存触发 SDK phy 崩溃(Exception 29),
+  //   任何时刻只保持一种模式: TRY_STA/STA_ONLY 阶段纯 STA, AP_ONLY 阶段纯 AP。
+  loadConfig();
+  if (wifiManagerHasCredentials()) {
+    WiFi.persistent(false);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(config.ssid, config.password);
+    state = TRY_STA;
+    deadline = millis() + 12000UL;
+    Serial.printf_P(PSTR("WIFI_TRY_STA ssid=%s\n"), config.ssid);
+  } else {
+    startAp();   // 无凭据: 直接热点配网
+    state = AP_ONLY;
+    Serial.println(F("WIFI_NO_CRED_AP"));
+  }
   // ⚠️ 配网页路由不再走 server.on()（路由对象常驻堆吃 ~1.8KB）:
   // 改由 onNotFound 精确分发（与 /api/* 同款, 省路由对象堆）。配网会话堆硬约束,
   // 12+ 路由对象累积会把 AP 手机关联/文件管理堆压到 OOM（实测 /fs/list OOM）。
@@ -1357,7 +1371,7 @@ void wifiManagerBegin(void (*renderCallback)(bool), void (*exitCallback)()) {
       server.sendHeader("Access-Control-Allow-Origin", "*");
       server.sendHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
       server.sendHeader("Access-Control-Allow-Headers", "Content-Type, X-File-Size, X-Resume, X-Resume-Offset, Range");
-      server.send(204, "text/plain", "");
+      server.send_P(204, PSTR("text/plain"), PSTR(""));
       return;
     }
     if (fileApiTryDispatch()) return;   // /api/* /fs/* /fm/*（零路由对象堆, 见 file_api.cpp）
@@ -1376,8 +1390,7 @@ void wifiManagerBegin(void (*renderCallback)(bool), void (*exitCallback)()) {
     if (uri == "/scandevices" && m == HTTP_GET){ handleScanDevices(); return; }
     if (uri == "/target")                     { handleTargetAny(); return; }
     if (uri == "/update") {
-      server.send(200, "text/html; charset=utf-8",
-                  "<meta charset='utf-8'><p>OTA 未启用：请先在配网页设置 OTA 密码。</p><a href='/'>返回</a>");
+      server.send_P(200, PSTR("text/html; charset=utf-8"), PSTR("<meta charset='utf-8'><p>OTA 未启用：请先在配网页设置 OTA 密码。</p><a href='/'>返回</a>"));
       return;
     }
     // 低堆安全日志: 不把 server.uri() 的临时 String 经 .c_str() + %s 传给 vsnprintf
@@ -1389,8 +1402,8 @@ void wifiManagerBegin(void (*renderCallback)(bool), void (*exitCallback)()) {
     if (mn >= sizeof(uriBuf)) mn = sizeof(uriBuf) - 1;
     if (mn) memcpy(uriBuf, u.c_str(), mn);
     uriBuf[mn] = '\0';
-    Serial.printf("HTTP_404 uri=%s heap=%u\n", uriBuf, (unsigned)ESP.getFreeHeap());
-    server.send(404, "text/plain; charset=utf-8", "Not Found");
+    Serial.printf_P(PSTR("HTTP_404 uri=%s heap=%u\n"), uriBuf, (unsigned)ESP.getFreeHeap());
+    server.send_P(404, PSTR("text/plain; charset=utf-8"), PSTR("Not Found"));
   });
   // 收集上传协议头（file_api; 管理密码已废除, 不再收集 X-Admin-Pass）
   server.collectHeaders("X-File-Size", "X-Resume", "X-Resume-Offset", "Range");
@@ -1408,22 +1421,21 @@ void wifiManagerBegin(void (*renderCallback)(bool), void (*exitCallback)()) {
   // 二次 WiFi.mode(WIFI_AP) 提前到路由/挂载之前执行: AP 结构在堆充足时初始化,
   // 路由注册(1.8KB)+LFS 挂载(~1KB)之后只剩 ~3KB, AP 后台延迟分配(实测 5s 内 -2.9KB)
   // 会把手机关联/DHCP 处理的堆压到 OOM（Unhandled C++ exception: OOM 实测）。
-  WiFi.mode(WIFI_AP);
+  // 仅"无凭据→热点"入口(state==AP_ONLY)需要在此强化 mode; TRY_STA 阶段保持纯 STA 不切 AP。
+  if (state == AP_ONLY) WiFi.mode(WIFI_AP);
   fileApiInit();
   auditHeap("rte_before_begin");   // 探针: fileApiInit 后, server.begin 前
   server.begin();
   auditHeap("rte_after_begin");   // 探针: server.begin 后
   pushDone = false;
   Serial.println(F("WIFI_WEB_START"));
-  // 配网会话固定纯 AP（不自动连 STA）：AP+STA 共存时 STA 连接/beacon 解析触发 SDK phy 崩溃
-  // （Exception 29 epc1=0x4000df64, 栈 ieee80211_phy_init/scan_parse_beacon/sta_input,
-  //  实测进入配网后 8~15s 必崩, 与已保存网络是否可达无关）。
-  // ⚠️ 上面已保留 WiFi.mode(WIFI_AP)（s0_verify4 验证: 有它 DHCP 正常+heap 7.3KB, 无则 heap 塌到
-  // ~2.3KB 且 DHCP 失效——SDK opmode 重设才会正确初始化/释放 AP 内存结构）。
-  // 配网页走 AP 热点即可完成全部管理; 新网络验证走校时/进度同步（纯 STA/纯 AP, 无共存）。
-  state = AP_ONLY;
+  // 配网会话分阶段(用户定稿): ①有凭据→TRY_STA 纯 STA 试连(本文件开头已设 state, 不覆盖);
+  //   ②连上=STA_ONLY(局域网管理, 显示 IP); ③失败/超时或本无凭据→AP_ONLY 纯热点。
+  // 绝不 AP+STA 共存: 共存时 STA 连接/beacon 解析触发 SDK phy 崩溃(Exception 29 epc1=0x4000df64,
+  // 实测 8~15s 必崩) —— 任何时刻只保持一种模式。
+  // ⚠️ AP_ONLY 时上面 WiFi.mode(WIFI_AP) 已执行(s0_verify4: 有它 DHCP 正常+heap 7.3KB)。
   auditHeap("config_ready");   // 审计: 配网入口完成（路由+LFS已注册, 二次 mode 已执行）
-  Serial.printf("WIFI_AP_STA_READY heap=%u\n", (unsigned)ESP.getFreeHeap());   // 诊断: 配网会话堆水位
+  Serial.printf_P(PSTR("WIFI_CFG_STATE=%d heap=%u\n"), (int)state, (unsigned)ESP.getFreeHeap());
   // ★ 配网页显示用局刷(用户要求: 每次不用全刷, 全刷阻塞 1s+)。首次从"正在加载储存卡"提示页
   //   局刷切换, 残影由 FIXED_REFRESH 定次全刷自愈。
   if (renderPage) renderPage(false);
@@ -1435,6 +1447,44 @@ static uint32_t gAuditTs = 0;
 void wifiManagerLoop() {
   if (!active) return;
   server.handleClient();
+  // ---- 进配网"先试连 WiFi"(用户需求): TRY_STA 纯 STA 试连(无 AP) ----
+  if (state == TRY_STA) {
+    wl_status_t st = WiFi.status();
+    if (st == WL_CONNECTED) {
+      // 连上: 保持纯 STA, 管理 web 在局域网 IP 上监听; 屏幕显示 IP + 局域网访问地址。
+      staIp = WiFi.localIP().toString();
+      wifiSaveResult = 1;
+      snprintf(wifiSaveIp, sizeof(wifiSaveIp), "%s", staIp.c_str());
+      state = STA_ONLY;
+      Serial.printf_P(PSTR("WIFI_STA_ONLY_OK ip=%s heap=%u\n"), staIp.c_str(), (unsigned)ESP.getFreeHeap());
+      webNotifyReset();
+      webNotifyAdd("局域网访问:");
+      webNotifyAdd(staIp.c_str());
+      webNotifyDone("WiFi已连接");
+      if (renderPage) renderPage(false);
+    } else if (static_cast<int32_t>(millis() - deadline) >= 0) {
+      // 12s 超时/失败: 关 STA → 纯 AP 热点(管理 web 切回 192.168.4.1)。
+      WiFi.disconnect();
+      WiFi.mode(WIFI_OFF);
+      Serial.println(F("WIFI_TRY_STA_FAIL -> AP"));
+      startAp();
+      state = AP_ONLY;
+      wifiSaveResult = 2;
+      webNotifyReset();
+      webNotifyAdd("WiFi连接失败,已开热点");
+      webNotifyDone("连接失败");
+      if (renderPage) renderPage(false);
+    }
+  } else if (state == STA_ONLY) {
+    // 已连 STA: 若中途掉线(路由器重启等) → 保底回热点, 管理 web 不失效。
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println(F("WIFI_STA_LOST -> AP"));
+      WiFi.mode(WIFI_OFF);
+      startAp();
+      state = AP_ONLY;
+      if (renderPage) renderPage(false);
+    }
+  }
   // 分阶段: 常态纯 AP; 仅"保存连接"时临时切共存(WIFI_AP_STA)连 STA, 连完回纯 AP(管理 web 在线)。
   if (wifiConnectPending) {
     wifiConnectPending = false;
@@ -1462,7 +1512,7 @@ void wifiManagerLoop() {
       WiFi.mode(WIFI_AP);
       WiFi.disconnect();
       state = AP_ONLY;
-      Serial.printf("WIFI_STA_CONNECTED(back-AP) ip=%s heap=%u\n", staIp.c_str(), (unsigned)ESP.getFreeHeap());
+      Serial.printf_P(PSTR("WIFI_STA_CONNECTED(back-AP) ip=%s heap=%u\n"), staIp.c_str(), (unsigned)ESP.getFreeHeap());
       webNotifyReset();
       webNotifyAdd(wifiSaveIp);
       webNotifyDone("连接成功");
@@ -1488,7 +1538,7 @@ void wifiManagerLoop() {
   static uint32_t lastStaLog = 0;
   if (state == AP_ONLY && static_cast<int32_t>(millis() - lastStaLog) >= 5000) {
     lastStaLog = millis();
-    Serial.printf("AP_STA_NUM=%u heap=%u\n", (unsigned)WiFi.softAPgetStationNum(),
+    Serial.printf_P(PSTR("AP_STA_NUM=%u heap=%u\n"), (unsigned)WiFi.softAPgetStationNum(),
                   (unsigned)ESP.getFreeHeap());
   }
   // 审计: 5s 塌陷曲线（500ms 采样; AP_ONLY 全程, 覆盖手机未连/关联/DHCP/开页面）
@@ -1520,6 +1570,16 @@ void wifiManagerLoop() {
     }
     gOfsUpLastPhase = cur;
   }
+  // ★ 通用文件操作通知渲染(2026-09): renderFileOpStatus 只写底行不渲染(handler 深链 stack≈0,
+  //   EPD 渲染在 handler 内会 Soft WDT)。此处 handleClient 已返回、栈浅, 检测 phase 变化即 renderPage。
+  if (state == AP_ONLY) {
+    static int gOfsOpLastPhase = -1;
+    int opCur = ofsOpGetPhase();
+    if (opCur != gOfsOpLastPhase && opCur != OFS_OP_PHASE_IDLE) {
+      gOfsOpLastPhase = opCur;
+      if (renderPage) renderPage(false);   // 局刷配网页(底行显示 操作中/操作成功/失败)
+    }
+  }
   ESP.wdtFeed();
 }
 
@@ -1542,6 +1602,8 @@ bool wifiManagerIsActive() { return active; }
 const char *wifiManagerApSsid() { return apSsid.c_str(); }
 const char *wifiManagerStateText() { return stateText(); }
 const char *wifiManagerStaIp() { return staIp.c_str(); }
+bool wifiManagerIsStaOnly() { return state == STA_ONLY; }   // 进配网已连 WiFi(局域网管理), 无热点
+bool wifiManagerIsTryingSta() { return state == TRY_STA; }  // 正在试连(无 AP/无 IP 阶段)
 
 void clockManagerBegin(void (*renderCallback)(bool), void (*doneCallback)()) {
   clockRender = renderCallback;
@@ -1570,7 +1632,7 @@ void clockManagerBegin(void (*renderCallback)(bool), void (*doneCallback)()) {
         persistChecksum(rec) == rec.checksum) {
       lastCalibrationTime = rec.epoch;
     }
-    Serial.printf("CLOCK_8025T_READ epoch=%lu\n", (unsigned long)syncedTime);
+    Serial.printf_P(PSTR("CLOCK_8025T_READ epoch=%lu\n"), (unsigned long)syncedTime);
   } else {
     // BL8025T 不在线(实测 I2C 扫描无设备): 从 EEPROM 恢复校准时间 (flash, KEY1 不清)
     loadPersistedClock();
@@ -1585,7 +1647,7 @@ void clockManagerBegin(void (*renderCallback)(bool), void (*doneCallback)()) {
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
   WiFi.begin(config.ssid, config.password);
-  Serial.printf("CLOCK_WIFI_BEGIN ssidLen=%u\n", static_cast<unsigned>(strlen(config.ssid)));
+  Serial.printf_P(PSTR("CLOCK_WIFI_BEGIN ssidLen=%u\n"), static_cast<unsigned>(strlen(config.ssid)));
   if (clockRender) clockRender(true);
 }
 
@@ -1612,7 +1674,7 @@ static bool clockManagerTryWeatherTime() {
   http.end();
   ESP.wdtFeed();
   if (code != HTTP_CODE_OK) {
-    Serial.printf("CLOCK_WEATHER_HTTP %d\n", code);
+    Serial.printf_P(PSTR("CLOCK_WEATHER_HTTP %d\n"), code);
     return false;
   }
   int pos = body.indexOf("\"last_update\"");
@@ -1631,7 +1693,7 @@ static bool clockManagerTryWeatherTime() {
   clockManagerPersistSync((time_t)t);
   clockState = CLOCK_SUCCESS;
   clockSuccessDeadline = millis() + 1800UL;
-  Serial.printf("CLOCK_WEATHER_TIME epoch=%lld\n", (long long)t);
+  Serial.printf_P(PSTR("CLOCK_WEATHER_TIME epoch=%lld\n"), (long long)t);
   if (clockRender) clockRender(false);
   return true;
 }
@@ -1651,7 +1713,7 @@ void clockManagerLoop() {
       clockState = CLOCK_NTP;
       clockDeadline = millis() + NTP_TIMEOUT_MS;
       configTime(settingsGetTzOffsetMin() * 60, 0, NTP_SERVER);
-      Serial.printf("CLOCK_WIFI_CONNECTED ip=%s\n", WiFi.localIP().toString().c_str());
+      Serial.printf_P(PSTR("CLOCK_WIFI_CONNECTED ip=%s\n"), WiFi.localIP().toString().c_str());
       if (clockRender) clockRender(false);
     } else if (static_cast<int32_t>(millis() - clockDeadline) >= 0) {
       clockState = CLOCK_FAILED;
@@ -1669,7 +1731,7 @@ void clockManagerLoop() {
       clockManagerPersistSync(now);   // 写板载 BL8025T(断电后继续走时); 失败/不在线降级 EEPROM
       clockState = CLOCK_SUCCESS;
       clockSuccessDeadline = millis() + 1800UL;
-      Serial.printf("CLOCK_NTP_SUCCESS epoch=%lu\n", static_cast<unsigned long>(now));
+      Serial.printf_P(PSTR("CLOCK_NTP_SUCCESS epoch=%lu\n"), static_cast<unsigned long>(now));
       if (clockRender) clockRender(false);
     } else if (static_cast<int32_t>(millis() - clockDeadline) >= 0) {
       // 对齐 A7: NTP 失败 → 改用天气时间 (天气接口 last_update 字段)
@@ -1708,7 +1770,7 @@ void clockManagerHandleKeys(int middleEvent, int rightEvent) {
       } else {
         snprintf(dbgBuf, sizeof(dbgBuf), "(invalid)");
       }
-      Serial.printf("CLOCK_SKIP_DEBUG epoch=%lu local=%s lastCal=%lu\n", (unsigned long)dbgNow, dbgBuf,
+      Serial.printf_P(PSTR("CLOCK_SKIP_DEBUG epoch=%lu local=%s lastCal=%lu\n"), (unsigned long)dbgNow, dbgBuf,
                     (unsigned long)lastCalibrationTime);
     }
     clockManagerPersistNow();
@@ -1857,7 +1919,7 @@ void handleScanWifi() {
   json += F("]}");
   WiFi.scanDelete();
   server.send(200, "application/json; charset=utf-8", json);
-  Serial.printf("SCAN_WIFI n=%d\n", (int)n);
+  Serial.printf_P(PSTR("SCAN_WIFI n=%d\n"), (int)n);
 }
 
 // ---- 连接设备扫描: UDP 探测(广播 INKPING, App 应答 name/model) + 热点 station 列表 ----
@@ -1959,7 +2021,7 @@ void handleScanDevices() {
   }
   json += F("]}");
   server.send(200, "application/json; charset=utf-8", json);
-  Serial.printf("SCAN_DEVICES lan=%d ap=%d\n", lanN, apN);
+  Serial.printf_P(PSTR("SCAN_DEVICES lan=%d ap=%d\n"), lanN, apN);
 }
 
 // ---- 连接对象端点 ----
@@ -1987,23 +2049,22 @@ void handleTargetSave() {
   String ap = server.arg("apIp");
   ap.trim();
   if (!sta.isEmpty() && !validIpv4(sta)) {
-    server.send(400, "text/plain; charset=utf-8", "局域网 IP 无效");
+    server.send_P(400, PSTR("text/plain; charset=utf-8"), PSTR("局域网 IP 无效"));
     return;
   }
   if (!ap.isEmpty() && !validIpv4(ap)) {
-    server.send(400, "text/plain; charset=utf-8", "热点 IP 无效");
+    server.send_P(400, PSTR("text/plain; charset=utf-8"), PSTR("热点 IP 无效"));
     return;
   }
   sta.toCharArray(t.staIp, sizeof(t.staIp));
   ap.toCharArray(t.apIp, sizeof(t.apIp));
   if (!saveTargetConfig(t)) {
-    server.send(400, "text/plain; charset=utf-8", "保存失败");
+    server.send_P(400, PSTR("text/plain; charset=utf-8"), PSTR("保存失败"));
     return;
   }
-  Serial.printf("TARGET_WEB_SAVE sta=[%s] ap=[%s]\n", t.staIp, t.apIp);
+  Serial.printf_P(PSTR("TARGET_WEB_SAVE sta=[%s] ap=[%s]\n"), t.staIp, t.apIp);
   wifiManagerPushDeviceInfo();   // 保存后立即推送设备信息给选中 App (App 收到自动更新设备地址)
-  server.send(200, "text/html; charset=utf-8",
-              "<meta charset='utf-8'><p>连接对象已保存。</p><a href='/'>返回</a>");
+  server.send_P(200, PSTR("text/html; charset=utf-8"), PSTR("<meta charset='utf-8'><p>连接对象已保存。</p><a href='/'>返回</a>"));
   webNotifyReset();
   webNotifyAdd("连接对象=已保存 ");
   webNotifyDone("修改成功");
@@ -2022,12 +2083,12 @@ void wifiManagerPushDeviceInfo() {
   }
   IPAddress tip;
   if (!tip.fromString(target)) {
-    Serial.printf("PUSH_DEVICE bad-ip [%s]\n", target);
+    Serial.printf_P(PSTR("PUSH_DEVICE bad-ip [%s]\n"), target);
     return;
   }
   WiFiClient c;
   if (!c.connect(tip, 8082)) {
-    Serial.printf("PUSH_DEVICE connect-fail [%s]\n", target);
+    Serial.printf_P(PSTR("PUSH_DEVICE connect-fail [%s]\n"), target);
     return;
   }
   char body[160];
@@ -2048,7 +2109,7 @@ void wifiManagerPushDeviceInfo() {
     delay(5);
   }
   c.stop();
-  Serial.printf("PUSH_DEVICE ok target=[%s] body=[%s]\n", target, body);
+  Serial.printf_P(PSTR("PUSH_DEVICE ok target=[%s] body=[%s]\n"), target, body);
 }
 
 // ---- 进度同步直连手机 (D0): 纯 AP / 目标地址 ----
@@ -2067,7 +2128,7 @@ bool wifiManagerStartApOnly() {
   WiFi.softAPConfig(IPAddress(192, 168, 0, 1), IPAddress(192, 168, 0, 1), IPAddress(255, 255, 255, 0));
   bool ok = WiFi.softAP(apSsid.c_str(), AP_PASSWORD);
   apSetFixedLease();                        // 固定租约仅 192.168.0.100
-  Serial.printf("WIFI_AP_ONLY_START ssid=%s ok=%d ip=%s\n",
+  Serial.printf_P(PSTR("WIFI_AP_ONLY_START ssid=%s ok=%d ip=%s\n"),
                 apSsid.c_str(), ok ? 1 : 0, WiFi.softAPIP().toString().c_str());
   return ok;
 }

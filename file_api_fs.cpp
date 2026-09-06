@@ -37,7 +37,7 @@ static ESP8266WebServer &srv() { return wifiManagerServer(); }
 // 不带序号版; 序号由调用方经 ++fsListReqNo 传入以区分 NEXT_ENTER。
 static uint32_t gFsListReqNo = 0;   // 递增请求序号, 区分连续请求
 void fsListProbe(const char *tag) {
-  Serial.printf("FSREQ #%lu %s heap=%u maxblk=%u stack=%u\n",
+  Serial.printf_P(PSTR("FSREQ #%lu %s heap=%u maxblk=%u stack=%u\n"),
                 (unsigned long)gFsListReqNo, tag,
                 (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxFreeBlockSize(),
                 (unsigned)ESP.getFreeContStack());
@@ -46,7 +46,7 @@ uint32_t fsListReqNext() { return ++gFsListReqNo; }   // 下一个请求序号�
 
 // 带分页明细的探针（FSREQ_DONE 用）: 额外显示 start/count/emitted/more
 void fsListProbeDetail(const char *tag, size_t start, size_t count, size_t emitted, bool hasMore) {
-  Serial.printf("FSREQ #%lu %s heap=%u maxblk=%u stack=%u start=%u count=%u emitted=%u more=%d\n",
+  Serial.printf_P(PSTR("FSREQ #%lu %s heap=%u maxblk=%u stack=%u start=%u count=%u emitted=%u more=%d\n"),
                 (unsigned long)gFsListReqNo, tag,
                 (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxFreeBlockSize(),
                 (unsigned)ESP.getFreeContStack(),
@@ -107,10 +107,12 @@ static void ofsJsonEscape(const char *s, char *out, size_t outSize) {
   out[oi] = '\0';
 }
 
-// ---- 显示过滤（搬运 ink-reader-esp.ino listDir 同款: 不该显示的不显示）----
-// 纯栈/strcasecmp 版本（零 String 分配）: /fs/list 对每个 SD 项调用一次,
-// 原 String lower = name + toLowerCase() 在 3-4KB 配网会话基线上每项分配/释放堆 → 200 项打穿堆（重启根因）。
-static bool ofsHasBlacklistSuffix(const char *dot) {
+// ---- 显示过滤（Web 文件管理; 纯栈/strcasecmp 零 String 分配）----
+// 2026-09 机制调整(用户拍板): 由"文件后缀白名单(.txt/.bmp)"改为"黑名单机制"——
+//   Web 默认隐藏"设备自动生成"的后缀(索引/章节/标签/续建 sidecar), 其余用户文件(含 .bin/.ttf 等)
+//   一律显示; Web 页可切换 hideAuto(0=连自动文件也显示, 默认 1=隐藏)。
+//   硬隐藏(任何开关都不可见): 隐藏名(.开头) + SD 系统目录。
+static bool ofsIsAutoGenSuffix(const char *dot) {
   static const char *const suffixes[] = {
     ".i1", ".z1", ".i2", ".z2", ".v1", ".vz1", ".i1p", ".v1p", ".bm", ".bmt", nullptr
   };
@@ -120,28 +122,42 @@ static bool ofsHasBlacklistSuffix(const char *dot) {
   return false;
 }
 
-// 黑名单: 隐藏名(.开头)/索引章节sidecar标签扩展名/SD系统目录
-static bool ofsBlacklistedEntry(const char *name) {
+// 硬隐藏（无论开关）: 隐藏名(.开头) + SD 系统目录
+static bool ofsHardHidden(const char *name) {
   if (!name || !name[0]) return true;
   if (name[0] == '.') return true;
-  const char *dot = strrchr(name, '.');
-  if (dot && dot[1] && ofsHasBlacklistSuffix(dot)) return true;
   const char *blocked[] = {
     "android", "androud", "found.000", "foud.000", "lost.dir", "system volume information"
   };
-  // 逐项 strcasecmp 整名（目录名, 无扩展名依赖）; 不拷贝、不 lower String
   for (const char *item : blocked) {
     if (strcasecmp(name, item) == 0) return true;
   }
   return false;
 }
 
-// 白名单: 文件只显示 .txt/.bmp（目录始终显示, 由调用层判断）
-static bool ofsWhitelistedFile(const char *name) {
+static bool ofsAutoGenFile(const char *name) {
   const char *dot = strrchr(name, '.');
   if (!dot || !dot[1]) return false;
-  return strcasecmp(dot, ".txt") == 0 || strcasecmp(dot, ".bmp") == 0;
+  return ofsIsAutoGenSuffix(dot);
 }
+
+// ---- 可见性单一入口（A 修复延续; 2026-09 黑名单机制 + hideAuto 开关）----
+// hideAuto=true: 隐藏设备自动生成后缀文件(索引/章节/标签等); false: 全显示(除硬隐藏)。
+// 调用方: /fs/list 实时列表、fsCacheBuild(存超集, hideAuto=false)、fsCacheServeList(按请求开关过滤)。
+bool ofsEntryVisibleEx(const char *name, bool isDir, bool hideAuto) {
+  if (ofsHardHidden(name)) return false;
+  if (isDir) return true;
+  if (hideAuto && ofsAutoGenFile(name)) return false;
+  return true;
+}
+
+// 旧名保留(默认隐藏自动文件) —— 供既有调用点编译过渡
+bool ofsEntryVisible(const char *name, bool isDir) {
+  return ofsEntryVisibleEx(name, isDir, true);
+}
+
+// /fs/list 实时路径 scratch(深链实测 stack=0, 大局部一律 static; 单线程顺序安全)
+static char gLsPath[300];
 
 static void ofsReply(int code, const char *msg) { srv().send(code, "text/plain", msg); }
 static void ofsReplyOKWithMsg(const char *msg)  { srv().send(200, "text/plain", msg); }
@@ -194,13 +210,12 @@ static void handleOfsStatus() {
 // 单次请求堆/栈峰值只与 count 相关; startOffset 仅增加 SD 遍历时间（不增加峰值）。
 // 响应: {"items":[...],"nextStart":N,"hasMore":bool}（不返回 total, 避免整目录扫描）。
 
-struct OfsListCtx { bool first; };
+struct OfsListCtx { bool first; bool hideAuto; };
 static void ofsListItemCb(const SdEntry *e, void *ctx) {
   OfsListCtx *lc = (OfsListCtx *)ctx;
-  // 不该显示的不显示: 黑名单(系统目录/隐藏/索引章节sidecar标签) + 文件白名单(.txt/.bmp)
-  // 目录始终显示; 过滤项不发内容, 不翻转 first（保持输出 JSON 连续）
-  if (ofsBlacklistedEntry(e->name)) return;
-  if (!e->isDir && !ofsWhitelistedFile(e->name)) return;
+  // 不该显示的不显示: 与缓存同一入口 ofsEntryVisibleEx(hideAuto=请求开关) —— 视图一致
+  // 过滤项不发内容, 不翻转 first（保持输出 JSON 连续）
+  if (!ofsEntryVisibleEx(e->name, e->isDir, lc->hideAuto)) return;
   static char buf[640];
   static char nameEsc[512];
   ofsJsonEscape(e->name, nameEsc, sizeof(nameEsc));
@@ -229,19 +244,21 @@ static void handleOfsList() {
     if (v > 0) count = (size_t)v;
   }
   if (count > 50) count = 50;   // 服务端强制上限（client 发 count=1000 也 clamp 到 50）
+  // ---- 自动文件开关: auto=0 显示设备自动生成文件; 缺省/auto=1 隐藏(黑名单默认) ----
+  bool hideAuto = !(s.hasArg("auto") && s.arg("auto") == "0");
 
   fsListReqNext();
   fsListProbe("FSREQ_ENTER");   // 探针: 请求入口
   if (!s.hasArg("dir")) { ofsReplyBadRequest("DIR ARG MISSING "); return; }
   String dirArg = s.arg("dir");
   if (dirArg.length() == 0) dirArg = "/";
-  char path[300];
-  if (!normalizeApiPath(dirArg.c_str(), path, sizeof(path))) { ofsReplyBadRequest("BAD PATH"); return; }
+  char *path = gLsPath;   // static: 删除/改动后自动刷新走实时 SD 列表时深链 stack=0, 栈局部必崩
+  if (!normalizeApiPath(dirArg.c_str(), path, 300)) { ofsReplyBadRequest("BAD PATH"); return; }
 
   // ★ 浏览走 LittleFS 缓存（进 AP 前 fsCacheBuild 扫描好的 SD 目录树; 照抄官方"文件管理用 LittleFS"）。
   //   避开"配网会话实时遍历 SD × AP hostap_input"的 esf_buf_alloc 竞争（崩溃根因）。
   //   缓存不存在（扫描失败/超上限目录）→ 回退直接读 SD（保留原路径, 不静默 500）。
-  if (fsCacheServeList(path, start, count)) {
+  if (fsCacheServeList(path, start, count, hideAuto)) {
     fsListProbeDetail("FSREQ_DONE(cached)", start, count, 0, false);
     gFsListJustHandled = true;
     return;
@@ -258,7 +275,7 @@ static void handleOfsList() {
   }
   // 响应前缀: {"items":[
   s.sendContent_P(PSTR("{\"items\":["));
-  OfsListCtx lc = {true};
+  OfsListCtx lc = {true, hideAuto};
   size_t emitted = 0;
   bool hasMore = false;
   int n = sdListDirPaged(path, start, count, ofsListItemCb, &lc, &emitted, &hasMore);
@@ -276,13 +293,23 @@ static void handleOfsList() {
   gFsListJustHandled = true;    // 告知 loop: 本轮回调已处理 /fs/list（用于 LOOP_AFTER 探针）
 }
 
+// ---- PUT/DELETE 改路径 handler 的栈瘦身(2026-09) ----
+// 实测: 这些 handler 处于 WiFi/HTTP 深链时剩余连续栈仅 0~100B; 任何 ≥~150B 栈局部(原 path[300]+
+// lab/d/t/s2 等)都会栈溢出 → Exception 2 / Soft WDT / 系统重启(串口多次实锤)。单线程顺序处理、
+// handler 不可重入 → 用文件级 static 暂存(参照 handleOfsFile path 的做法), 零堆分配。
+static char gOpPath[300];   // 主路径
+static char gOpA[300];      // src / s2
+static char gOpB[300];      // 目标 t / 临时
+static char gOpC[300];      // 父目录等
+static char gOpLab[220];    // 通知文案
+
 // ---- PUT /fs/edit: 建文件/夹（无 src）或 重命名/移动（有 src）----
 static void handleOfsEditPut() {
   ESP8266WebServer &s = srv();
   String pathArg = s.arg("path");
   if (pathArg.length() == 0) { ofsReplyBadRequest("PATH ARG MISSING"); return; }
-  char path[300];
-  if (!normalizeApiPath(pathArg.c_str(), path, sizeof(path))) { ofsReplyBadRequest("BAD PATH"); return; }
+  char *path = gOpPath;
+  if (!normalizeApiPath(pathArg.c_str(), path, 300)) { ofsReplyBadRequest("BAD PATH"); return; }
   if (strcmp(path, "/") == 0) { ofsReplyBadRequest("BAD PATH"); return; }
   if (!reinitSdBus("fs_put")) { ofsReply(500, "FS INIT ERROR"); return; }
 
@@ -292,43 +319,64 @@ static void handleOfsEditPut() {
     if (isProtectedPath(path)) { ofsReply(403, "protected"); return; }
     size_t plen = strlen(path);
     bool isDir = (plen > 0 && path[plen - 1] == '/');
+    char *lab = gOpLab;
     if (isDir) {
-      char d[300];
-      snprintf(d, sizeof(d), "%s", path);
+      char *d = gOpB;
+      snprintf(d, 300, "%s", path);
       d[strlen(d) - 1] = '\0';
-      if (!SD.mkdir(d)) { ofsReply(500, "MKDIR FAILED"); return; }
-      char parent[300];
-      ofsParent(d, parent, sizeof(parent));
+      snprintf(lab, 220, "新建文件夹:%s", d);
+      ofsOpReport(OFS_OP_PHASE_START, lab);
+      ESP.wdtFeed();
+      if (!SD.mkdir(d)) { ofsOpReport(OFS_OP_PHASE_FAIL, lab); ofsReply(500, "MKDIR FAILED"); return; }
+      ESP.wdtFeed();
+      ofsOpReport(OFS_OP_PHASE_DONE, lab);
+      char *parent = gOpC;
+      ofsParent(d, parent, 300);
+      if (parent[0] == '\0') strcpy(parent, "/");
+      fsCacheInvalidateDir(parent);   // ★ 新建夹后失效父缓存, /fs/list 立即可见(否则 stale 隐藏新项)
       ofsReplyOKWithMsg(parent);
       return;
     } else {
+      snprintf(lab, 220, "新建:%s", path);
+      ofsOpReport(OFS_OP_PHASE_START, lab);
+      ESP.wdtFeed();
       File f = SD.open(path, "w");
-      if (!f) { ofsReply(500, "CREATE FAILED"); return; }
+      if (!f) { ofsOpReport(OFS_OP_PHASE_FAIL, lab); ofsReply(500, "CREATE FAILED"); return; }
       f.write((const char *)0);           // Print::write 有 NULL 保护, 等价建空文件
       f.close();
+      ESP.wdtFeed();
+      ofsOpReport(OFS_OP_PHASE_DONE, lab);
     }
-    char parent[300];
-    ofsParent(path, parent, sizeof(parent));
+    char *parent = gOpC;
+    ofsParent(path, parent, 300);
+    if (parent[0] == '\0') strcpy(parent, "/");
+    fsCacheInvalidateDir(parent);   // ★ 新建后失效父缓存, /fs/list 立即可见
     ofsReplyOKWithMsg(parent);
     return;
   }
 
-  char src[300];
-  if (!normalizeApiPath(srcArg.c_str(), src, sizeof(src))) { ofsReplyBadRequest("BAD SRC"); return; }
+  char *src = gOpA;
+  if (!normalizeApiPath(srcArg.c_str(), src, 300)) { ofsReplyBadRequest("BAD SRC"); return; }
   if (strcmp(src, "/") == 0) { ofsReplyBadRequest("BAD SRC"); return; }
   if (!SD.exists(src)) { ofsReply(404, "SRC FILE NOT FOUND"); return; }
   if (isProtectedPath(src) || isProtectedPath(path)) { ofsReply(403, "protected"); return; }
-  char t[300], s2[300];
-  snprintf(t, sizeof(t), "%s", path);
+  char *t = gOpB;
+  snprintf(t, 300, "%s", path);
   size_t tl = strlen(t); if (tl > 1 && t[tl - 1] == '/') t[tl - 1] = '\0';
-  snprintf(s2, sizeof(s2), "%s", src);
+  char *s2 = src;                          // src 用后即弃, 就地除尾斜杠作 s2
   size_t sl = strlen(s2); if (sl > 1 && s2[sl - 1] == '/') s2[sl - 1] = '\0';
   if (strcmp(s2, t) == 0) { ofsReplyBadRequest("PATH FILE EXISTS"); return; }
   if (SD.exists(t)) { ofsReplyBadRequest("PATH FILE EXISTS"); return; }
-  if (!SD.rename(s2, t)) { ofsReply(500, "RENAME FAILED"); return; }
-  char parent[300], srcParent[300];
-  ofsLastExistingParent(s2, parent, sizeof(parent));
-  ofsParent(t, srcParent, sizeof(srcParent));   // 目标目录（可能跨目录移动）
+  char *lab = gOpLab;
+  snprintf(lab, sizeof(gOpLab), "重命名/移动:%s → %s", s2, t);
+  ofsOpReport(OFS_OP_PHASE_START, lab);
+  ESP.wdtFeed();
+  if (!SD.rename(s2, t)) { ofsOpReport(OFS_OP_PHASE_FAIL, lab); ofsReply(500, "RENAME FAILED"); return; }
+  ESP.wdtFeed();
+  ofsOpReport(OFS_OP_PHASE_DONE, lab);
+  char *parent = gOpC, *srcParent = gOpPath;   // gOpPath 的 path 已用完
+  ofsLastExistingParent(s2, parent, 300);
+  ofsParent(t, srcParent, 300);                // 目标目录（可能跨目录移动）
   fsCacheInvalidateDir(parent);       // 源目录刷新
   if (strcmp(srcParent, parent) != 0) fsCacheInvalidateDir(srcParent);   // 跨目录移动: 目标也刷新
   ofsReplyOKWithMsg(parent);
@@ -372,16 +420,23 @@ static void handleOfsEditDelete() {
   ESP8266WebServer &s = srv();
   String pathArg = s.arg(0);
   if (pathArg.length() == 0) { ofsReplyBadRequest("BAD PATH"); return; }
-  char path[300];
-  if (!normalizeApiPath(pathArg.c_str(), path, sizeof(path))) { ofsReplyBadRequest("BAD PATH"); return; }
+  char *path = gOpPath;
+  if (!normalizeApiPath(pathArg.c_str(), path, 300)) { ofsReplyBadRequest("BAD PATH"); return; }
   if (strcmp(path, "/") == 0) { ofsReplyBadRequest("BAD PATH"); return; }
   if (!reinitSdBus("fs_del")) { ofsReply(500, "FS INIT ERROR"); return; }
   if (isProtectedPath(path)) { ofsReply(403, "protected"); return; }
   if (!SD.exists(path)) { ofsReply(404, "FILE NOT FOUND"); return; }
+  // ★ 通用操作墨水屏通知: 动手删除前 START, 成/败 DONE/FAIL（渲染在 loop, 此处只记录）
+  char *lab = gOpLab;
+  snprintf(lab, sizeof(gOpLab), "删除:%s", path);
+  ofsOpReport(OFS_OP_PHASE_START, lab);
+  ESP.wdtFeed();
   int count = 0;
-  if (!ofsDeleteRecursive(path, 0, &count)) { ofsReply(500, "DELETE FAILED"); return; }
-  char parent[300];
-  ofsLastExistingParent(path, parent, sizeof(parent));
+  if (!ofsDeleteRecursive(path, 0, &count)) { ofsOpReport(OFS_OP_PHASE_FAIL, lab); ofsReply(500, "DELETE FAILED"); return; }
+  ESP.wdtFeed();
+  ofsOpReport(OFS_OP_PHASE_DONE, lab);
+  char *parent = gOpC;
+  ofsLastExistingParent(path, parent, 300);
   if (parent[0] == '\0') strcpy(parent, "/");   // 根一级文件: ofsParent 返回空, 实际父目录是根
   fsCacheInvalidateDir(parent);   // 删除后刷新缓存, 防 /fs/list 读旧快照显示已删文件
   ofsReplyOKWithMsg(parent);
@@ -419,6 +474,33 @@ void ofsUpSetPhaseCallback(OfsUpPhaseCallback cb) { gOfsUpPhaseCb = cb; }
 int  ofsUpGetPhase() { return gOfsUpPhase; }
 const char *ofsUpGetPhasePath() { return gOfsUpPhasePath; }
 
+// ---- 下载墨水屏状态（/fs/file?download=true 下载起止上报; 渲染层显示"下载中/下载完毕/下载失败"）----
+// ⚠️ 静态瘦身(2026-09 Step B): 上报→渲染层回调是同步的, 渲染只用回调入参 path, 从不查存储的
+// 路径 → 删 gOfsDlPhasePath[300] 及 getter（无任何消费者）。保留 phase int 供将来对称 upload 的
+// "结束后回配网页"轮询。若以后需要断点续传 UI 查路径, 再按需加回, 勿常驻。
+static OfsDlPhaseCallback gOfsDlPhaseCb = NULL;
+static int gOfsDlPhase = OFS_DL_PHASE_IDLE;
+
+void ofsDlSetPhaseCallback(OfsDlPhaseCallback cb) { gOfsDlPhaseCb = cb; }
+int  ofsDlGetPhase() { return gOfsDlPhase; }
+
+void ofsDlReport(int phase, const char *path) {
+  if (phase == gOfsDlPhase && phase != OFS_DL_PHASE_START) return;   // 除"下载中"外去重
+  gOfsDlPhase = phase;
+  if (gOfsDlPhaseCb) gOfsDlPhaseCb(phase, path);
+}
+
+// ---- 通用文件管理操作墨水屏状态（/fs 新建/夹/删除/重命名/移动, 参照上传/下载同款上报）----
+static OfsOpPhaseCallback gOfsOpPhaseCb = NULL;
+static int gOfsOpPhase = OFS_OP_PHASE_IDLE;
+void ofsOpSetPhaseCallback(OfsOpPhaseCallback cb) { gOfsOpPhaseCb = cb; }
+int  ofsOpGetPhase() { return gOfsOpPhase; }
+void ofsOpReport(int phase, const char *msg) {
+  if (phase == gOfsOpPhase && phase != OFS_OP_PHASE_START) return;   // 除"操作中"外去重
+  gOfsOpPhase = phase;
+  if (gOfsOpPhaseCb) gOfsOpPhaseCb(phase, msg);
+}
+
 // 内部: 上报 phase 给渲染层（去重; 完成/失败时带 path）
 static void ofsUpReport(int phase) {
   if (gOfsUpPhase == phase && phase != OFS_UP_PHASE_UPLOADING) return;   // 除"上传中"外去重
@@ -435,7 +517,7 @@ static void handleOfsEditUploadCb() {
   ESP8266WebServer &s = srv();
   HTTPUpload &upload = s.upload();
   if (upload.status == UPLOAD_FILE_START) {
-    Serial.printf("OFS_UP_START filename=%s\n", upload.filename.c_str());
+    Serial.printf_P(PSTR("OFS_UP_START filename=%s\n"), upload.filename.c_str());
     ofsUpReset();
     String filename = upload.filename;
     if (!filename.startsWith("/")) filename = "/" + filename;
@@ -445,7 +527,7 @@ static void handleOfsEditUploadCb() {
     if (!reinitSdBus("fs_upopen")) { ofsUpFail(500, "FS INIT ERROR"); return; }
     ofsUpFile = SD.open(ofsUpPath, "w");
     if (!ofsUpFile) { ofsUpFail(500, "创建失败"); return; }
-    Serial.printf("OFS_UP_START %s heap=%u\n", ofsUpPath, (unsigned)ESP.getFreeHeap());
+    Serial.printf_P(PSTR("OFS_UP_START %s heap=%u\n"), ofsUpPath, (unsigned)ESP.getFreeHeap());
     ofsUpReport(OFS_UP_PHASE_UPLOADING);   // ★ 上传开始 → 墨水屏"上传中"
   } else if (upload.status == UPLOAD_FILE_WRITE) {
     if (!ofsUpFile || ofsUpErr) return;
@@ -457,7 +539,7 @@ static void handleOfsEditUploadCb() {
       ofsUpFile.close(); ofsUpFile = File();
       if (ofsUpPath[0] && SD.exists(ofsUpPath)) SD.remove(ofsUpPath);
       ofsUpFail(507, "存储空间不足");
-      Serial.printf("OFS_UP_WRITE_FAIL path=%s wrote=%u cur=%u\n",
+      Serial.printf_P(PSTR("OFS_UP_WRITE_FAIL path=%s wrote=%u cur=%u\n"),
                     ofsUpPath, (unsigned)bytesWritten, (unsigned)upload.currentSize);
       return;
     }
@@ -473,14 +555,14 @@ static void handleOfsEditUploadCb() {
       SD.remove(ofsUpPath);
       ofsUpFail(500, "上传失败，空文件或存储空间不足");
     }
-    Serial.printf("OFS_UP_END %s size=%llu err=%d\n", ofsUpPath,
+    Serial.printf_P(PSTR("OFS_UP_END %s size=%llu err=%d\n"), ofsUpPath,
                   (unsigned long long)ofsUpSize, ofsUpErr);
     // ★ 上传结束 → 墨水屏"上传完毕"(成功)  失败已在 done 报 FAIL
     if (ofsUpErr == 0) ofsUpReport(OFS_UP_PHASE_DONE);
   } else if (upload.status == UPLOAD_FILE_ABORTED) {
     // ↑ 关键: 上传中断(AP 断连/超时)时 core 只调 upload(ABORTED), 不调 done!
     // 此前无 ABORTED 分支 → 无响应 → 前端一直转圈。必须在此清理 + 发响应。
-    Serial.printf("OFS_UP_ABORTED path=%s size=%llu\n", ofsUpPath, (unsigned long long)ofsUpSize);
+    Serial.printf_P(PSTR("OFS_UP_ABORTED path=%s size=%llu\n"), ofsUpPath, (unsigned long long)ofsUpSize);
     ofsUpReport(OFS_UP_PHASE_FAIL);   // ★ 上传中止/失败 → 墨水屏"上传失败"（须在 reset 前, 拿 path）
     if (ofsUpFile) { ofsUpFile.close(); ofsUpFile = File(); }
     if (ofsUpPath[0] && SD.exists(ofsUpPath)) SD.remove(ofsUpPath);   // 清理半成品
@@ -491,12 +573,17 @@ static void handleOfsEditUploadCb() {
 
 // 上传完成回调（发送最终响应）
 static void handleOfsEditUploadDone() {
-  Serial.printf("OFS_UP_DONE err=%d code=%d path=%s heap=%u\n", ofsUpErr, ofsUpErrCode, ofsUpPath, (unsigned)ESP.getFreeHeap());
+  Serial.printf_P(PSTR("OFS_UP_DONE err=%d code=%d path=%s heap=%u\n"), ofsUpErr, ofsUpErrCode, ofsUpPath, (unsigned)ESP.getFreeHeap());
   if (ofsUpErr == 0) {
     char parent[300];
     ofsParent(ofsUpPath, parent, sizeof(parent));
     fsCacheInvalidateDir(parent);   // 上传后刷新缓存, 防 /fs/list 读旧快照缺新文件
-    ofsReplyOKWithMsg("上传成功");
+    // ★ 修复(2026-09, 无头浏览器定性): 上传成功响应体 = "父目录路径"(与 PUT 创建/改名、DELETE
+    //   同契约)。此前回人类文案 "上传成功" → manager.htm onOperationComplete 把响应文本当父目录
+    //   路径去 httpList → GET /fs/list?dir=上传成功 → 400 BAD PATH —— 用户看到的"上传 400"
+    //   (上传本身成功, 文件已落盘; 该 400 只是误列目录)。根级文件父目录为 "" → 归一 "/"。
+    if (parent[0] == '\0') strcpy(parent, "/");
+    ofsReplyOKWithMsg(parent);
     // 成功: 上传中已由 END 报 DONE; 但若空文件校验失败(END 里 ofsUpFail)或 START 就失败,
     // 需在此补报 FAIL（END 未报 DONE 时）。此处 ofsUpErr==0 → 已 DONE, 无需再报。
     return;
@@ -529,7 +616,12 @@ static void handleOfsFile() {
   ESP8266WebServer &s = srv();
   String pathArg = s.arg("path");
   if (pathArg.length() == 0) { ofsReplyBadRequest("BAD PATH"); return; }
-  char path[300];
+  // ★ 栈/静态权衡(2026-09 演进): ①path+plain+enc+disp 原共 ~1556B 栈上局部 → 4KB loop 栈
+  //   下载路径 FSDL 低水位被压到 80B(近溢出)→ 长传输偶发 Exception 29; ②Step B(2026-09):
+  //   plain/enc/disp 1,256B 改为请求级 heap、sendHeader 后立即 free(主体传输阶段不存在);
+  //   path[300] 需贯穿 handler(含 START/DONE 上报), 保留 static——单线程顺序处理、
+  //   handler 不可重入/不递归, static 安全; ③绝不把这 1.5K 放回栈(实测 Ex29)。
+  static char path[300];
   if (!normalizeApiPath(pathArg.c_str(), path, sizeof(path))) { ofsReplyBadRequest("BAD PATH"); return; }
   if (isUploadingTemp(path)) { ofsReply(403, "upload_in_progress"); return; }
   if (!reinitSdBus("fs_file")) { ofsReply(500, "FS INIT ERROR"); return; }
@@ -541,28 +633,65 @@ static void handleOfsFile() {
   // 下载文件名（manager.htm 走 /fs/file?download=true）: 此前无 Content-Disposition →
   // 浏览器用 URL 默认名 "file" 且无扩展名。加 filename=<basename> + filename*=UTF-8''<RFC3986>。
   if (s.hasArg("download")) {
-    const char *bname = path;
-    for (const char *p = path; *p; p++) { if (*p == '/') bname = p + 1; }
-    char plain[256], enc[300], disp[700];
-    snprintf(plain, sizeof(plain), "%s", bname);
-    // RFC3986 percent-encode（中文/空格文件名）
-    size_t oi = 0;
-    for (const unsigned char *p = (const unsigned char*)bname; *p && oi + 3 < sizeof(enc); p++) {
-      unsigned char c = *p;
-      if (isalnum(c) || c=='-'||c=='_'||c=='.'||c=='~') enc[oi++] = (char)c;
-      else { oi += snprintf(enc+oi, sizeof(enc)-oi, "%%%02X", c); }
+    // ★ 生命周期受控(2026-09 Step B): plain/enc/disp 1,256B 仅构建 Content-Disposition 头时
+    //   短暂需要 → 从 static(常驻 1,256B BSS)改请求级 malloc, sendHeader 后立即 free,
+    //   下载主体传输阶段不存在(峰值仅 header 构建瞬间 +1.2K, 低于 512B 传输缓冲的常驻意义)。
+    //   绝不回 4KB 栈(实测 80B 近溢出 Ex29)。malloc 失败 → 降级为不发 filename 头
+    //   (浏览器用 URL 默认名, 传输不受影响), 记 FSDL_HDR_ALLOC_FAIL。
+    char *hdr = (char *)malloc(256 + 300 + 700);
+    if (!hdr) {
+      Serial.printf_P(PSTR("FSDL_HDR_ALLOC_FAIL heap=%u maxblk=%u\n"),
+                      (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxFreeBlockSize());
+    } else {
+      char *plain = hdr, *enc = hdr + 256, *disp = hdr + 256 + 300;
+      const char *bname = path;
+      for (const char *p = path; *p; p++) { if (*p == '/') bname = p + 1; }
+      snprintf(plain, 256, "%s", bname);
+      // RFC3986 percent-encode（中文/空格文件名）
+      size_t oi = 0;
+      for (const unsigned char *p = (const unsigned char*)bname; *p && oi + 3 < 300; p++) {
+        unsigned char c = *p;
+        if (isalnum(c) || c=='-'||c=='_'||c=='.'||c=='~') enc[oi++] = (char)c;
+        else { oi += snprintf(enc + oi, 300 - oi, "%%%02X", c); }
+      }
+      enc[oi] = '\0';
+      snprintf(disp, 700, "attachment; filename=\"%s\"; filename*=UTF-8''%s", plain, enc);
+      s.sendHeader("Content-Disposition", disp);
+      free(hdr);   // ★ 头已发出, 立即释放
     }
-    enc[oi] = '\0';
-    snprintf(disp, sizeof(disp), "attachment; filename=\"%s\"; filename*=UTF-8''%s", plain, enc);
-    s.sendHeader("Content-Disposition", disp);
   }
   s.sendHeader("Connection", "close");
   s.setContentLength((size_t)size);
   s.send(200, mime, "");
   s.client().setNoDelay(true);
-  uint8_t *buf = (uint8_t *)malloc(4096);
-  if (!buf) { f.close(); return; }
+  bool isDownload = s.hasArg("download");
+  if (isDownload) ofsDlReport(OFS_DL_PHASE_START, path);   // ★ 下载开始 → 墨水屏"下载中"
+  // ★ 2026-09 传输缓冲自适应: 原固定 malloc(4096) 在碎片堆(maxblk<4096, 实测 3848)下 START 即
+  //   FSDL_MALLOC_FAIL → 0B 下载。勿用 static(4KB BSS 吃掉堆基线, AP 空闲仅 ~2K 连 status GET 都
+  //   Exception 29 实测)。改为 4096→2048→1024 降级(仅 START 选一次尺寸, 传输循环语义不变;
+  //   小缓冲还给 lwIP TX 留更多堆, 下载吞吐本就受 TCP 窗口 ~0.2MB/s 限制, 不受块大小影响)。
+  static const size_t kBufCandidates[] = {512, 256, 128};
+  size_t bufSize = 0;
+  uint8_t *buf = NULL;
+  for (size_t cand : kBufCandidates) {
+    buf = (uint8_t *)malloc(cand);
+    if (buf) { bufSize = cand; break; }
+  }
+  if (!buf) {
+    Serial.printf_P(PSTR("FSDL_MALLOC_FAIL heap=%u maxblk=%u size=%llu\n"),
+                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxFreeBlockSize(),
+                  (unsigned long long)size);
+    if (isDownload) ofsDlReport(OFS_DL_PHASE_FAIL, path);
+    f.close();
+    return;
+  }
+  Serial.printf_P(PSTR("FSDL_BUF buf=%u heap=%u maxblk=%u size=%llu\n"), (unsigned)bufSize,
+                (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxFreeBlockSize(),
+                (unsigned long long)size);
   uint64_t remaining = size;
+  uint32_t lastProbe = millis();
+  uint32_t lastByte = 0;
+  uint32_t lastProbeBytes = 0;
   while (remaining > 0) {
     // ★★ 128MB 下载 WDT 复位根因修复(2026-08-29 二修):
     //  一修只加 yield() 放 write 后 — 无效: WiFiClient::write 在 TCP 发送缓冲满时会
@@ -573,22 +702,49 @@ static void handleOfsFile() {
     //  AP 模式 0.19MB/s 下 availableForWrite() 可连续 100+ 轮为 0(缓冲满等 ACK), break 致
     //  传输中途中断(Chrome 12s / PowerShell 1MB 均如此)。只保留 connected() 断连检测
     //  (客户端真正断开才退出), avail==0 时继续 yield+wdtFeed 等缓冲, 不设轮数上限。
-    if (!s.client().connected()) { break; }
+    if (!s.client().connected()) {   // 客户端断开: 中止
+      Serial.printf_P(PSTR("FSDL_DISCONNECTED sent=%llu remain=%llu\n"),
+                    (unsigned long long)(size - remaining), (unsigned long long)remaining);
+      break;
+    }
     size_t avail = s.client().availableForWrite();
     if (avail == 0) {
+      // 缓冲满等 ACK: 5s 无进展探针(定位 STA 下载无速度: 是否 avail 长期为 0 = TCP 不推进)
+      if (millis() - lastProbe >= 5000) {
+        Serial.printf_P(PSTR("FSDL_STALL sent=%llu heap=%u\n"),
+                      (unsigned long long)(size - remaining), (unsigned)ESP.getFreeHeap());
+        lastProbe = millis();
+      }
       yield();
       ESP.wdtFeed();
       continue;
     }
-    size_t want = (size_t)(remaining > 4096 ? 4096 : remaining);
+    size_t want = (size_t)(remaining > bufSize ? bufSize : remaining);
     if (want > avail) want = avail;
     int n = f.read(buf, want);
-    if (n <= 0) break;
-    if (s.client().write(buf, (size_t)n) != (size_t)n) break;
+    if (n <= 0) {
+      Serial.printf_P(PSTR("FSDL_READ_FAIL at=%llu\n"), (unsigned long long)(size - remaining));
+      break;
+    }
+    if (s.client().write(buf, (size_t)n) != (size_t)n) {
+      Serial.printf_P(PSTR("FSDL_WRITE_FAIL at=%llu\n"), (unsigned long long)(size - remaining));
+      break;
+    }
     remaining -= (uint64_t)n;
+    lastProbeBytes += (uint32_t)n;
+    if (millis() - lastProbe >= 5000) {
+      Serial.printf_P(PSTR("FSDL_PROGRESS rate=%uB/s sent=%llu heap=%u\n"), lastProbeBytes / 5,
+                    (unsigned long long)(size - remaining), (unsigned)ESP.getFreeHeap());
+      lastProbe = millis();
+      lastProbeBytes = 0;
+    }
     yield();
     ESP.wdtFeed();
   }
+  Serial.printf_P(PSTR("FSDL_END sent=%llu size=%llu heap=%u\n"),
+                (unsigned long long)(size - remaining), (unsigned long long)size,
+                (unsigned)ESP.getFreeHeap());
+  if (isDownload) ofsDlReport(remaining == 0 ? OFS_DL_PHASE_DONE : OFS_DL_PHASE_FAIL, path);   // ★ 下载完成/中断
   free(buf);
   f.close();
 }
@@ -627,7 +783,7 @@ static void ofsAbReadTinyCb(const SdEntry *e, void *ctx) {
 
 // 打印一行采样（kind: 0=no-sd 1=tiny-sd 2=lst-sd）
 static void ofsAbSample(int kind) {
-  Serial.printf("ABSAM kind=%d heap=%u maxblk=%u stack=%u\n", kind,
+  Serial.printf_P(PSTR("ABSAM kind=%d heap=%u maxblk=%u stack=%u\n"), kind,
                 (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxFreeBlockSize(),
                 (unsigned)ESP.getFreeContStack());
 }

@@ -4,6 +4,10 @@
 
 #include "weather_data.h"
 #include <string.h>
+#if defined(ARDUINO)
+#include <stdio.h>      // snprintf_P (flash 格式串, Step D)
+#include <pgmspace.h>   // PSTR
+#endif
 
 // ---------- 辅助函数 ----------
 
@@ -177,7 +181,7 @@ static bool httpGet(HTTPClient& http, const char* url, String& outBody,
             strncpy(errCode, tmp, errCap - 1);
             errCode[errCap - 1] = '\0';
         } else {
-            snprintf(errCode, errCap, "HTTP%d", code);
+            snprintf_P(errCode, errCap, PSTR("HTTP%d"), code);
         }
         http.end();
     }
@@ -196,29 +200,29 @@ bool fetchWeather(ActualWeather* a, FutureWeather* f, LifeIndex* l,
     HTTPClient http;
 
     // 1. 实况 now.json（对齐 A7 步骤提示: 获取天气实况数据）
-    snprintf(url, sizeof(url),
-             "http://api.seniverse.com/v3/weather/now.json?key=%s&location=%s&language=zh-Hans&unit=c",
+    snprintf_P(url, sizeof(url),
+             PSTR("http://api.seniverse.com/v3/weather/now.json?key=%s&location=%s&language=zh-Hans&unit=c"),
              key, city);
     if (!httpGet(http, url, body, errCode, errCap)) return false;
-    if (!parseActual(body.c_str(), a)) { snprintf(errCode, errCap, "PARSE"); return false; }
+    if (!parseActual(body.c_str(), a)) { snprintf_P(errCode, errCap, PSTR("PARSE")); return false; }
     if (onStep) onStep(0);
     ESP.wdtFeed();  // 端点间喂狗
 
     // 2. 未来 daily.json（获取未来天气数据）
-    snprintf(url, sizeof(url),
-             "http://api.seniverse.com/v3/weather/daily.json?key=%s&location=%s&language=zh-Hans&unit=c&start=0&days=3",
+    snprintf_P(url, sizeof(url),
+             PSTR("http://api.seniverse.com/v3/weather/daily.json?key=%s&location=%s&language=zh-Hans&unit=c&start=0&days=3"),
              key, city);
     if (!httpGet(http, url, body, errCode, errCap)) return false;
-    if (!parseFuture(body.c_str(), f)) { snprintf(errCode, errCap, "PARSE"); return false; }
+    if (!parseFuture(body.c_str(), f)) { snprintf_P(errCode, errCap, PSTR("PARSE")); return false; }
     if (onStep) onStep(1);
     ESP.wdtFeed();  // 端点间喂狗
 
     // 3. 紫外线 life/suggestion.json（获取生活指数）
-    snprintf(url, sizeof(url),
-             "http://api.seniverse.com/v3/life/suggestion.json?key=%s&location=%s&language=zh-Hans",
+    snprintf_P(url, sizeof(url),
+             PSTR("http://api.seniverse.com/v3/life/suggestion.json?key=%s&location=%s&language=zh-Hans"),
              key, city);
     if (!httpGet(http, url, body, errCode, errCap)) return false;
-    if (!parseLife(body.c_str(), l)) { snprintf(errCode, errCap, "PARSE"); return false; }
+    if (!parseLife(body.c_str(), l)) { snprintf_P(errCode, errCap, PSTR("PARSE")); return false; }
     if (onStep) onStep(2);
 
     return true;

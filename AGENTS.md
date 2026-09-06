@@ -8,23 +8,42 @@ ESP8266 Arduino 固件，主控 ESP‑12F，2.9" SSD1680 墨水屏横放（逻�
 ## STRUCTURE
 ```
 ink-reader-esp/
-├── ink-reader-esp.ino          # 主固件 (3480+ 行)
-├── epd_290a.h / .cpp         # EPD 驱动 (296×128 SSD1680)
-├── rot_map.h                 # 四向旋转坐标规范 (mapFbRot 纯函数, 唯一权威, pc_tests 可测)
-├── wifi_manager.h / .cpp     # 时钟/配网/天气配置模块
+├── ink-reader-esp.ino          # 主固件 (3480+ 行, APP_* 状态机)
+├── epd_290a.h / .cpp         # EPD 驱动 (296×128 SSD1680, 全刷/局刷/休眠)
+├── rot_map.h                 # 四向旋转坐标规范 (mapFbRot 纯函数, 唯一权威)
+├── wifi_manager.h / .cpp     # 时钟/配网/天气配置/OTA/Web管理页
 ├── weather_data.h / .cpp     # 天气数据层 (心知天气 API 解析 + HTTP 获取)
 ├── hitokoto.h / .cpp         # 一言数据层 (v1.hitokoto.cn 解析 + HTTP 获取)
-├── bmp_show.h / .cpp         # SD 卡 BMP 图片显示 (1/4/8/16/24 位深, 移植官方 A7)
-├── weather_icons.h           # 6 个 24×24 天气图标 (PIL 生成, 1=黑 MSB left)
-├── gb2312_unicode.h / .c     # (遗留, 固件已不再引用 — 渲染已全量迁至 u8g2)
-├── font16_cn.h               # (遗留, 未包含 — 中文渲染用 u8g2 内置 chinese_gb2312 字库)
+├── bmp_show.h / .cpp         # SD 卡 BMP 图片显示 (1/4/8/16/24 位深)
+├── file_api.h / .cpp         # HTTP 文件 API 路由 (/api/status|files|upload|download|...)
+├── file_api_fs.h / .cpp      # 文件 API 上传状态墨水屏回调 + 传输缓冲
+├── sd_file_ops.h / .cpp      # SD 操作层 (目录遍历/删除/搜索/重命名)
+├── sd_path.h / .cpp          # 纯函数路径安全/保护 (isProtectedPath)
+├── fs_cache.h / .cpp         # SD 目录树 → LittleFS 缓存
+├── progress_sync.h / .cpp    # 阅读进度同步 (LUMI1 协议, UDP 发现)
+├── progress_lumi.h / .cpp    # LUMI1 编解码 + SHA-1 文件指纹
+├── reader_utils.h / .cpp     # 阅读器工具函数
+├── stats.h / .cpp            # 统计/调试
+├── globals.h                 # 全局常量/宏/类型定义
+├── file_list.h               # 文件列表数据结构
+├── fb_gfx.h                  # 帧缓冲图形原语
+├── weather_icons.h           # 6 个 24×24 天气图标 (PIL 生成)
+├── weather_small_icons.h     # 小天气图标
+├── nav_icons.h               # 导航图标
+├── rot_map.h                 # 旋转坐标映射
+├── gb2312_unicode.h / .c     # (遗留, 固件已不再引用)
+├── font16_cn.h               # (遗留, 中文渲染用 u8g2 内置字库)
 ├── font16x16.h               # Tahoma 16px ASCII
 ├── font8x8.h                 # 小 ASCII 8px
-├── make_font_cn.py           # 中文字体生成
+├── make_font_cn.py           # 中文字体生成 (PIL)
 ├── make_font16.py            # ASCII 字体生成
-├── make_weather_icons.py     # 天气图标生成 (PIL)
-├── pc_tests/                 # PC 测试源码 (weather_parse_test.cpp / hitokoto_parse_test.cpp; 不参与固件编译, 两个 main() 会冲突)
-└── ink-reader-esp-*.bin      # 编译产物
+├── make_weather_icons.py     # 天气图标生成
+├── make_nav_icons.py         # 导航图标生成
+├── make_small_icons.py       # 小图标生成
+├── docs/                     # 协议/设计文档 (file-api.md, progress-lumi1.md)
+├── data/                     # LittleFS 数据 (manager.htm — Web 管理页)
+├── libraries/                # 本地库副本 (U8g2_for_Adafruit_GFX 等)
+└── build/                    # 编译输出 (ink-reader-esp.ino.bin)
 ```
 
 ## WHERE TO LOOK

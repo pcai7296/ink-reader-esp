@@ -1,5 +1,6 @@
 // fs_cache.cpp — SD 目录树 → LittleFS 缓存（见 fs_cache.h; 照抄官方"文件管理用 LittleFS"）
 #include "fs_cache.h"
+#include "file_api_fs.h"     // ofsEntryVisible: 可见性单一入口(A 修复, 与 /fs/list 实时共用)
 #include "sd_file_ops.h"
 #include "wifi_manager.h"
 #include <LittleFS.h>
@@ -12,30 +13,6 @@ extern bool reinitSdBus(const char *reason);
 // 前置声明（定义在文件后部, fsCacheScanOne 先调用）
 static void fillEntryForCache(File &entry, SdEntry *e);
 
-// ---- 显示过滤（与 file_api_fs.cpp ofsBlacklistedEntry/ofsWhitelistedFile 同规则; 本模块独立复制）----
-static bool fsHasBlacklistSuffix(const char *dot) {
-  static const char *const suffixes[] = {
-    ".i1", ".z1", ".i2", ".z2", ".v1", ".vz1", ".i1p", ".v1p", ".bm", ".bmt", nullptr
-  };
-  for (size_t i = 0; suffixes[i]; i++) if (strcasecmp(dot, suffixes[i]) == 0) return true;
-  return false;
-}
-static bool fsBlacklisted(const char *name) {
-  if (!name || !name[0]) return true;
-  if (name[0] == '.') return true;
-  const char *dot = strrchr(name, '.');
-  if (dot && dot[1] && fsHasBlacklistSuffix(dot)) return true;
-  static const char *const blocked[] = {
-    "android", "androud", "found.000", "foud.000", "lost.dir", "system volume information"
-  };
-  for (const char *item : blocked) if (strcasecmp(name, item) == 0) return true;
-  return false;
-}
-static bool fsWhitelisted(const char *name) {
-  const char *dot = strrchr(name, '.');
-  if (!dot || !dot[1]) return false;
-  return strcasecmp(dot, ".txt") == 0 || strcasecmp(dot, ".bmp") == 0;
-}
 static void fsJsonEscape(const char *s, char *out, size_t outSize) {
   size_t oi = 0;
   static const char hex[] = "0123456789abcdef";
@@ -91,18 +68,19 @@ static int fsCacheScanOne(const char *dir, int depth, int *dirCount,
   // 首行 = 原始路径（校验碰撞）
   cache.printf("%s\n", dir);
 
-  // 2) 逐项: 过滤 + 写 JSON 项（不建 SdEntry; Dir::fileName()/fileSize()/isDirectory() 直读）
+  // 2) 逐项: 可见性过滤 + 写 JSON 项（不建 SdEntry; Dir::fileName()/fileSize()/isDirectory() 直读）
+  // ⚠️ 过滤走 ofsEntryVisibleEx 单一入口; 缓存存**超集**(hideAuto=false: 仅硬隐藏, 自动生成后缀与
+  //    .bin 等也入缓存), hideAuto 过滤在出站 fsCacheServeList 按请求开关执行 —— 与实时列表永远同规则。
+  //    目录始终显示(除非硬隐藏), 即使目录内当前开关下无可显示文件。
   int n = 0, raw = 0;
   bool first = true;
   while (root.next()) {
-    raw++;   // 原始枚举数（诊断: 区分"目录空" vs "被黑/白名单过滤"）
+    raw++;   // 原始枚举数（诊断: 区分"目录空" vs "被过滤"）
     if (n >= FS_CACHE_MAX_ITEMS) break;
     String nm = root.fileName();
     bool isDir = root.isDirectory();
     uint64_t sz = isDir ? 0 : (uint64_t)root.fileSize();
-    if (fsBlacklisted(nm.c_str())) continue;              // 黑名单不显示（隐藏/索引sidecar/系统目录）
-    // ✓ 网页文件管理显示所有用户文件（/字体 的 .ttf、任意扩展名）——只屏蔽黑名单, 不用设备 UI 的
-    //    ".txt/.bmp 白名单"（那是屏幕浏览规则, 不适合网页 SD 管理; 否则 /字体/.test 全被过滤成空）
+    if (!ofsEntryVisibleEx(nm.c_str(), isDir, false)) continue;
     char nameEsc[160];
     fsJsonEscape(nm.c_str(), nameEsc, sizeof(nameEsc));
     if (first) { cache.printf("["); first = false; } else { cache.printf(","); }
@@ -170,7 +148,7 @@ int fsCacheBuild() {
 // /fs/list: 读 LittleFS 缓存切片（照抄官方 handleFileList 分块流式精神）。
 // ⚠️ 不用 malloc(4096)——配网会话堆仅 ~2.4KB, malloc 4KB 必失败 → 缓存永不命中 → 回退 SD → 崩（实测）。
 // 改用 256B 小栈缓冲流式解析 JSON 数组, 按 start/count 切片; 全程读 LittleFS（flash）, 不占大堆、不碰 SD。
-bool fsCacheServeList(const char *dir, size_t start, size_t count) {
+bool fsCacheServeList(const char *dir, size_t start, size_t count, bool hideAuto) {
   char name[32], full[300];
   fsCacheNameFor(dir, name, sizeof(name));
   snprintf(full, sizeof(full), "%s/%s", FS_CACHE_DIR, name);
@@ -205,14 +183,34 @@ bool fsCacheServeList(const char *dir, size_t start, size_t count) {
           // 确保 item 以 '}' 结尾（item 内容 = { ...name 内容, 末尾补 '}'）
           if (itemLen < (int)sizeof(item) - 1) { item[itemLen++] = '}'; item[itemLen] = '\0'; }
           else { item[sizeof(item) - 2] = '}' ; item[sizeof(item) - 1] = '\0'; }
-          if (idx >= start && emitted < count) {
-            if (emitted) s.sendContent_P(PSTR(","));
-            s.sendContent(item);
-            emitted++;
-          } else if (idx >= start + count) {
-            hasMore = true;
+          // 可见性(与实时列表同规则): 解析单项 type/name, hideAuto 时滤掉设备自动生成文件
+          bool vis = true;
+          if (hideAuto) {
+            const char *ti = strstr(item, "\"type\":\"");
+            bool isDir = ti && strncmp(ti + 8, "dir", 3) == 0;
+            const char *ns = strstr(item, "\"name\":\"");
+            if (!isDir && ns) {
+              ns += 8;
+              char nm[200];
+              size_t k = 0;
+              for (; *ns && *ns != '"' && k < sizeof(nm) - 1; ns++) {
+                if (*ns == '\\' && ns[1]) ns++;
+                nm[k++] = *ns;
+              }
+              nm[k] = '\0';
+              vis = ofsEntryVisibleEx(nm, false, true);
+            }
           }
-          idx++;
+          if (vis) {
+            if (idx >= start && emitted < count) {
+              if (emitted) s.sendContent_P(PSTR(","));
+              s.sendContent(item);
+              emitted++;
+            } else if (idx >= start + count) {
+              hasMore = true;
+            }
+            idx++;   // 仅对可见项计数(分页/nextStart 语义一致)
+          }
           itemLen = 0;
           (void)started;
         } else if (itemLen < (int)sizeof(item) - 1) {

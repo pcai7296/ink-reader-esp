@@ -42,9 +42,10 @@ bool fileApiGetCachedCapacity(uint64_t *total, uint64_t *used) {
 // ---- JSON 工具 ----
 
 // 发送 JSON 错误: {"ok":false,"error":"<枚举>"}
-static void sendApiErr(int httpCode, const char *error) {
+// (2026-09 Step C): error 改收 __FlashStringHelper*（调用点 F("...")）, 枚举串进 flash 省 RAM
+static void sendApiErr(int httpCode, const __FlashStringHelper *error) {
   String body = F("{\"ok\":false,\"error\":\"");
-  body += error;
+  body.concat(error);
   body += F("\"}");
   wifiManagerServer().send(httpCode, "application/json; charset=utf-8", body);
 }
@@ -134,7 +135,7 @@ static void handleApiCapacity() {
   ESP8266WebServer &srv = wifiManagerServer();
   uint64_t total = 0, used = 0;
   if (!apiGetCachedCapacity(&total, &used)) {
-    sendApiErr(503, "feature_unavailable");
+    sendApiErr(503, F("feature_unavailable"));
     return;
   }
   char tmp[160];
@@ -151,26 +152,35 @@ static void handleApiStat() {
   if (pathArg.length() == 0) pathArg = "/";
   char path[300];
   if (!normalizeApiPath(pathArg.c_str(), path, sizeof(path))) {
-    sendApiErr(400, "invalid_path");
+    sendApiErr(400, F("invalid_path"));
     return;
   }
   if (!reinitSdBus("api_stat")) {
-    sendApiErr(500, "sd_error");
+    sendApiErr(500, F("sd_error"));
     return;
   }
-  SdEntry e;
-  if (!sdStat(path, &e)) {
-    sendApiErr(404, "not_found");
+  // ⚠️ 栈炸弹修复(用户批准, 2026-09): SdEntry(~672B)+tmp[600]+name[256] 原全在 4KB 循环栈 → HTTP
+  //   深回调链栈溢出 → 设备 Software/System restart（串口复位原因实锤）。改请求级 heap, 语义不变。
+  SdEntry *e = (SdEntry *)malloc(sizeof(SdEntry));
+  char *tmp = (char *)malloc(600);
+  char *name = (char *)malloc(256);
+  if (!e || !tmp || !name) {
+    free(e); free(tmp); free(name);
+    sendApiErr(500, F("internal_error"));
     return;
   }
-  char tmp[600];
-  char name[256];
-  jsonStr(e.name, name, sizeof(name));
-  snprintf(tmp, sizeof(tmp),
+  if (!sdStat(path, e)) {
+    free(e); free(tmp); free(name);
+    sendApiErr(404, F("not_found"));
+    return;
+  }
+  jsonStr(e->name, name, 256);
+  snprintf(tmp, 600,
            "{\"ok\":true,\"name\":\"%s\",\"type\":\"%s\",\"size\":%llu,\"path\":\"%s\",\"protected\":%s,\"pending\":%s}",
-           name, e.isDir ? "dir" : "file", (unsigned long long)e.size, path,
-           e.isProtected ? "true" : "false", e.isUploading ? "true" : "false");
+           name, e->isDir ? "dir" : "file", (unsigned long long)e->size, path,
+           e->isProtected ? "true" : "false", e->isUploading ? "true" : "false");
   srv.send(200, "application/json; charset=utf-8", tmp);
+  free(e); free(tmp); free(name);
 }
 
 // ---- /api/files: 目录列表（chunked 流式）----
@@ -180,11 +190,11 @@ static void handleApiFiles() {
   if (pathArg.length() == 0) pathArg = "/";
   char path[300];
   if (!normalizeApiPath(pathArg.c_str(), path, sizeof(path))) {
-    sendApiErr(400, "invalid_path");
+    sendApiErr(400, F("invalid_path"));
     return;
   }
   if (!reinitSdBus("api_files")) {
-    sendApiErr(500, "sd_error");
+    sendApiErr(500, F("sd_error"));
     return;
   }
   // 预检目录存在（流式头一旦发出就无法改状态码）
@@ -192,7 +202,7 @@ static void handleApiFiles() {
     File probe = SD.open(path, FILE_READ);
     if (!probe || !probe.isDirectory()) {
       if (probe) probe.close();
-      sendApiErr(404, "not_found");
+      sendApiErr(404, F("not_found"));
       return;
     }
     probe.close();
@@ -228,20 +238,20 @@ static void handleApiSearch() {
   String pathArg = srv.arg("path");
   String depthArg = srv.arg("depth");
   if (qArg.length() == 0) {
-    sendApiErr(400, "invalid_query");
+    sendApiErr(400, F("invalid_query"));
     return;
   }
   if (pathArg.length() == 0) pathArg = "/";
   char path[300];
   if (!normalizeApiPath(pathArg.c_str(), path, sizeof(path))) {
-    sendApiErr(400, "invalid_path");
+    sendApiErr(400, F("invalid_path"));
     return;
   }
   int depth = (depthArg.length() > 0) ? atoi(depthArg.c_str()) : 3;
   if (depth < 1) depth = 1;
   if (depth > 8) depth = 8;
   if (!reinitSdBus("api_search")) {
-    sendApiErr(500, "sd_error");
+    sendApiErr(500, F("sd_error"));
     return;
   }
   // 预检根目录存在（流式头发出后无法改状态码）
@@ -249,7 +259,7 @@ static void handleApiSearch() {
     File probe = SD.open(path, FILE_READ);
     if (!probe || !probe.isDirectory()) {
       if (probe) probe.close();
-      sendApiErr(404, "not_found");
+      sendApiErr(404, F("not_found"));
       return;
     }
     probe.close();
@@ -291,16 +301,16 @@ static void handleApiUploadStatus() {
   if (dirArg.length() == 0) dirArg = "/";
   char dir[300];
   if (!normalizeApiPath(dirArg.c_str(), dir, sizeof(dir))) {
-    sendApiErr(400, "invalid_path");
+    sendApiErr(400, F("invalid_path"));
     return;
   }
   char name[256];
   if (!sanitizeUploadName(nameArg.c_str(), name, sizeof(name))) {
-    sendApiErr(400, "invalid_name");
+    sendApiErr(400, F("invalid_name"));
     return;
   }
   if (!reinitSdBus("api_upstatus")) {
-    sendApiErr(500, "sd_error");
+    sendApiErr(500, F("sd_error"));
     return;
   }
   char tmpPath[560];
@@ -324,31 +334,31 @@ static bool apiBusy() {
 }
 
 static void sendApiOk() {
-  wifiManagerServer().send(200, "application/json; charset=utf-8", "{\"ok\":true}");
+  wifiManagerServer().send_P(200, PSTR("application/json; charset=utf-8"), PSTR("{\"ok\":true}"));
 }
 
 // SdErr → HTTP 响应
 static void sendSdErr(SdErr r) {
   switch (r) {
-    case SD_NOT_FOUND:  sendApiErr(404, "not_found"); break;
-    case SD_EXISTS:     sendApiErr(409, "exists"); break;
-    case SD_NOT_EMPTY:  sendApiErr(409, "not_empty"); break;
-    case SD_PROTECTED:  sendApiErr(403, "protected"); break;
-    case SD_INVALID_MOVE: sendApiErr(409, "invalid_move"); break;
-    default:            sendApiErr(500, "internal_error"); break;
+    case SD_NOT_FOUND:  sendApiErr(404, F("not_found")); break;
+    case SD_EXISTS:     sendApiErr(409, F("exists")); break;
+    case SD_NOT_EMPTY:  sendApiErr(409, F("not_empty")); break;
+    case SD_PROTECTED:  sendApiErr(403, F("protected")); break;
+    case SD_INVALID_MOVE: sendApiErr(409, F("invalid_move")); break;
+    default:            sendApiErr(500, F("internal_error")); break;
   }
 }
 
 // POST /api/mkdir?path=
 static void handleApiMkdir() {
   ESP8266WebServer &srv = wifiManagerServer();
-  if (apiBusy()) { sendApiErr(409, "busy"); return; }
+  if (apiBusy()) { sendApiErr(409, F("busy")); return; }
   String pathArg = srv.arg("path");
-  if (pathArg.length() == 0) { sendApiErr(400, "invalid_path"); return; }
+  if (pathArg.length() == 0) { sendApiErr(400, F("invalid_path")); return; }
   char path[300];
-  if (!normalizeApiPath(pathArg.c_str(), path, sizeof(path))) { sendApiErr(400, "invalid_path"); return; }
-  if (isProtectedPath(path)) { sendApiErr(403, "protected"); return; }
-  if (!reinitSdBus("api_mkdir")) { sendApiErr(500, "internal_error"); return; }
+  if (!normalizeApiPath(pathArg.c_str(), path, sizeof(path))) { sendApiErr(400, F("invalid_path")); return; }
+  if (isProtectedPath(path)) { sendApiErr(403, F("protected")); return; }
+  if (!reinitSdBus("api_mkdir")) { sendApiErr(500, F("internal_error")); return; }
   SdErr r = sdMkdir(path);
   if (r == SD_OK) sendApiOk(); else sendSdErr(r);
 }
@@ -356,13 +366,13 @@ static void handleApiMkdir() {
 // POST /api/delete?path=
 static void handleApiDelete() {
   ESP8266WebServer &srv = wifiManagerServer();
-  if (apiBusy()) { sendApiErr(409, "busy"); return; }
+  if (apiBusy()) { sendApiErr(409, F("busy")); return; }
   String pathArg = srv.arg("path");
-  if (pathArg.length() == 0) { sendApiErr(400, "invalid_path"); return; }
+  if (pathArg.length() == 0) { sendApiErr(400, F("invalid_path")); return; }
   char path[300];
-  if (!normalizeApiPath(pathArg.c_str(), path, sizeof(path))) { sendApiErr(400, "invalid_path"); return; }
-  if (isProtectedPath(path)) { sendApiErr(403, "protected"); return; }   // .uploading 可删（不在保护列表）
-  if (!reinitSdBus("api_delete")) { sendApiErr(500, "internal_error"); return; }
+  if (!normalizeApiPath(pathArg.c_str(), path, sizeof(path))) { sendApiErr(400, F("invalid_path")); return; }
+  if (isProtectedPath(path)) { sendApiErr(403, F("protected")); return; }   // .uploading 可删（不在保护列表）
+  if (!reinitSdBus("api_delete")) { sendApiErr(500, F("internal_error")); return; }
   SdErr r = sdDelete(path);
   if (r == SD_OK) sendApiOk(); else sendSdErr(r);
 }
@@ -370,15 +380,15 @@ static void handleApiDelete() {
 // POST /api/rename?path=&name=  （同目录改名）
 static void handleApiRename() {
   ESP8266WebServer &srv = wifiManagerServer();
-  if (apiBusy()) { sendApiErr(409, "busy"); return; }
+  if (apiBusy()) { sendApiErr(409, F("busy")); return; }
   String pathArg = srv.arg("path");
   String nameArg = srv.arg("name");
-  if (pathArg.length() == 0 || nameArg.length() == 0) { sendApiErr(400, "invalid_path"); return; }
+  if (pathArg.length() == 0 || nameArg.length() == 0) { sendApiErr(400, F("invalid_path")); return; }
   char path[300];
-  if (!normalizeApiPath(pathArg.c_str(), path, sizeof(path))) { sendApiErr(400, "invalid_path"); return; }
-  if (isProtectedPath(path)) { sendApiErr(403, "protected"); return; }
+  if (!normalizeApiPath(pathArg.c_str(), path, sizeof(path))) { sendApiErr(400, F("invalid_path")); return; }
+  if (isProtectedPath(path)) { sendApiErr(403, F("protected")); return; }
   char name[256];
-  if (!sanitizeUploadName(nameArg.c_str(), name, sizeof(name))) { sendApiErr(400, "invalid_name"); return; }
+  if (!sanitizeUploadName(nameArg.c_str(), name, sizeof(name))) { sendApiErr(400, F("invalid_name")); return; }
   // 目标扩展名受保护（防改名生成索引类文件）→ 403
   char target[560];
   const char *slash = strrchr(path, '/');
@@ -387,8 +397,8 @@ static void handleApiRename() {
   } else {
     snprintf(target, sizeof(target), "/%s", name);
   }
-  if (isProtectedPath(target)) { sendApiErr(403, "protected"); return; }
-  if (!reinitSdBus("api_rename")) { sendApiErr(500, "internal_error"); return; }
+  if (isProtectedPath(target)) { sendApiErr(403, F("protected")); return; }
+  if (!reinitSdBus("api_rename")) { sendApiErr(500, F("internal_error")); return; }
   SdErr r = sdRename(path, name);
   if (r == SD_OK) sendApiOk(); else sendSdErr(r);
 }
@@ -396,26 +406,26 @@ static void handleApiRename() {
 // POST /api/move?path=&dest=  （跨目录; 防环）
 static void handleApiMove() {
   ESP8266WebServer &srv = wifiManagerServer();
-  if (apiBusy()) { sendApiErr(409, "busy"); return; }
+  if (apiBusy()) { sendApiErr(409, F("busy")); return; }
   String pathArg = srv.arg("path");
   String destArg = srv.arg("dest");
-  if (pathArg.length() == 0 || destArg.length() == 0) { sendApiErr(400, "invalid_path"); return; }
+  if (pathArg.length() == 0 || destArg.length() == 0) { sendApiErr(400, F("invalid_path")); return; }
   char path[300], dest[300];
   if (!normalizeApiPath(pathArg.c_str(), path, sizeof(path)) ||
       !normalizeApiPath(destArg.c_str(), dest, sizeof(dest))) {
-    sendApiErr(400, "invalid_path");
+    sendApiErr(400, F("invalid_path"));
     return;
   }
-  if (isProtectedPath(path)) { sendApiErr(403, "protected"); return; }
-  if (isProtectedPath(dest)) { sendApiErr(403, "protected"); return; }
-  if (!sdMoveDestAllowed(path, dest)) { sendApiErr(409, "invalid_move"); return; }
+  if (isProtectedPath(path)) { sendApiErr(403, F("protected")); return; }
+  if (isProtectedPath(dest)) { sendApiErr(403, F("protected")); return; }
+  if (!sdMoveDestAllowed(path, dest)) { sendApiErr(409, F("invalid_move")); return; }
   // 目标文件名扩展名受保护 → 403
   const char *base = strrchr(path, '/');
   base = base ? base + 1 : path;
   char target[560];
   snprintf(target, sizeof(target), "%s/%s", dest, base);
-  if (isProtectedPath(target)) { sendApiErr(403, "protected"); return; }
-  if (!reinitSdBus("api_move")) { sendApiErr(500, "internal_error"); return; }
+  if (isProtectedPath(target)) { sendApiErr(403, F("protected")); return; }
+  if (!reinitSdBus("api_move")) { sendApiErr(500, F("internal_error")); return; }
   SdErr r = sdMove(path, dest);
   if (r == SD_OK) sendApiOk(); else sendSdErr(r);
 }
@@ -469,18 +479,19 @@ static int parseRange(const String &h, uint64_t size, uint64_t *start, uint64_t 
   return 1;
 }
 
-// GET /api/download?path=  （支持 Range, 4KB 块流式 + 喂狗 + 断连检测）
+// GET /api/download?path=  （支持 Range; 头缓冲请求级 heap + 自适应 512/256/128 + avail 发送循环,
+// 已对齐 /fs/file 已验证模型, 2026-09 栈炸弹修复——见函数内注释）
 static void handleApiDownload() {
   ESP8266WebServer &srv = wifiManagerServer();
   String pathArg = srv.arg("path");
-  if (pathArg.length() == 0) { sendApiErr(400, "invalid_path"); return; }
+  if (pathArg.length() == 0) { sendApiErr(400, F("invalid_path")); return; }
   char path[300];
-  if (!normalizeApiPath(pathArg.c_str(), path, sizeof(path))) { sendApiErr(400, "invalid_path"); return; }
-  if (isUploadingTemp(path)) { sendApiErr(403, "upload_in_progress"); return; }  // .uploading 不可下载
-  if (!reinitSdBus("api_download")) { sendApiErr(500, "internal_error"); return; }
+  if (!normalizeApiPath(pathArg.c_str(), path, sizeof(path))) { sendApiErr(400, F("invalid_path")); return; }
+  if (isUploadingTemp(path)) { sendApiErr(403, F("upload_in_progress")); return; }  // .uploading 不可下载
+  if (!reinitSdBus("api_download")) { sendApiErr(500, F("internal_error")); return; }
   File f = SD.open(path, FILE_READ);
-  if (!f) { sendApiErr(404, "not_found"); return; }
-  if (f.isDirectory()) { f.close(); sendApiErr(400, "invalid_path"); return; }
+  if (!f) { sendApiErr(404, F("not_found")); return; }
+  if (f.isDirectory()) { f.close(); sendApiErr(400, F("invalid_path")); return; }
   uint64_t size = (uint64_t)f.size();
   uint64_t start = 0, end = (size > 0 ? size - 1 : 0);
   int range = (size > 0 && srv.hasHeader("Range")) ? parseRange(srv.header("Range"), size, &start, &end) : -1;
@@ -489,7 +500,7 @@ static void handleApiDownload() {
     char cr[48];
     snprintf(cr, sizeof(cr), "bytes */%llu", (unsigned long long)size);
     srv.sendHeader("Content-Range", cr);
-    sendApiErr(416, "invalid_range");
+    sendApiErr(416, F("invalid_range"));
     return;
   }
   uint64_t len = (range == 1) ? (end - start + 1) : size;
@@ -497,44 +508,86 @@ static void handleApiDownload() {
   // filename="<ascii>" 是老浏览器兜底。此前 filename 硬编码 "download" 且无扩展名,
   // 浏览器优先用 filename → 下载文件恒叫 "download"。修复: filename 用原始文件名
   // (ASCII 安全), filename* 用 RFC3986 编码 (中文/空格正确)。
+  // ⚠️ 栈炸弹修复(用户批准, 2026-09): plain[256]+enc[300]+disp[700] 原栈上 ≈1.2KB → 4KB 循环栈
+  //   HTTP 深链栈溢出(与 /api/stat 同签名复位)。改请求级 heap, sendHeader 后立即 free(主体传输
+  //   阶段不存在)。头未发出前 malloc 失败可直接 500。
   const char *bname = baseNameOfLocal(path);
-  char plain[256];
-  snprintf(plain, sizeof(plain), "%s", bname);
-  char enc[300];
-  percentEncode(bname, enc, sizeof(enc));
-  char disp[700];
-  snprintf(disp, sizeof(disp), "attachment; filename=\"%s\"; filename*=UTF-8''%s", plain, enc);
+  char *hdr = (char *)malloc(256 + 300 + 700);
+  if (!hdr) {
+    f.close();
+    sendApiErr(500, F("internal_error"));
+    return;
+  }
+  char *plain = hdr, *enc = hdr + 256, *disp = hdr + 256 + 300;
+  snprintf(plain, 256, "%s", bname);
+  percentEncode(bname, enc, 300);
+  snprintf(disp, 700, "attachment; filename=\"%s\"; filename*=UTF-8''%s", plain, enc);
   srv.sendHeader("Accept-Ranges", "bytes");
   srv.sendHeader("Content-Disposition", disp);
+  free(hdr);   // 头已发出, 立即释放
   srv.setContentLength((size_t)len);
   if (range == 1) {
     char cr[80];
     snprintf(cr, sizeof(cr), "bytes %llu-%llu/%llu", (unsigned long long)start,
              (unsigned long long)end, (unsigned long long)size);
     srv.sendHeader("Content-Range", cr);
-    srv.send(206, "application/octet-stream", "");
+    srv.send_P(206, PSTR("application/octet-stream"), PSTR(""));
   } else {
-    srv.send(200, "application/octet-stream", "");
+    srv.send_P(200, PSTR("application/octet-stream"), PSTR(""));
   }
   gTransferActive = true;
   auditHeap("download_start");   // 审计: 下载开始（缓冲分配后）
   if (!f.seek(start)) { gTransferActive = false; f.close(); return; }
-  // 2KB 动态缓冲: 配网会话堆 ~4.4KB（静态 RAM 86% + AP 结构）, 4KB malloc 会失败;
-  // 吞吐由网络/TCP 决定(~0.2MB/s, S4.5 基准), 缓冲大小无影响
-  uint8_t *buf = (uint8_t *)malloc(2048);
-  if (!buf) { gTransferActive = false; f.close(); return; }
-  srv.client().setNoDelay(true);   // 关 Nagle: 流式吞吐关键（实测 0.23→~1MB/s）
+  // ---- 传输: 对齐 /fs/file 已验证发送模型(用户批准 2026-09) ----
+  // 自适应缓冲(512/256/128, 与 /fs/file 同档): 小缓冲让位给 lwIP TX pbuf; 网络/AP 才是吞吐瓶颈。
+  // 发送循环: availableForWrite()==0(缓冲满等 ACK) → yield+wdtFeed 让 TCP 栈推进, 不设轮数上限;
+  // connected() 检测客户端真正断开; write 永不阻塞(避免阻塞期不喂狗 → WDT)。
+  static const size_t kBufCandidates[] = {512, 256, 128};
+  size_t bufSize = 0;
+  uint8_t *buf = NULL;
+  for (size_t cand : kBufCandidates) {
+    buf = (uint8_t *)malloc(cand);
+    if (buf) { bufSize = cand; break; }
+  }
+  if (!buf) {
+    Serial.printf_P(PSTR("APIDL_MALLOC_FAIL heap=%u maxblk=%u size=%llu\n"),
+                    (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxFreeBlockSize(),
+                    (unsigned long long)len);
+    gTransferActive = false;
+    f.close();
+    return;   // 头已发出, 连接截断由客户端侧报错
+  }
+  srv.client().setNoDelay(true);   // 关 Nagle: 流式吞吐关键
   uint64_t remaining = len;
   while (remaining > 0) {
-    size_t want = (size_t)(remaining > 2048 ? 2048 : remaining);
+    if (!srv.client().connected()) {   // 客户端断开: 中止
+      Serial.printf_P(PSTR("APIDL_DISCONNECTED sent=%llu remain=%llu\n"),
+                      (unsigned long long)(len - remaining), (unsigned long long)remaining);
+      break;
+    }
+    size_t avail = srv.client().availableForWrite();
+    if (avail == 0) {
+      yield();       // 缓冲满等 ACK: 让 TCP 栈处理 ACK 释放缓冲
+      ESP.wdtFeed();
+      continue;
+    }
+    size_t want = (size_t)(remaining > bufSize ? bufSize : remaining);
+    if (want > avail) want = avail;
     int n = f.read(buf, want);
-    if (n <= 0) break;
-    if (srv.client().write(buf, (size_t)n) != (size_t)n) break;   // 断连
+    if (n <= 0) {
+      Serial.printf_P(PSTR("APIDL_READ_FAIL at=%llu\n"), (unsigned long long)(len - remaining));
+      break;
+    }
+    if (srv.client().write(buf, (size_t)n) != (size_t)n) {
+      Serial.printf_P(PSTR("APIDL_WRITE_FAIL at=%llu\n"), (unsigned long long)(len - remaining));
+      break;
+    }
     remaining -= (uint64_t)n;
     ESP.wdtFeed();
-    // 注: 不加 yield()——实测 yield 把下载从 0.23 拖到 0.11MB/s;
-    // TCP 吞吐 ~0.2MB/s 是栈/链路瓶颈(见 S4.5 基准), 非 SD 非缓冲
   }
+  Serial.printf_P(PSTR("APIDL_END sent=%llu len=%llu heap=%u\n"),
+                  (unsigned long long)(len - remaining), (unsigned long long)len,
+                  (unsigned)ESP.getFreeHeap());
   free(buf);
   gTransferActive = false;
   f.close();
@@ -649,7 +702,7 @@ static void handleApiUploadCb() {
     gUp->active = true;
     gTransferActive = true;
     auditHeap("upload_start");   // 审计: 上传初始化（gUp + gUpBuf 分配后）
-    Serial.printf("UP_START %s expect=%llu skip=%llu\n", gUp->tmpPath,
+    Serial.printf_P(PSTR("UP_START %s expect=%llu skip=%llu\n"), gUp->tmpPath,
                   (unsigned long long)gUp->expected, (unsigned long long)gUp->skipRemaining);
   } else if (upload.status == UPLOAD_FILE_WRITE) {
     if (!gUp->active || gUp->err != UP_NONE) return;
@@ -690,7 +743,7 @@ static void handleApiUploadCb() {
     // 校验通过 → 内部 rename 提交（不经过普通 rename API）
     if (!reinitSdBus("api_upcommit")) { gUp->err = UP_IO; return; }
     if (SD.rename(gUp->tmpPath, gUp->finalPath)) {
-      Serial.printf("UP_DONE %s size=%llu\n", gUp->finalPath, (unsigned long long)gUp->received);
+      Serial.printf_P(PSTR("UP_DONE %s size=%llu\n"), gUp->finalPath, (unsigned long long)gUp->received);
       gUp->done = true;   // 成功标志（active 会先被清理）
     } else {
       gUp->err = UP_IO;   // rename 失败 → .uploading 保留
@@ -701,8 +754,8 @@ static void handleApiUploadCb() {
 // POST /api/upload 完成回调（发送最终响应）
 static void handleApiUploadDone() {
   ESP8266WebServer &srv = wifiManagerServer();
-  if (gUpAllocFail) { upReset(); sendApiErr(507, "insufficient_storage"); return; }
-  if (!gUp) { sendApiErr(400, "invalid_path"); return; }   // 未开始
+  if (gUpAllocFail) { upReset(); sendApiErr(507, F("insufficient_storage")); return; }
+  if (!gUp) { sendApiErr(400, F("invalid_path")); return; }   // 未开始
   if (gUp->done) {
     uint64_t size = gUp->received;
     upReset();
@@ -714,8 +767,8 @@ static void handleApiUploadDone() {
   UpErr err = gUp->err;
   upReset();
   switch (err) {
-    case UP_PROTECTED:      sendApiErr(403, "protected"); break;
-    case UP_EXISTS:         sendApiErr(409, "exists"); break;
+    case UP_PROTECTED:      sendApiErr(403, F("protected")); break;
+    case UP_EXISTS:         sendApiErr(409, F("exists")); break;
     case UP_RESUME_MISMATCH: {
       char tmp[180];
       snprintf(tmp, sizeof(tmp), "{\"ok\":false,\"error\":\"resume_mismatch\",\"serverOffset\":%llu}",
@@ -723,9 +776,9 @@ static void handleApiUploadDone() {
       srv.send(409, "application/json; charset=utf-8", tmp);
       break;
     }
-    case UP_SIZE_MISMATCH:  sendApiErr(400, "upload_size_mismatch"); break;
-    case UP_IO:             sendApiErr(507, "insufficient_storage"); break;
-    default:                sendApiErr(400, "invalid_path"); break;
+    case UP_SIZE_MISMATCH:  sendApiErr(400, F("upload_size_mismatch")); break;
+    case UP_IO:             sendApiErr(507, F("insufficient_storage")); break;
+    default:                sendApiErr(400, F("invalid_path")); break;
   }
 }
 
@@ -750,7 +803,7 @@ static void handleApiDispatch() {
   if (uri == "/api/delete" && m == HTTP_POST) { handleApiDelete(); return; }
   if (uri == "/api/rename" && m == HTTP_POST) { handleApiRename(); return; }
   if (uri == "/api/move" && m == HTTP_POST) { handleApiMove(); return; }
-  sendApiErr(404, "not_found");
+  sendApiErr(404, F("not_found"));
 }
 
 // ---- LittleFS Web UI 静态服务（懒挂载: 首次 /fm 请求才 LittleFS.begin, 省会话常驻堆）----
@@ -775,7 +828,7 @@ bool fileApiTryDispatch() {
   // 诊断: 记录所有到达 onNotFound 的请求（上传卡死排查: 确认 POST /fs/edit 是否漏到 onNotFound）
   {
     HTTPMethod m = srv.method();
-    Serial.printf("DISPATCH uri=%s method=%d\n", uri.c_str(), (int)m);
+    Serial.printf_P(PSTR("DISPATCH uri=%s method=%d\n"), uri.c_str(), (int)m);
   }
   if (uri.startsWith("/api/")) {
     handleApiDispatch();
@@ -803,7 +856,7 @@ static void handleFmStatic(const String &uri) {
   if (!mounted) {
     auditHeap("fm_before_mount");   // 审计: /fm 首请求挂载前
     if (!fileApiEnsureLfsMount()) {
-      srv.send(500, "text/plain; charset=utf-8", "LittleFS mount failed");
+      srv.send_P(500, PSTR("text/plain; charset=utf-8"), PSTR("LittleFS mount failed"));
       return;
     }
     mounted = true;
@@ -825,7 +878,7 @@ static void handleFmStatic(const String &uri) {
   else if (fsPath.endsWith(".png")) mime = "image/png";
   File f = LittleFS.open(fsPath, "r");
   if (!f) {
-    srv.send(404, "text/plain; charset=utf-8", "Not Found");
+    srv.send_P(404, PSTR("text/plain; charset=utf-8"), PSTR("Not Found"));
     return;
   }
   size_t sz = (size_t)f.size();

@@ -268,6 +268,17 @@ int drawTextUTF8(int x, int y, const char *s, int maxW, bool black) {
     return x + u8g2Fonts.getUTF8Width(clipped);
 }
 
+// 纯文案 flash 重载: PSTR/F 字面量 → 短 RAM 副本 → RAM 版 drawTextUTF8。
+// ⚠️ ESP8266 flash 区禁逐字节数据读, 搬运交给 snprintf_P (内部 4B 对齐安全读);
+// 仅适用无 '%' 的纯文案 (带格式走 snprintf_P + RAM 实参)。副本 ≤64B 栈, 与
+// RAM 版自身 clipped[192] 相比增量很小, 不改变 4KB loop 栈节奏。
+int drawTextUTF8(int x, int y, const __FlashStringHelper *s, int maxW, bool black) {
+    if (!textRendererReady) return x;
+    char tmp[64];
+    snprintf_P(tmp, sizeof(tmp), reinterpret_cast<PGM_P>(s));
+    return drawTextUTF8(x, y, tmp, maxW, black);
+}
+
 // ---------- 数码管风格 7 段显示 ----------
 void drawSevenSegDigit(int x, int y, int w, int h, int t, char digit, bool black) {
     bool a, b, c, d, e, f, g;
@@ -795,6 +806,7 @@ void beginResumeIndexBuildFromPartial();
 void indexTaskStep();
 void enterChapterList();
 void leaveReaderToBrowser();
+bool readTxtPage(uint32_t offset);   // 读一页正文; false=失败(txtLines空, 调用方勿渲染白屏)
 void nextTxtPage();
 void previousTxtPage();
 void renderReaderMenu();
@@ -1146,44 +1158,98 @@ void renderBootStage(const char *line1, const char *line2) {
     refresh(false);
 }
 
-// 上传状态页: 上传中 / 上传完毕 / 上传失败（全局刷, 不阻塞上传回调; 由 file_api 状态回调触发）
-// ★ 用户要求: 每次都是局部刷新——上传"完毕/失败"先局刷恢复配网页让"上传中"文字消失,
-//   再局刷显示新提示(出现), 全程不触发全刷(全刷阻塞 1s+)。
+// 上传状态通知: 上传中 / 上传完毕 / 上传失败（不弹窗不整屏切换——
+// 复用配网页底行 gWebNotifyLine, 与 Web 设置"修改成功"通知同款显示: 局刷底行, 配网页保持可见）。
+// 由 file_api 上传状态回调触发。
+extern char gWebNotifyLine[160];   // 定义在 renderNetworkPage 前（配网页底行消息缓冲）
 void renderUploadStatus(int phase, const char *path) {
     if (!textRendererReady) return;
-    const char *title = NULL, *sub = NULL;
-    if (phase == OFS_UP_PHASE_UPLOADING) { title = "上传中"; sub = path; }
-    else if (phase == OFS_UP_PHASE_DONE)  { title = "上传完毕"; sub = "文件已保存到 SD 卡"; }
-    else if (phase == OFS_UP_PHASE_FAIL)  { title = "上传失败"; sub = "请检查空间/文件名"; }
+    char titleBuf[24];
+    if (phase == OFS_UP_PHASE_UPLOADING) snprintf_P(titleBuf, sizeof(titleBuf), PSTR("上传中"));
+    else if (phase == OFS_UP_PHASE_DONE)  snprintf_P(titleBuf, sizeof(titleBuf), PSTR("上传完毕"));
+    else if (phase == OFS_UP_PHASE_FAIL)  snprintf_P(titleBuf, sizeof(titleBuf), PSTR("上传失败"));
     else return;   // IDLE 不渲染
-    if (!title) return;
-
-    // "完毕/失败": 进入新提示前, 先局刷恢复配网页(清掉"上传中"提示 → 文字消失),
-    // 与随后局刷显示新提示(出现)形成"消失→出现", 避免从"上传中"直接变"上传完毕"的残影。
-    if (phase == OFS_UP_PHASE_DONE || phase == OFS_UP_PHASE_FAIL) {
-        renderNetworkPage(false);   // 恢复配网页(局刷), 提示框消失
+    const char *title = titleBuf;
+    // 底行消息 = "上传中: <basename>"（path 截到末尾段, 防超宽）
+    const char *b = path;
+    if (b) for (const char *p = path; *p; p++) if (*p == '/') b = p + 1;
+    gWebNotifyLine[0] = '\0';
+    if (title) snprintf_P(gWebNotifyLine, sizeof(gWebNotifyLine), PSTR("%s"), title);
+    if (phase == OFS_UP_PHASE_UPLOADING) {
+        char nb[96];
+        snprintf_P(nb, sizeof(nb), PSTR("%s"), b ? b : "");
+        // 超长文件名截短（防底行溢出）
+        while (utf8Width(nb) > 250 && strlen(nb) > 2) nb[strlen(nb) - 1] = '\0';
+        size_t a = strlen(gWebNotifyLine);
+        snprintf_P(gWebNotifyLine + a, sizeof(gWebNotifyLine) - a, PSTR(":%s"), nb);
+    } else if (phase == OFS_UP_PHASE_DONE) {
+        snprintf_P(gWebNotifyLine + strlen(gWebNotifyLine), sizeof(gWebNotifyLine) - strlen(gWebNotifyLine), PSTR(":文件已保存"));
+    } else if (phase == OFS_UP_PHASE_FAIL) {
+        snprintf_P(gWebNotifyLine + strlen(gWebNotifyLine), sizeof(gWebNotifyLine) - strlen(gWebNotifyLine), PSTR(":请检查空间/文件名"));
     }
+    Serial.printf_P(PSTR("UP_NOTIFY_LINE %s\n"), gWebNotifyLine);
+    // 局刷配网页底行（不上传/配网之外界面则仅更新缓冲, 不刷新屏幕）
+    if (appMode == APP_NETWORK) renderNetworkPage(false);
+}
 
-    // 居中提示框（局刷）
-    const int boxW = 200, boxH = 74;
-    const int x = (SCR_W - boxW) / 2, y = (SCR_H - boxH) / 2;
-    fillRect(x, y, boxW, boxH, false);
-    drawRect(x, y, boxW, boxH, true);
-    int wt = utf8Width(title);
-    drawTextUTF8(x + (boxW - wt) / 2, y + 12, title, boxW - 12, true);
-    if (sub && sub[0]) {
-        // 副标题截短到框内
-        char buf[64];
-        size_t n = strlen(sub);
-        // 只显示 basename（末尾路径段）
-        const char *b = sub;
-        for (const char *p = sub; *p; p++) if (*p == '/') b = p + 1;
-        snprintf(buf, sizeof(buf), "%s", b);
-        int ws = utf8Width(buf);
-        while (ws > boxW - 16 && strlen(buf) > 1) { buf[strlen(buf) - 1] = '\0'; ws = utf8Width(buf); }
-        drawTextUTF8(x + (boxW - ws) / 2, y + 42, buf, boxW - 12, true);
+// 下载状态通知: 下载中 / 下载完毕 / 下载失败（同上传, 配网页底行 gWebNotifyLine 显示, 不弹窗）
+// 由 file_api 下载 handler 起止回调触发。
+void renderDownloadStatus(int phase, const char *path) {
+    if (!textRendererReady) return;
+    char titleBuf[24];
+    if (phase == OFS_DL_PHASE_START) snprintf_P(titleBuf, sizeof(titleBuf), PSTR("下载中"));
+    else if (phase == OFS_DL_PHASE_DONE) snprintf_P(titleBuf, sizeof(titleBuf), PSTR("下载完毕"));
+    else if (phase == OFS_DL_PHASE_FAIL) snprintf_P(titleBuf, sizeof(titleBuf), PSTR("下载失败"));
+    else return;
+    const char *title = titleBuf;
+    const char *b = path;
+    if (b) for (const char *p = path; *p; p++) if (*p == '/') b = p + 1;
+    gWebNotifyLine[0] = '\0';
+    if (title) snprintf_P(gWebNotifyLine, sizeof(gWebNotifyLine), PSTR("%s"), title);
+    if (phase == OFS_DL_PHASE_START) {
+        char nb[96];
+        snprintf_P(nb, sizeof(nb), PSTR("%s"), b ? b : "");
+        while (utf8Width(nb) > 250 && strlen(nb) > 2) nb[strlen(nb) - 1] = '\0';
+        size_t a = strlen(gWebNotifyLine);
+        snprintf_P(gWebNotifyLine + a, sizeof(gWebNotifyLine) - a, PSTR(":%s"), nb);
+    } else if (phase == OFS_DL_PHASE_DONE) {
+        snprintf_P(gWebNotifyLine + strlen(gWebNotifyLine), sizeof(gWebNotifyLine) - strlen(gWebNotifyLine), PSTR(":已下载"));
+    } else if (phase == OFS_DL_PHASE_FAIL) {
+        snprintf_P(gWebNotifyLine + strlen(gWebNotifyLine), sizeof(gWebNotifyLine) - strlen(gWebNotifyLine), PSTR(":请重试"));
     }
-    refresh(false);
+    Serial.printf_P(PSTR("DL_NOTIFY_LINE %s\n"), gWebNotifyLine);
+    if (appMode == APP_NETWORK) renderNetworkPage(false);
+}
+
+// 通用文件管理操作通知（新建文件/夹、删除、重命名/移动; 与上传/下载同款: 配网页底行局刷）
+// 由 file_api_fs 的 ofsOpReport 回调触发。
+void renderFileOpStatus(int phase, const char *msg) {
+    if (!textRendererReady) return;
+    const char *prefix = NULL;
+    if (phase == OFS_OP_PHASE_START) prefix = "操作中";
+    else if (phase == OFS_OP_PHASE_DONE) prefix = "操作成功";
+    else if (phase == OFS_OP_PHASE_FAIL) prefix = "操作失败";
+    else return;
+    // ⚠️ 零栈缓冲(handler 深链剩余栈≈0): 直接写全局 gWebNotifyLine; UTF-8 尾字节安全截断
+    gWebNotifyLine[0] = '\0';
+    snprintf_P(gWebNotifyLine, sizeof(gWebNotifyLine), PSTR("%s"), prefix);
+    if (msg && msg[0]) {
+        size_t a = strlen(gWebNotifyLine);
+        size_t cap = sizeof(gWebNotifyLine) - a - 2;
+        if (cap > 2) {
+            gWebNotifyLine[a++] = ':';
+            size_t n = strlen(msg);
+            if (n > cap - 1) n = cap - 1;
+            memcpy(gWebNotifyLine + a, msg, n);
+            size_t end = a + n;
+            while (end > a && (((unsigned char)gWebNotifyLine[end - 1]) & 0xC0) == 0x80) end--;
+            if (end > a && (((unsigned char)gWebNotifyLine[end - 1]) & 0xC0) == 0xC0) end--;
+            gWebNotifyLine[end] = '\0';
+        }
+    }
+    Serial.printf_P(PSTR("OP_NOTIFY_LINE %s\n"), gWebNotifyLine);
+    // ⚠️ 不在此渲染 EPD: PUT/DELETE handler 深链实测 stack≈0, 内部渲染→溢出/忙等→Soft WDT 复位。
+    // 渲染统一由 wifiManagerLoop 在 handleClient 后(浅栈)检测 ofsOpGetPhase 变化执行 renderNetworkPage。
 }
 
 // 配网页底行常驻"Web 修改成功"消息（wifi_manager 保存端点回调写入; 左对齐可右溢出屏外自然裁剪,
@@ -1192,22 +1258,39 @@ char gWebNotifyLine[160] = "";
 
 void renderNetworkPage(bool full) {
     fillRect(0, 0, SCR_W, SCR_H, false);
-    drawTextUTF8(4, 2, "网络配网", 120, true);
-    drawTextUTF8(4, 22, wifiManagerStateText(), 288, true);
     char line[96];
-    snprintf(line, sizeof(line), "热点: %s", wifiManagerApSsid());
-    drawTextUTF8(4, 42, line, 288, true);
-    drawTextUTF8(4, 62, "密码: 333333333", 288, true);
-    drawTextUTF8(4, 82, "地址: 192.168.4.1", 288, true);
+    if (wifiManagerIsStaOnly()) {
+        // 已连 WiFi(局域网管理): 显示 IP + 局域网访问地址(无热点)
+        drawTextUTF8(4, 2, F("网络配网"), 120, true);
+        drawTextUTF8(4, 22, F("WiFi 已连接(局域网管理)"), 288, true);
+        snprintf_P(line, sizeof(line), PSTR("IP: %s"), wifiManagerStaIp());
+        drawTextUTF8(4, 42, line, 288, true);
+        snprintf_P(line, sizeof(line), PSTR("管理: http://%s"), wifiManagerStaIp());
+        drawTextUTF8(4, 62, line, 288, true);
+        drawTextUTF8(4, 82, F("同一WiFi下手机/电脑访问"), 288, true);
+    } else if (wifiManagerIsTryingSta()) {
+        // 正在试连 WiFi(尚未开热点)
+        drawTextUTF8(4, 2, F("网络配网"), 120, true);
+        drawTextUTF8(4, 22, F("正在连接 WiFi..."), 288, true);
+        drawTextUTF8(4, 42, F("成功: 显示IP, 局域网管理"), 288, true);
+        drawTextUTF8(4, 62, F("失败: 自动开启热点"), 288, true);
+    } else {
+        drawTextUTF8(4, 2, F("网络配网"), 120, true);
+        drawTextUTF8(4, 22, wifiManagerStateText(), 288, true);
+        snprintf_P(line, sizeof(line), PSTR("热点: %s"), wifiManagerApSsid());
+        drawTextUTF8(4, 42, line, 288, true);
+        drawTextUTF8(4, 62, F("密码: 333333333"), 288, true);
+        drawTextUTF8(4, 82, F("地址: 192.168.4.1"), 288, true);
+    }
     const char *staIp = wifiManagerStaIp();
     if (gWebNotifyLine[0]) {
         // 常驻修改消息: 左对齐, 超宽向右溢出屏幕(画布边界自然裁剪), 不换行
         drawTextUTF8(4, 102, gWebNotifyLine, 2000, true);
-    } else if (staIp && staIp[0]) {
-        snprintf(line, sizeof(line), "STA: %s", staIp);
+    } else if (!wifiManagerIsStaOnly() && staIp && staIp[0]) {
+        snprintf_P(line, sizeof(line), PSTR("STA: %s"), staIp);
         drawTextUTF8(4, 102, line, 288, true);
-    } else {
-        drawTextUTF8(4, 102, "中键长按退出", 288, true);
+    } else if (!wifiManagerIsStaOnly() && !wifiManagerIsTryingSta()) {
+        drawTextUTF8(4, 102, F("中键长按退出"), 288, true);
     }
     refresh(full);
 }
@@ -1215,13 +1298,16 @@ void renderNetworkPage(bool full) {
 // Web 设置修改成功提示（wifi_manager 回调）: 拼"修改成功：选项=值"写入底行常驻消息并局刷配网页
 void webSettingsNotify(const char *line1, const char *line2) {
     gWebNotifyLine[0] = '\0';
-    if (line1 && line1[0]) snprintf(gWebNotifyLine, sizeof(gWebNotifyLine), "%s", line1);
+    if (line1 && line1[0]) snprintf_P(gWebNotifyLine, sizeof(gWebNotifyLine), PSTR("%s"), line1);
     if (line2 && line2[0]) {
         size_t a = strlen(gWebNotifyLine);
-        snprintf(gWebNotifyLine + a, sizeof(gWebNotifyLine) - a, "%s%s",
-                 a ? "：" : "", line2);
+        if (a > 0) {
+            snprintf_P(gWebNotifyLine + a, sizeof(gWebNotifyLine) - a, PSTR("："));
+            a = strlen(gWebNotifyLine);
+        }
+        snprintf_P(gWebNotifyLine + a, sizeof(gWebNotifyLine) - a, PSTR("%s"), line2);
     }
-    Serial.printf("WEB_NOTIFY_LINE %s\n", gWebNotifyLine);
+    Serial.printf_P(PSTR("WEB_NOTIFY_LINE %s\n"), gWebNotifyLine);
     if (textRendererReady && appMode == APP_NETWORK) {
         renderNetworkPage(false);   // 局刷底行(消息常驻, 下次修改才更新)
     }
@@ -3151,7 +3237,9 @@ void normalizeReaderLines(String *displayLines) {
     }
 }
 
-void readTxtPage(uint32_t offset) {
+// 读一页正文到 txtLines。返回是否实际读到内容 (读到内容/页首推进 = true)。
+// 失败(TXT_READ_FAIL 或 全空)返回 false, 由外层 readTxtPage 做总线自愈重试。
+static bool readTxtPageCore(uint32_t offset) {
     traceFmt("PAGE_READ_BEGIN page=%lu offset=%lu", (unsigned long)txtPage, (unsigned long)offset);
     txtPageStartsParagraph = false;
     if (offset == 0) txtPageStartsParagraph = true;
@@ -3226,6 +3314,30 @@ void readTxtPage(uint32_t offset) {
              (unsigned long)txtPage, (unsigned long)txtFile.position(),
              txtLines[0].length(), txtLines[1].length(), txtLines[2].length(), txtLines[3].length(),
              txtLines[4].length(), txtLines[5].length(), txtLines[6].length(), txtLines[7].length());
+    // 判定是否实际读到内容: 位置推进 且 至少一行有字 (TXT_READ_FAIL/空读 → false)。
+    uint32_t pos = txtFile.position();
+    bool content = pos > offset;
+    if (content) {
+        content = false;
+        for (uint8_t i = 0; i < txtLineCount(); i++)
+            if (txtLines[i].length()) { content = true; break; }
+    }
+    return content;
+}
+
+// 翻页读页: 优先尝试; 若失败(SD 总线空闲后损坏/电量采样竞争等, 偶发) →
+// 自愈一次: 恢复 SD 总线 + 重开 txtFile + 重读。仍失败留空行由调用方拦截(不渲染白屏)。
+// 返回 true = 本页内容已就绪 (txtLines 有效); false = 读取失败 (txtLines 空, 调用方不得渲染)。
+bool readTxtPage(uint32_t offset) {
+    if (readTxtPageCore(offset)) return true;
+    traceFmtLevel('W', "PAGE_READ_RETRY page=%lu offset=%lu", (unsigned long)txtPage, (unsigned long)offset);
+    if (reinitSdBus("page_retry")) {
+        if (txtFile) txtFile.close();
+        txtFile = SD.open(txtPath.c_str());
+        if (txtFile && readTxtPageCore(offset)) return true;
+    }
+    traceFmtLevel('E', "PAGE_READ_FAIL page=%lu offset=%lu", (unsigned long)txtPage, (unsigned long)offset);
+    return false;
 }
 
 // 数字键盘单个键 (选中项下方画向下小三角光标)
@@ -3349,6 +3461,17 @@ void drawTxtPageLines(String *displayLines) {
 void renderTxtPage(bool full) {
     String displayLines[18];
     normalizeReaderLines(displayLines);
+    // 空页守卫(白屏最终兜底): 读页失败(TXT_READ_FAIL/全空)时 displayLines 全空,
+    // 若直接 drawTxtPageLines 会先全白清屏 → 白屏。拒绝渲染, 保持当前面板画面。
+    {
+        bool any = false;
+        for (uint8_t i = 0; i < txtLineCount(); i++)
+            if (displayLines[i].length()) { any = true; break; }
+        if (!any) {
+            traceFmtLevel('W', "RENDER_SKIP_BLANK page=%lu", (unsigned long)txtPage);
+            return;
+        }
+    }
     fbRot = readerRot;   // 竖屏渲染: setPix 直映映射 (阅读页布局已按方向参数化)
     if (full) {
         fixedRefreshCount = 0;   // 结构变化全刷 = 干净起点
@@ -3377,6 +3500,16 @@ void renderTxtPageNoRefresh() {
     fbRot = readerRot;   // 竖屏渲染: setPix 直映映射 (阅读页布局已按方向参数化)
     drawTxtPageLines(displayLines);
     fbRot = 90;
+}
+
+// 深睡唤醒清理: 面板物理保留休眠前画面 (正文 + 右上角"休眠中"), 免刷恢复只画 fb 不写屏,
+// "休眠中"会残留 → 这里局刷一次把纯净正文送上屏覆盖。仅深睡唤醒路径调用一次。
+extern bool gBootFromSleep;   // 定义在休眠记录区 (saveSleepRecord 附近), 前向声明供此处使用
+void clearSleepNoticeAfterBoot() {
+    if (!gBootFromSleep) return;
+    gBootFromSleep = false;
+    traceLine("BOOT_CLEAR_SLEEP_NOTICE");
+    refresh(false);   // 局刷: 只更新变化像素, 擦掉右上角"休眠中"
 }
 
 // ---------- 阅读器菜单 (局部刷新) ----------
@@ -3845,9 +3978,11 @@ struct SleepRecord {
     int16_t  selIndex;            // 文件列表选中项
     int16_t  topIndex;            // 文件列表可视区顶部项
     char     path[64];            // 浏览器当前路径 (UTF-8)
-    uint8_t  pad[1];
+    uint8_t  fromSleep;           // 1=本次保存来自 enterSleepMode(深睡), 唤醒需擦右上角"休眠中"残留
 };
 const uint32_t SLEEP_RECORD_MAGIC = 0x55495354UL;   // 'UIST' 新版界面快照
+bool gSleepRecordFromSleep = false;   // saveSleepRecord 置位前设: 记录本次保存是否来自深睡路径
+bool gBootFromSleep = false;          // setup 读到 sleep record.fromSleep=1: 深睡唤醒, 恢复后需擦"休眠中"残留
 
 void saveSleepRecord() {
     SleepRecord rec;
@@ -3862,6 +3997,8 @@ void saveSleepRecord() {
     rec.chapterSel = (int16_t)chapterSel;
     rec.selIndex = (int16_t)selIndex;
     rec.topIndex = (int16_t)topIndex;
+    rec.fromSleep = gSleepRecordFromSleep ? 1 : 0;
+    gSleepRecordFromSleep = false;   // 一次性标志: 读走即清, 防误传
     currentPath.toCharArray(rec.path, sizeof(rec.path));
     // 快照可能发生在 EPD 刷新之后；写 SD 前统一恢复共享 SPI 总线。
     if (!reinitSdBus("ui_save")) {
@@ -3936,12 +4073,14 @@ void enterSleepMode() {
 
     // 记录休眠前的界面模式到 SD (断电保留), KEY1 唤醒后恢复同一界面。
     // 必须在 EPD 深睡之前写入 — 之后 SPI 总线已归 EPD, SD 不可用。
+    // 先重绘当前页为纯内容(菜单/弹窗场景选休眠时屏上是菜单, 立即回到正文/页面),
+    // 再右上角"休眠中" → 保存(fromSleep=1) → 深睡。无 showMsg 大框/延迟:
+    // 用户要求"选中睡眠立即强制睡眠", KEY1 硬件复位唤醒, 不做按键心跳检测。
+    redrawCurrentPage();          // 立即关菜单画面, 重绘纯正文/当前页
+    drawSleepNotice();            // 右上角"休眠中" (局刷)
+    gSleepRecordFromSleep = true; // 标记本次为深睡: 唤醒后需局刷擦掉"休眠中"残留
     reinitSdBus("sleep_save");
     saveSleepRecord();
-
-    // 进入休眠前 1 秒中央显示"休眠"提示 (用户要求), 随后右上角"休眠中"并深睡
-    showMsg("休眠", "");
-    drawSleepNotice();
     epd.sleep();   // SSD1680 深睡 (面板掉电), 保留 RAM 中的当前页状态
 
     // 深睡直到 KEY1 硬件复位 (与低电休眠 enterLowBatterySleep 同机制, RST 唤醒→setup):
@@ -4026,7 +4165,14 @@ void nextTxtPage() {
     if (txtPage >= txtTotalPages) return;
     txtPage++;
     txtPageStart = parsePageRecord(txtPage);
-    readTxtPage(txtPageStart);
+    if (!readTxtPage(txtPageStart)) {
+        // 读失败(偶发 SD 总线坏): 回退页码保持原显示, 不渲染空页(白屏)。下一翻页自愈后继续。
+        txtPage--;
+        txtPageStart = parsePageRecord(txtPage);
+        showMsg("读取失败", "请重试");
+        traceFmtLevel('E', "PAGE_NEXT_FAIL page=%lu", (unsigned long)txtPage);
+        return;
+    }
     writeProgress(txtPageStart);
     renderTxtPage(false);
     statsOnPageTurn();   // 阅读统计: 成功显示新页, 计 1 翻页
@@ -4040,7 +4186,14 @@ void previousTxtPage() {
     }
     txtPage--;
     txtPageStart = parsePageRecord(txtPage);
-    readTxtPage(txtPageStart);
+    if (!readTxtPage(txtPageStart)) {
+        // 读失败: 回退页码保持原显示, 不渲染空页(白屏)。
+        txtPage++;
+        txtPageStart = parsePageRecord(txtPage);
+        showMsg("读取失败", "请重试");
+        traceFmtLevel('E', "PAGE_PREV_FAIL page=%lu", (unsigned long)txtPage);
+        return;
+    }
     writeProgress(txtPageStart);
     renderTxtPage(false);
     statsOnPageTurn();   // 阅读统计: 翻页(上一页也计, 指标=翻页次数)
@@ -4621,6 +4774,7 @@ void startTxtReader(const char *path, bool forceRebuild) {
         appMode = APP_READER;
         if (bootPartialRestore) {
             renderTxtPageNoRefresh();   // 优化④: 面板已显示同页, 仅渲染不写屏
+            clearSleepNoticeAfterBoot();   // 深睡唤醒: 局刷擦右上角"休眠中"残留
         } else {
             renderTxtPage(true);
         }
@@ -4683,6 +4837,7 @@ void startTxtReader(const char *path, bool forceRebuild) {
                  (unsigned long)txtTotalPages, (unsigned long)txtPageStart);
         if (bootPartialRestore) {
             renderTxtPageNoRefresh();   // 优化④: 面板已显示同页, 仅渲染不写屏 (0s)
+            clearSleepNoticeAfterBoot();   // 深睡唤醒: 局刷擦右上角"休眠中"残留
         } else {
             renderTxtPage(true);        // 一次全刷直接到进度页
         }
@@ -4979,6 +5134,8 @@ void setup() {
     // 注册上传状态回调: file_api_fs 上传(START/END/ABORTED)时调 renderUploadStatus 显示
     // "上传中/上传完毕/上传失败"(墨水屏), 对齐官方 A7 web 上传状态显示。
     ofsUpSetPhaseCallback(renderUploadStatus);
+    ofsDlSetPhaseCallback(renderDownloadStatus);   // 下载状态 → 墨水屏底行("下载中/下载完毕/下载失败")
+    ofsOpSetPhaseCallback(renderFileOpStatus);     // 新建/删除/重命名/移动 → 墨水屏底行("操作中/成功/失败")
     // 注册 Web 设置修改回调: 配网页每次保存设置成功 → showMsg("修改成功", "选项=值") 局刷提示
     wifiManagerSetWebNotifyCb(webSettingsNotify);
 
@@ -5081,6 +5238,7 @@ void setup() {
     // 只读取睡眠记录
     SleepRecord bootRec;
     bool haveRec = readSleepRecord(bootRec);
+    gBootFromSleep = haveRec && bootRec.fromSleep;   // 深睡唤醒: 面板留有右上角"休眠中", 恢复后需局刷擦除
 
     // 窗口补足: 扫描未覆盖满 1s 时继续轮询, 保证最短检测期
     while (millis() - keyWindow < 1000) {
