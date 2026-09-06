@@ -619,6 +619,7 @@ String recentReadPath;
 uint32_t recentReadPage = 0;
 uint32_t recentReadTotalPages = 0;
 bool recentReadValid = false;
+bool recentReadBuilding = false;   // 索引未完成/构建中/中断: 主页主卡页码后缀"构建中" (页码不即时刷新)
 int homeSel = 0;
 File txtFile;
 File txtIndexFile;
@@ -837,19 +838,27 @@ void loadRecentReadSummary() {
     recentReadPage = 0;
     recentReadTotalPages = 0;
     recentReadValid = false;
+    recentReadBuilding = false;
     if (!sdAvailable || !SD.exists(RECENT_READ_PATH)) {
         traceFmt("RECENT_ABORT sd=%d file=%d", sdAvailable ? 1 : 0, SD.exists(RECENT_READ_PATH) ? 1 : 0);
         return;
     }
     File f = SD.open(RECENT_READ_PATH, FILE_READ);
+    if (!f) {   // 构建写流/EPD 抢占后偶发打不开 → 恢复总线重试一次, 避免误报"暂无阅读记录"
+        reinitSdBus("recent_retry");
+        f = SD.open(RECENT_READ_PATH, FILE_READ);
+    }
     if (!f) return;
     recentReadPath = f.readStringUntil('\n');
     f.close();
     recentReadPath.trim();
     if (recentReadPath.length() == 0 || !SD.exists(recentReadPath)) {
-        traceFmt("RECENT_TXT_MISS len=%u exists=%d", (unsigned)recentReadPath.length(), SD.exists(recentReadPath) ? 1 : 0);
-        recentReadPath = "";
-        return;
+        reinitSdBus("recent_txt_retry");   // 同上: 大书构建期 SD 忙, 存在性判定失败会误隐藏主卡
+        if (recentReadPath.length() == 0 || !SD.exists(recentReadPath)) {
+            traceFmt("RECENT_TXT_MISS len=%u exists=%d", (unsigned)recentReadPath.length(), SD.exists(recentReadPath) ? 1 : 0);
+            recentReadPath = "";
+            return;
+        }
     }
     traceFmt("RECENT_TXT path=%s", recentReadPath.c_str());
     String indexPath = recentReadPath;
@@ -875,7 +884,19 @@ void loadRecentReadSummary() {
         }
         if (sp) sp.close();
     }
+    // 构建中/中断判定 (主页主卡"构建中"标注用):
+    // ① 构建期 sidecar 存在(构建进行中或中断未合并); ② 运行时正在构建同一本书。
+    // ③ 在索引"看似完整"分支再校验尾部 size 标记, 见下 (半截 .i1 不能当完整总页数显示)。
+    recentReadBuilding = SD.exists(sidecarPath.c_str()) ||
+                         (txtIndexBuilding && txtPath == recentReadPath);
+    uint32_t txtSize = 0;
+    File tf = SD.open(recentReadPath.c_str());
+    if (tf) { txtSize = tf.size(); tf.close(); }
     File index = SD.open(indexPath.c_str(), FILE_READ);
+    if (!index) {   // 构建写流/EPD 抢占后偶发打不开 → 恢复总线重试一次
+        reinitSdBus("recent_idx_retry");
+        index = SD.open(indexPath.c_str(), FILE_READ);
+    }
     if (!index || index.size() < 16 || index.size() % 8 != 0) {
         if (index) index.close();
         // 索引不完整(构建中/中断): 仍视为"有上次阅读文件"(进入后阅读器从 sidecar/记录[0] 恢复,
@@ -892,17 +913,30 @@ void loadRecentReadSummary() {
         }
         recentReadPage = 0;
         recentReadTotalPages = 0;
+        recentReadBuilding = true;   // 索引太小/损坏: 属构建中/待重建, 主卡显示"构建中"
         recentReadValid = true;   // 文件存在即视为有上次阅读记录 (页码可为 0)
         traceFmt("RECENT_INCOMPLETE valid=1 page=0 total=0 off=%lu", (unsigned long)savedOffset);
         return;
     }
     recentReadTotalPages = (index.size() / 8) - 1;
+    // 半截检测: 记录[N-1] 应为 txt 大小 (构建完成才写入); 不相等 → 中断构建/文件变更 → 标"构建中"。
+    // (构建中 .i1 已具 8 对齐页表, 若不校验会把"已建条数-1"当总页数显示, 误导进度条/页码)
+    {
+        index.seek(index.size() - 8);
+        char tailRec[9];
+        for (uint8_t i = 0; i < 8; i++) tailRec[i] = (char)index.read();
+        tailRec[8] = '\0';
+        uint32_t tailV = strtoul(tailRec, nullptr, 10);
+        if (txtSize && tailV != txtSize) recentReadBuilding = true;
+        index.seek(0);
+    }
     if (savedOffset == 0) {
         char record[9];
         for (uint8_t i = 0; i < 8; i++) record[i] = (char)index.read();
         record[8] = '\0';
         savedOffset = strtoul(record, nullptr, 10);
     }
+    index.seek(8);   // 扫描必须从记录[1](页2页首) 起: sidecar 分支未消费记录[0], 不 seek 会把记录[0]=进度误当页2 → 页码错位
     recentReadPage = 1;
     // 顺序连续读而非每页 seek: seek 会重载 sector, 大索引(如《武炼巅峰》1.1MB)
     // 14 万次 seek 远超 8s 软看门狗 → Soft WDT 无限复位。批量 read 减少 VFS 调用开销。
@@ -1045,8 +1079,8 @@ void renderHome(bool full) {
     }
     fillRect(2, mY, 292, mH, false);
     drawTextUTF8(6, mY + 3, recentTitle, 250, true);   // 书名 (去掉"继续阅读"标题行, 避免与进度条重叠)
-    // 进度条 + 页码百分比
-    if (recentReadValid && recentReadTotalPages > 0) {
+    // 进度条 + 页码百分比 (索引未完成/构建中: 只显页码+"构建中", 不显误导性总页数/百分比; 页码不即时刷新)
+    if (recentReadValid && recentReadTotalPages > 0 && !recentReadBuilding) {
         uint32_t pct = (uint32_t)(((uint64_t)recentReadPage * 100) / recentReadTotalPages);
         if (pct > 100) pct = 100;
         const int pbX = 6, pbY = mY + 25, pbW = 140, pbH = 5;
@@ -1060,6 +1094,13 @@ void renderHome(bool full) {
         char pg[20];
         snprintf(pg, sizeof(pg), "%lu/%lu页", (unsigned long)recentReadPage, (unsigned long)recentReadTotalPages);
         drawTextUTF8(228, pbY - 5, pg, 68, true);
+    } else if (recentReadValid && recentReadBuilding) {
+        char pg[32];
+        if (recentReadPage >= 1)
+            snprintf(pg, sizeof(pg), "第%lu页 构建中", (unsigned long)recentReadPage);
+        else
+            snprintf(pg, sizeof(pg), "构建中…");
+        drawTextUTF8(6, mY + 25, pg, 230, true);
     } else {
         drawTextUTF8(6, mY + 25, recentDetail, 200, true);
     }
@@ -2814,6 +2855,11 @@ void finishTxtIndexBuild() {
     debugFmt("IDX async done pages=%lu chapters=%lu indexSize=%lu z1Size=%lu", (unsigned long)txtTotalPages,
              (unsigned long)txtChapterCount, (unsigned long)doneIndexSize,
              (unsigned long)doneChapterSize);
+    // 主页正显示该书且构建刚在后台完成: 刷新最近阅读(页码回归真实总页数、去掉"构建中"标注), 局刷主卡
+    if (appMode == APP_HOME && recentReadPath == txtPath) {
+        loadRecentReadSummary();
+        renderHome(false);
+    }
     if (appMode == APP_READER) showMsg("索引完成", "可翻页/章节/保存进度");
 }
 
@@ -5503,7 +5549,9 @@ void loop() {
         } else if (r3 == 2) {
             enterHomeCard();
         }
-        delay(30);
+        // 后台索引构建在主页也要喂步进: 否则退出阅读器停在主页时构建停摆,"构建中"永不结束
+        if (txtIndexBuilding) indexTaskStep();
+        delay(txtIndexBuilding ? 5 : 30);
         return;
     }
 
