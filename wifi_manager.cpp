@@ -748,7 +748,7 @@ bool saveWeatherConfig(const WeatherConfig &in) {
   return EEPROM.commit();
 }
 
-// ---- 设备设置（EEPROM 偏移 232, 独立区; 结构扩展, 232+~70=302 <= 360）----
+// ---- 设备设置（EEPROM 偏移 232, 独立区; 结构扩展, 232+68=300 <= 360）----
 const int SETTINGS_EEPROM_ADDR = 232;
 const uint32_t SETTINGS_MAGIC = 0x53455433UL;   // 'SET3'
 const int16_t DEFAULT_TZ_OFFSET_MIN = 480;       // UTC+8
@@ -811,21 +811,28 @@ void settingsFillDefaults(SettingsConfig &s) {
   if (s.outputPower == 0 || s.outputPower > 20) s.outputPower = 19;
   if (s.sdEnabled > 1) s.sdEnabled = 1;   // 非法残留/旧默认0 → 归一为启用SD（本地介质仅显式关闭时启用）
   if (s.albumAuto > 1) s.albumAuto = 0;
+  // 2026-09 Web 层新增字段: 0xFF 残留/非法 → 默认（真实迁移由 loadSettingsConfig 的 version≤2 门控处理）
+  if (s.historyEnabled > 1) s.historyEnabled = 1;
+  if (s.clockCalibrationState > 1) s.clockCalibrationState = 1;
+  if (s.clockMod > 1) s.clockMod = 0;
+  if (s.clockCompensate == static_cast<int16_t>(0x8000)) s.clockCompensate = 0;  // -32768 = 哨兵(setter 已排除)
 }
 
 bool loadSettingsConfig(SettingsConfig &out) {
   EEPROM.begin(EEPROM_SIZE);
   EEPROM.get(SETTINGS_EEPROM_ADDR, out);
-  if (out.magic != SETTINGS_MAGIC || (out.version != 1 && out.version != 2) ||
+  if (out.magic != SETTINGS_MAGIC || (out.version != 1 && out.version != 2 && out.version != 3) ||
       settingsChecksum(out) != out.checksum) {
     // 首次使用/损坏：填默认值（24 小时制 / UTC+8 / 一言开 / 默认启用 SD）
     memset(&out, 0, sizeof(out));
     out.magic = SETTINGS_MAGIC;
-    out.version = 2;
+    out.version = 3;
     out.clockFormat = 0;
     out.tzOffsetMin = DEFAULT_TZ_OFFSET_MIN;
     out.hitokotoEnabled = 1;
     out.sdEnabled = 1;   // 默认启用 SD（关介质需显式设置 → 本地 flash）
+    out.historyEnabled = 1;            // 默认: 历史记录开
+    out.clockCalibrationState = 1;     // 默认: 时钟强制校准开
     settingsFillDefaults(out);
     return false;
   }
@@ -835,6 +842,14 @@ bool loadSettingsConfig(SettingsConfig &out) {
   // v1→v2: 旧固件无"SD 介质"开关, sdEnabled 残留默认 0 视作"未显式设置" → 迁移为启用 SD;
   // v2 之后用户显式关闭(0) 才保持本地介质。本迁移仅于内存, 下轮真正 save 以 v2 写回持久。
   if (out.version == 1) out.sdEnabled = 1;
+  // v2→v3 (2026-09): 旧版数据无 Web 层新字段(history/clockCalibrationState/clockMod/clockCompensate),
+  // 其残留(0xFF 等)不算真实值 → 一律按默认; 新版(v3 起)保存后才信任字段值。
+  if (out.version <= 2) {
+    out.historyEnabled = 1;
+    out.clockCalibrationState = 1;
+    out.clockMod = 0;
+    out.clockCompensate = 0;
+  }
   // 新字段: 非法残留/无值 → 填默认(0xFF 或 0 均视为未设置)
   settingsFillDefaults(out);
   return true;
@@ -843,12 +858,86 @@ bool loadSettingsConfig(SettingsConfig &out) {
 bool saveSettingsConfig(const SettingsConfig &in) {
   SettingsConfig cfg = in;
   cfg.magic = SETTINGS_MAGIC;
-  cfg.version = 2;
+  cfg.version = 3;
   if (cfg.hitokotoEnabled > 1) cfg.hitokotoEnabled = 1;
   if (cfg.portrait > 3) cfg.portrait = 0;   // 四向: 0横/1竖/2横翻/3竖翻
   cfg.checksum = settingsChecksum(cfg);
   EEPROM.begin(EEPROM_SIZE);
   EEPROM.put(SETTINGS_EEPROM_ADDR, cfg);
+  return EEPROM.commit();
+}
+
+// ---- InAWord 多功能输入框（EEPROM 独立块, 偏移 600; 避开 Settings 232-300/Webdav/Target/Admin 520+）----
+const int INAWORD_EEPROM_ADDR = 600;
+const uint32_t INAWORD_MAGIC = 0x494E4157UL;   // 'INAW'
+struct InAWordConfig {
+  uint32_t magic;      // 'INAW'
+  char text[64];       // 原文 UTF-8（保存时净化; 空串 = 一言模式）
+  uint16_t checksum;
+};
+static_assert(INAWORD_EEPROM_ADDR >= ADMIN_EEPROM_ADDR + sizeof(AdminConfig),
+              "InAWord region overlaps Admin region");
+static_assert(INAWORD_EEPROM_ADDR + sizeof(InAWordConfig) <= EEPROM_SIZE,
+              "InAWord region overflows EEPROM_SIZE");
+
+uint16_t inAWordChecksum(const InAWordConfig &value) {
+  return checksumBytes(reinterpret_cast<const uint8_t *>(&value), offsetof(InAWordConfig, checksum));
+}
+
+static void loadInAWordConfig(InAWordConfig &out) {
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.get(INAWORD_EEPROM_ADDR, out);
+  if (out.magic != INAWORD_MAGIC || inAWordChecksum(out) != out.checksum) {
+    // 首次/损坏: 空文本（一言模式）
+    memset(&out, 0, sizeof(out));
+    out.magic = INAWORD_MAGIC;
+  }
+  out.text[sizeof(out.text) - 1] = '\0';
+}
+
+// 净化 + UTF-8 整字截断: 剔除 `"` `\` 与控制字符, 不劈开多字节字符; dst 容量 ≥ 2
+static void sanitizeInAWord(const char *src, char *dst, size_t cap) {
+  size_t n = strlen(src), i = 0, wi = 0;
+  if (cap < 2) { if (cap) dst[0] = '\0'; return; }
+  while (i < n && wi + 1 < cap) {
+    unsigned char c = (unsigned char)src[i];
+    if (c == '"' || c == '\\' || c < 0x20) { ++i; continue; }
+    int len = 1;
+    if (c >= 0xC2 && c <= 0xDF) len = 2;
+    else if (c >= 0xE0 && c <= 0xEF) len = 3;
+    else if (c >= 0xF0 && c <= 0xF4) len = 4;
+    bool ok = (size_t)len <= n - i;
+    for (int k = 1; ok && k < len; ++k) {
+      unsigned char nx = (unsigned char)src[i + k];
+      if (nx < 0x80 || nx > 0xBF) ok = false;
+    }
+    if (!ok) { ++i; continue; }            // 非法/孤立序列: 跳过该字节
+    if (wi + (size_t)len >= cap) break;    // 放不下整字符 → 截断(不劈开)
+    for (int k = 0; k < len; ++k) dst[wi++] = src[i + k];
+    i += (size_t)len;
+  }
+  dst[wi] = '\0';
+}
+
+const char* settingsGetInAWord() {
+  static char buf[sizeof(InAWordConfig().text)];
+  InAWordConfig cfg;
+  loadInAWordConfig(cfg);
+  strncpy(buf, cfg.text, sizeof(buf) - 1);
+  buf[sizeof(buf) - 1] = '\0';
+  return buf;
+}
+
+bool settingsSetInAWord(const char *v) {
+  if (!v) return false;
+  InAWordConfig cfg;
+  memset(&cfg, 0, sizeof(cfg));
+  sanitizeInAWord(v, cfg.text, sizeof(cfg.text));
+  cfg.text[sizeof(cfg.text) - 1] = '\0';
+  cfg.magic = INAWORD_MAGIC;
+  cfg.checksum = inAWordChecksum(cfg);
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.put(INAWORD_EEPROM_ADDR, cfg);
   return EEPROM.commit();
 }
 
@@ -998,6 +1087,33 @@ bool settingsSetAlbumAuto(uint8_t v) {
   if (v > 1) return false;
   SettingsConfig s; loadSettingsConfig(s); s.albumAuto = v; return saveSettingsConfig(s);
 }
+uint8_t settingsGetHistoryEnabled() {
+  SettingsConfig s; loadSettingsConfig(s); return s.historyEnabled;
+}
+bool settingsSetHistoryEnabled(uint8_t v) {
+  if (v > 1) return false;
+  SettingsConfig s; loadSettingsConfig(s); s.historyEnabled = v; return saveSettingsConfig(s);
+}
+uint8_t settingsGetClockCalibrationState() {
+  SettingsConfig s; loadSettingsConfig(s); return s.clockCalibrationState;
+}
+bool settingsSetClockCalibrationState(uint8_t v) {
+  if (v > 1) return false;
+  SettingsConfig s; loadSettingsConfig(s); s.clockCalibrationState = v; return saveSettingsConfig(s);
+}
+uint8_t settingsGetClockMod() {
+  SettingsConfig s; loadSettingsConfig(s); return s.clockMod;
+}
+bool settingsSetClockMod(uint8_t v) {
+  if (v > 1) return false;
+  SettingsConfig s; loadSettingsConfig(s); s.clockMod = v; return saveSettingsConfig(s);
+}
+int16_t settingsGetClockCompensate() {
+  SettingsConfig s; loadSettingsConfig(s); return s.clockCompensate;
+}
+bool settingsSetClockCompensate(int16_t v) {
+  SettingsConfig s; loadSettingsConfig(s); s.clockCompensate = v; return saveSettingsConfig(s);
+}
 
 // ---- Web 端点：设备设置（/settings）与系统信息（/info） ----
 // 与 handleSave 分离：/wifi 管网络与天气，/settings 管设置页字段（时钟格式/时区/一言）
@@ -1137,6 +1253,52 @@ void handleSettingsSave() {
       webNotifyAdd(tb);
     }
   }
+  // ---- 2026-09 Web 层新增设置 (仅持久化+回显; 屏幕端行为后续战役) ----
+  if (server.hasArg("history")) {
+    int v = server.arg("history").toInt();
+    uint8_t nv = static_cast<uint8_t>(v == 1 ? 1 : 0);
+    if (settingsGetHistoryEnabled() != nv && settingsSetHistoryEnabled(nv)) {
+      any = true;
+      snprintf(tb, sizeof(tb), "历史=%s ", nv ? "开" : "关");
+      webNotifyAdd(tb);
+    }
+  }
+  if (server.hasArg("clockCalibrationState")) {
+    int v = server.arg("clockCalibrationState").toInt();
+    uint8_t nv = static_cast<uint8_t>(v == 1 ? 1 : 0);
+    if (settingsGetClockCalibrationState() != nv && settingsSetClockCalibrationState(nv)) {
+      any = true;
+      snprintf(tb, sizeof(tb), "强制校准=%s ", nv ? "开" : "关");
+      webNotifyAdd(tb);
+    }
+  }
+  if (server.hasArg("clockMod")) {
+    int v = server.arg("clockMod").toInt();
+    uint8_t nv = static_cast<uint8_t>(v == 1 ? 1 : 0);
+    if (settingsGetClockMod() != nv && settingsSetClockMod(nv)) {
+      any = true;
+      snprintf(tb, sizeof(tb), "时钟类型=%s ", nv ? "精美" : "简洁");
+      webNotifyAdd(tb);
+    }
+  }
+  if (server.hasArg("clockCompensate")) {
+    int v = server.arg("clockCompensate").toInt();
+    if (v > 32767) v = 32767;
+    if (v < -32767) v = -32767;
+    if (settingsGetClockCompensate() != v && settingsSetClockCompensate(static_cast<int16_t>(v))) {
+      any = true;
+      snprintf(tb, sizeof(tb), "补偿=%d ", v);
+      webNotifyAdd(tb);
+    }
+  }
+  if (server.hasArg("inAWord")) {
+    const char *cur = settingsGetInAWord();
+    if (strcmp(cur, server.arg("inAWord").c_str()) != 0 && settingsSetInAWord(server.arg("inAWord").c_str())) {
+      any = true;
+      snprintf(tb, sizeof(tb), "自定义句=%s ", settingsGetInAWord()[0] ? "已存" : "已清");
+      webNotifyAdd(tb);
+    }
+  }
   if (!any) {
     server.send_P(200, PSTR("text/plain; charset=utf-8"), PSTR("no_change"));   // 无实际变化: 不写 EEPROM 也不提示
     return;
@@ -1261,6 +1423,18 @@ void handleSettingsJson() {
   loadAdminConfig(ad);
   json += F(",\"otaSet\":");
   json += (ad.otaPass[0] != '\0') ? F("1") : F("0");
+  // ---- 2026-09 Web 层新增设置（仅回显; inAWord 保存时已净化, 无引号/反斜杠/控制字符）----
+  json += F(",\"history\":");
+  json += s.historyEnabled;
+  json += F(",\"clockCalibrationState\":");
+  json += s.clockCalibrationState;
+  json += F(",\"clockMod\":");
+  json += s.clockMod;
+  json += F(",\"clockCompensate\":");
+  json += s.clockCompensate;
+  json += F(",\"inAWord\":\"");
+  json += settingsGetInAWord();
+  json += F("\"");
   json += F("}");
   server.send(200, "application/json; charset=utf-8", json);
 }

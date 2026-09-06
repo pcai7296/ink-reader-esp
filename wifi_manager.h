@@ -92,6 +92,12 @@ struct SettingsConfig {
     uint8_t sdEnabled;       // SD 卡启用 0=未启用 1=启用, 默认 0
     uint8_t albumAuto;       // 相册自动播放 0=关 1=开, 默认 0
     uint8_t reserved[4];     // 预留
+    // ---- Web 层新增设置 (2026-09, checksum 之后不参与校验; settingsFillDefaults 容错) ----
+    // 仅 Web 层持久化+回显; 屏幕端行为(时钟样式/历史展示/强制校准策略/补偿换算)属后续战役。
+    uint8_t historyEnabled;       // 历史记录 0=关 1=开, 默认 1
+    uint8_t clockCalibrationState;// 时钟强制校准 0=关 1=开, 默认 1
+    uint8_t clockMod;             // 时钟类型 0=简洁 1=精美, 默认 0
+    int16_t clockCompensate;      // 时钟补偿(原始值存储, 单位待设备端实现时定), 默认 0
 };
 // 读取设置；校验失败返回 false 并填充默认值（24小时制 / UTC+8）
 bool loadSettingsConfig(SettingsConfig &out);
@@ -136,6 +142,18 @@ uint8_t settingsGetSdEnabled();
 bool settingsSetSdEnabled(uint8_t v);
 uint8_t settingsGetAlbumAuto();
 bool settingsSetAlbumAuto(uint8_t v);
+// 2026-09 Web 层新增设置 (仅持久化/回显; 屏幕端行为后续战役)
+uint8_t settingsGetHistoryEnabled();
+bool settingsSetHistoryEnabled(uint8_t v);
+uint8_t settingsGetClockCalibrationState();
+bool settingsSetClockCalibrationState(uint8_t v);
+uint8_t settingsGetClockMod();
+bool settingsSetClockMod(uint8_t v);
+int16_t settingsGetClockCompensate();
+bool settingsSetClockCompensate(int16_t v);
+// 多功能输入框 InAWord (独立 EEPROM 块, 见 wifi_manager.cpp): 文本 ≤63B, 保存时净化引号/反斜杠/控制字符
+const char* settingsGetInAWord();       // 返回静态缓冲; 未配置/损坏 → 空串
+bool settingsSetInAWord(const char *v); // 净化+UTF-8 整字截断后落盘; 成功返回 true
 
 // ---- WebDAV 配置（EEPROM 偏移 360, 独立区; 避开 WifiConfig/CLOCK/Weather/Settings）----
 // ⚠️ 已弃用（2026, D0 直连手机 HTTP 取代）：结构/EEPROM/保存函数保留不删除，

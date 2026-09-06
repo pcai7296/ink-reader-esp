@@ -61,6 +61,7 @@ ink-reader-esp/
 | 配网 | `wifi_manager.cpp` | wifiManagerBegin; 端点 / /status /info /settings /wifi /clear |
 | 天气配置 | `wifi_manager.cpp` §loadWeatherConfig/saveWeatherConfig | EEPROM 160-232 |
 | 设置页 | `ink-reader-esp.ino` §设置页面 + `wifi_manager.cpp` §设备设置 | APP_SETTINGS; EEPROM 232-244; 4 项: 时钟格式/时区/一言/恢复默认 |
+| Web 设置层(v3) | `wifi_manager.cpp` + `data/set.htm` | 原 5 个「不可设置」项已 Web 层可设置(history/clockCalibrationState/clockMod/clockCompensate/inAWord); SettingsConfig 232..300 + INAWORD@600; 契约与屏幕端后续战役见 `docs/web-set-layer.md`; 页面「仅存值」=只持久化, 设备端随后续固件 |
 | BMP 图片 | `bmp_show.cpp` + `ink-reader-esp.ino` §showBmpFile | APP_BMP=9; 文件管理器打开 .bmp 全屏 |
 | OTA | `wifi_manager.cpp` (ESP8266HTTPUpdateServer) | /update 端点, admin/333333 |
 | 中文字体数据 | `u8g2Fonts` + `chinese_gb2312` 字库 | 253KB flash, UTF-8 输入 |
