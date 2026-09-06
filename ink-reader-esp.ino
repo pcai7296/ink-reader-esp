@@ -33,6 +33,7 @@
 #include "weather_small_icons.h"
 #include "nav_icons.h"   // 首页导航 13x13 图标: 文件/时钟/天气/配网/设置/返回
 #include "hitokoto.h"
+#include "bili_fans.h"
 #include "bmp_show.h"
 #include "progress_sync.h"
 #include "file_api_fs.h"   // 上传状态接口 ofsUpSetPhaseCallback（"上传中/上传完毕"墨水屏状态）
@@ -1413,11 +1414,37 @@ void renderClockConnect(bool full) {
 }
 
 static time_t lastClockDisplayedMinute = 0;
+bool gClockDisguiseMode = false;   // 伪装时钟: 恒用简洁外观、不联网 (进入/启动恢复时置位)
 
-// 获取一言（仅 WiFi 已连且设置开启时；失败静默不打扰时钟页）
+// 一行 5 位时间数码管 (HH:MM, 7 段; 冒号含在内)
+static void drawClockTimeDigits(int x, int y, int dw, int dh, int dt, int gap, int colonW, const char *hm) {
+    drawSevenSegDigit(x, y, dw, dh, dt, hm[0], true);
+    drawSevenSegDigit(x + dw + gap, y, dw, dh, dt, hm[1], true);
+    drawClockColon(x + (dw + gap) * 2, y, dh, true);
+    drawSevenSegDigit(x + (dw + gap) * 2 + colonW, y, dw, dh, dt, hm[3], true);
+    drawSevenSegDigit(x + (dw + gap) * 2 + colonW + dw + gap, y, dw, dh, dt, hm[4], true);
+}
+
+// 小号 7 段数字序列 (温湿度用; 非数字字符跳过), 返回已占宽度
+static int drawMini7Seq(int x, int y, int dw, int dh, int dt, int gap, const char *num, bool black) {
+    int cx = x;
+    for (const char *p = num; *p; p++) {
+        if (*p >= '0' && *p <= '9') { drawSevenSegDigit(cx, y, dw, dh, dt, *p, black); cx += dw + gap; }
+        else cx += dw;   // 符号位占位
+    }
+    return cx - x - gap;
+}
+
+// 校准状态短文案 (跳过校准也视为未校准)
+static const char *clockCalibText() {
+    return (clockManagerWasSkipped() || !clockManagerIsSynced()) ? "未校准" : "已校准";
+}
+
+// 获取一言（仅 WiFi 已连、设置开启且时钟为精美类型时；失败静默不打扰时钟页）
 void fetchHitokotoFlow() {
     yiyanText[0] = '\0';
     if (settingsGetHitokotoEnabled() == 0) return;
+    if (settingsGetClockMod() != 1) return;   // 2026-09: 一言只在"精美"时钟显示; 简洁不拉取不显示
     if (WiFi.status() != WL_CONNECTED) return;
     char err[16];
     if (!fetchHitokoto(yiyanText, sizeof(yiyanText), err, sizeof(err))) {
@@ -1430,6 +1457,8 @@ void fetchHitokotoFlow() {
 
 void enterClockPage() {
     appMode = APP_CLOCK;
+    gClockDisguiseMode = false;
+    clockCheckInAWordReset();   // 文本="重置系统" → 恢复默认并重启(函数不返回)
     lastClockDisplayedMinute = clockManagerNow() / 60;
     // 调试: 打印进入时钟页时的 epoch 与本地时间
     {
@@ -1442,20 +1471,23 @@ void enterClockPage() {
         } else {
             snprintf(dbgBuf, sizeof(dbgBuf), "(invalid)");
         }
-        debugFmt("CLOCK_PAGE_ENTER epoch=%lu local=%s", (unsigned long)dbgNow, dbgBuf);
+        debugFmt("CLOCK_PAGE_ENTER epoch=%lu local=%s mod=%u", (unsigned long)dbgNow, dbgBuf,
+                 (unsigned)settingsGetClockMod());
     }
-    // 先联网获取一言（屏幕仍显示上一页），成功后随全刷一并显示
+    // 联网数据: 一言(仅精美拉取) + B粉(倒计时不需网络); 失败静默, 屏幕仍显示上一页
+    clockFansRequest();
     fetchHitokotoFlow();
     renderClockPage(true);
     saveSleepRecord();   // 界面快照: 已进入时钟页
 }
 
 // 老板快捷键: 阅读页中长按 → 局刷伪装成时钟 (校准状态), 停用全部按键。
-// 伪装 = 数码管时钟页 (renderClockPage 内容), 恒横屏 (fbRot=90, 与阅读方向无关), 不联网不校准。
+// 伪装 = 简洁时钟外观 (renderClockPage 强制简洁), 恒横屏 (fbRot=90, 与阅读方向无关), 不联网不校准。
 // 退出: 仅 KEY1 硬件复位 → 开机 1 秒 KEY3 窗口内按 KEY3 → 回主页 (复用 setup 的 key3Held 逻辑);
 //       复位后未按 KEY3 → 按睡眠记录恢复伪装页 (保持伪装, 不暴露阅读器)。
 void enterClockDisguise() {
     appMode = APP_CLOCK_DISGUISE;
+    gClockDisguiseMode = true;   // 伪装: 强制简洁外观 (屏蔽精美/一言)
     fbRot = 90;                  // 时钟恒横屏
     yiyanText[0] = '\0';         // 伪装不联网: 不显示一言 (避免暴露联网能力)
     renderClockPage(false);      // 局刷显示时钟页 (校准状态), 与翻页同效: 只清空文字局刷, 不闪屏
@@ -1463,46 +1495,272 @@ void enterClockDisguise() {
     debugLine("DISGUISE_ENTER");
 }
 
+// 温湿度参考文本: 无有效数据返回 false 且 out 置空; 有则 "26℃ 62%"
+static bool clockThText(char *out, size_t cap) {
+    out[0] = '\0';
+    if (!wDataValid) return false;
+    const char *tp = wActual.temp[0] ? wActual.temp : "--";
+    const char *hum = wActual.humidity[0] ? wActual.humidity
+                      : (wFuture.humidity[0] ? wFuture.humidity : "--");
+    snprintf(out, cap, "%s℃ %s%%", tp, hum);
+    return true;
+}
+
+// ---------- 多功能输入框 InAWord 屏幕端 (2026-09 P2) ----------
+// 文本由 web 只存原样; 每次使用前现分类现解析 (不另存 mod 字段)。
+// 官方语法: 空=一言(0) / 自定义句≤21汉字(1) / 倒yyyymmdd事件(2) / B粉UID(3) / 文本"重置系统"(4)
+static const char UTF8_DAI[] = "\xE5\x80\x92";      // 倒
+static const char UTF8_FEN[] = "\xE7\xB2\x89";      // 粉
+static const char UTF8_RESET[] = "\xE9\x87\x8D\xE7\xBD\xAE\xE7\xB3\xBB\xE7\xBB\x9F"; // 重置系统
+enum { IAM_YIYAN = 0, IAM_CUSTOM = 1, IAM_COUNTDOWN = 2, IAM_FANS = 3, IAM_RESET = 4 };
+
+static int classifyInAWord(const char *t) {
+    if (!t || !t[0]) return IAM_YIYAN;
+    size_t n = strlen(t);
+    if (n == strlen(UTF8_RESET) && memcmp(t, UTF8_RESET, n) == 0) return IAM_RESET;
+    if (n >= 3 && memcmp(t, UTF8_DAI, 3) == 0) return IAM_COUNTDOWN;
+    if (n >= 4 && t[0] == 'B' && memcmp(t + 1, UTF8_FEN, 3) == 0) return IAM_FANS;
+    return IAM_CUSTOM;
+}
+
+// 解析 "倒" + 8 位 yyyymmdd + 事件(可为空); 成功返回 true
+static bool parseCountdown(const char *t, int *year, unsigned *mon, unsigned *day, char *ev, size_t evCap) {
+    if (!t || memcmp(t, UTF8_DAI, 3) != 0) return false;
+    const char *p = t + 3;
+    if (p[0] < '0' || p[0] > '9') return false;
+    unsigned nums[3] = {0, 0, 0};
+    for (int seg = 0; seg < 3; seg++) {
+        int len = (seg == 0) ? 4 : 2;
+        for (int i = 0; i < len; i++) {
+            if (p[0] < '0' || p[0] > '9') return false;
+            nums[seg] = nums[seg] * 10 + (unsigned)(p[0] - '0');
+            p++;
+        }
+    }
+    if (nums[0] < 2000 || nums[0] > 2100 || nums[1] < 1 || nums[1] > 12 || nums[2] < 1 || nums[2] > 31)
+        return false;
+    *year = (int)nums[0];
+    *mon = nums[1];
+    *day = nums[2];
+    if (ev && evCap) {   // 事件 = 剩余文本 (空格压缩首尾)
+        size_t w = 0;
+        const char *q = p;
+        while (*q == ' ') q++;
+        while (*q && w + 1 < evCap) ev[w++] = *q++;
+        while (w > 0 && ev[w - 1] == ' ') w--;
+        ev[w] = '\0';
+    }
+    return true;
+}
+
+// Hinnant days_from_civil (仅同源免时区日期差用)
+static int64_t inaDaysFromCivil(int y, unsigned m, unsigned d) {
+    y -= (int)(m <= 2);
+    int era = (y >= 0 ? y : y - 399) / 400;
+    unsigned yoe = (unsigned)(y - era * 400);
+    unsigned doy = (153u * (m + (m > 2 ? -3u : 9u)) + 2u) / 5u + d - 1u;
+    unsigned doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
+    return (int64_t)era * 146097 + (int64_t)doe - 719468;
+}
+
+// B粉会话缓存 (进入时钟页/配网会话有网时尝试一次, 之后复用)
+static uint32_t gFansVal = 0;
+static bool gFansOk = false;
+static char gFansErr[16] = "";
+
+static void clockFansRequest() {
+    const char *t = settingsGetInAWord();
+    if (classifyInAWord(t) != IAM_FANS) return;
+    if (WiFi.status() != WL_CONNECTED) { gFansOk = false; snprintf(gFansErr, sizeof(gFansErr), "无网络"); return; }
+    const char *p = t + 1 + 3;   // 跳过 'B'+粉
+    char uid[33];
+    size_t w = 0;
+    while (p[0] >= '0' && p[0] <= '9' && w + 1 < sizeof(uid)) uid[w++] = *p++;
+    uid[w] = '\0';
+    if (w == 0) { gFansOk = false; snprintf(gFansErr, sizeof(gFansErr), "无UID"); return; }
+    uint32_t v = 0;
+    char err[16];
+    gFansOk = fetchBiliFollower(uid, &v, err, sizeof(err));
+    if (gFansOk) { gFansVal = v; gFansErr[0] = '\0'; }
+    else snprintf(gFansErr, sizeof(gFansErr), "%s", err);
+    debugFmt("BILI_FANS ok=%d val=%lu err=%s", gFansOk ? 1 : 0, (unsigned long)gFansVal, gFansErr);
+}
+
+// 文本"重置系统" → 全设置恢复 + 重启 (每次开机只处理一次; 恢复后文本清空)
+static void resetAllSettingsToDefault() {
+    wifiManagerClearConfig();   // 清除 WiFi 凭据
+    SettingsConfig s;
+    memset(&s, 0, sizeof(s));
+    s.magic = 0x53455433UL;
+    s.version = 3;
+    s.clockFormat = 0;
+    s.tzOffsetMin = 480;
+    s.hitokotoEnabled = 1;
+    s.portrait = 0;
+    s.longPressMs = 500;
+    strncpy(s.ntpServer, "cn.pool.ntp.org", sizeof(s.ntpServer) - 1);
+    s.sdFrequency = 20;
+    s.fullRefreshMin = 25;
+    s.calibIntervalMin = 60;
+    s.batDisplayType = 1;
+    s.nightUpdate = 1;
+    s.fastFlip = 1;
+    s.setRotation = 1;
+    s.outputPower = 19;
+    s.sdEnabled = 1;
+    s.albumAuto = 0;
+    s.historyEnabled = 1;
+    s.clockCalibrationState = 1;
+    s.clockMod = 0;
+    s.clockCompensate = 0;
+    saveSettingsConfig(s);
+    settingsSetInAWord("");
+    WeatherConfig wc;
+    memset(&wc, 0, sizeof(wc));
+    wc.magic = 0x57544852UL;
+    strncpy(wc.city, "深圳", sizeof(wc.city) - 1);
+    saveWeatherConfig(wc);
+    debugLine("INWORD_RESET all defaults");
+    ESP.restart();
+    delay(3000);   // 重启前防御
+}
+
+static void clockCheckInAWordReset() {
+    static bool once = false;
+    if (once) return;
+    const char *t = settingsGetInAWord();
+    if (t && t[0] && classifyInAWord(t) == IAM_RESET) {
+        once = true;
+        resetAllSettingsToDefault();
+    }
+}
+
+// 构建时钟副文本行 (一言/自定义句/倒计时/B粉): 输出到 out
+// pretty=false(简洁): 一言/自定义句不输出 (官方: 简洁不支持), 倒计时/B粉两风格都输出
+static void clockBuildSubText(char *out, size_t cap, bool pretty) {
+    out[0] = '\0';
+    const char *t = settingsGetInAWord();
+    int mode = classifyInAWord(t);
+    if (mode == IAM_YIYAN) {
+        if (pretty && yiyanText[0]) snprintf(out, cap, "%s", yiyanText);
+        return;
+    }
+    if (mode == IAM_CUSTOM) {
+        if (pretty) { snprintf(out, cap, "%s", t); while (utf8Width(out) > 286 && strlen(out) > 1) out[strlen(out) - 1] = '\0'; }
+        return;
+    }
+    if (mode == IAM_COUNTDOWN) {
+        int y = 0; unsigned m = 0, d = 0; char ev[40];
+        if (parseCountdown(t, &y, &m, &d, ev, sizeof(ev))) {
+            time_t nowT = clockManagerNow();
+            struct tm *nw = nowT > 1600000000UL ? localtime(&nowT) : nullptr;
+            if (!nw) { snprintf(out, cap, "倒计时 %d-%02u-%02u", y, m, d); return; }
+            long diff = (long)(inaDaysFromCivil(y, m, d) -
+                               inaDaysFromCivil(nw->tm_year + 1900, (unsigned)(nw->tm_mon + 1), (unsigned)nw->tm_mday));
+            const char *evn = ev[0] ? ev : "目标";
+            if (diff > 0) snprintf(out, cap, "距%s还有%ld天", evn, diff);
+            else if (diff == 0) snprintf(out, cap, "今天是%s", evn);
+            else snprintf(out, cap, "%s已过%ld天", evn, -diff);
+        } else snprintf(out, cap, "倒计时格式错误");
+        return;
+    }
+    if (mode == IAM_FANS) {
+        if (gFansOk) {
+            if (gFansVal < 10000) snprintf(out, cap, "BiliBili: %lu", (unsigned long)gFansVal);
+            else snprintf(out, cap, "BiliBili: %lu.%luW",
+                          (unsigned long)(gFansVal / 10000), (unsigned long)((gFansVal % 10000) / 1000));
+        } else snprintf(out, cap, "B粉获取错误：%s", gFansErr[0] ? gFansErr : "未获取");
+        return;
+    }
+    // RESET 不显示
+}
+
+// 时钟页 (2026-09 双风格): clockMod=0 简洁(数码管调大、无一言、小温湿度并入底部行)
+//                         clockMod=1 精美(新布局: 顶信息行/中置时间/温湿度行/一言行, 数码管风格不变)
+// 伪装(gClockDisguiseMode) 恒走简洁。
 void renderClockPage(bool full) {
     fillRect(0, 0, SCR_W, SCR_H, false);
     time_t now = clockManagerNow();
     struct tm *tmNow = now > 1600000000UL ? localtime(&now) : nullptr;
     char line[40];
-    if (tmNow) {
-        const int dw = 44, dh = 64, dt = 6, gap = 6, colonW = 16;   // dh=64: 底部腾出 68-94 行给一言
-        const int totalW = dw * 4 + gap * 3 + colonW;
-        int x = (SCR_W - totalW) / 2;
-        int y = 4;
-        int h24 = tmNow->tm_hour;
-        int dispH = h24;
-        bool isAm = true;
-        if (settingsGetClockFormat() == 1) {
-            isAm = h24 < 12;
-            dispH = h24 % 12;
-            if (dispH == 0) dispH = 12;
-        }
-        snprintf(line, sizeof(line), "%02d:%02d", dispH, tmNow->tm_min);
-        drawSevenSegDigit(x, y, dw, dh, dt, line[0], true);
-        drawSevenSegDigit(x + dw + gap, y, dw, dh, dt, line[1], true);
-        drawClockColon(x + (dw + gap) * 2, y, dh, true);
-        drawSevenSegDigit(x + (dw + gap) * 2 + colonW, y, dw, dh, dt, line[3], true);
-        drawSevenSegDigit(x + (dw + gap) * 2 + colonW + dw + gap, y, dw, dh, dt, line[4], true);
-        snprintf(line, sizeof(line), "%04d年%02d月%02d日", tmNow->tm_year + 1900, tmNow->tm_mon + 1, tmNow->tm_mday);
-        drawTextUTF8(178, 103, line, 114, true);
-        if (settingsGetClockFormat() == 1) {
-            drawTextUTF8(258, 8, isAm ? "上午" : "下午", 34, true);
-        }
-        // 一言（数码管与分割线之间，基线 78 → 字占 75-91）
-        if (yiyanText[0]) drawTextUTF8(4, 78, yiyanText, 288, true);
-    } else {
+    if (!tmNow) {
         drawTextUTF8(78, 25, "时间未知", 140, true);
+        refresh(full);
+        return;
     }
-    fillRect(0, 94, SCR_W, 1, true);
-    if (clockManagerWasSkipped()) {
-        // 本次跳过了联网校准: 视为未校准 (用户要求: 跳过 ≠ 校准, 不显示"0分钟前校准")
-        drawTextUTF8(4, 103, "未校准", 174, true);
+    int h24 = tmNow->tm_hour;
+    int dispH = h24;
+    bool isAm = true;
+    if (settingsGetClockFormat() == 1) {
+        isAm = h24 < 12;
+        dispH = h24 % 12;
+        if (dispH == 0) dispH = 12;
+    }
+    bool pretty = (settingsGetClockMod() == 1) && !gClockDisguiseMode;
+    if (!pretty) {
+        // ---------- 简洁 (用户定稿): 数码管调大, 无一言/自定义句 ----------
+        const int dw = 46, dh = 78, dt = 7, gap = 6, colonW = 16;
+        const int totalW = dw * 4 + gap * 3 + colonW;
+        int x = (SCR_W - totalW) / 2, y = 2;
+        snprintf(line, sizeof(line), "%02d:%02d", dispH, tmNow->tm_min);
+        drawClockTimeDigits(x, y, dw, dh, dt, gap, colonW, line);
+        if (settingsGetClockFormat() == 1) drawTextUTF8(256, 4, isAm ? "上午" : "下午", 36, true);
+        fillRect(0, 94, SCR_W, 1, true);
+        // 底部 A 行: 左 校准 + 小温湿度 (紧凑), 右 日期
+        snprintf(line, sizeof(line), "%04d年%02d月%02d日", tmNow->tm_year + 1900, tmNow->tm_mon + 1, tmNow->tm_mday);
+        char left[72];
+        char th[32];
+        th[0] = '\0';
+        if (clockThText(th, sizeof(th))) snprintf(left, sizeof(left), "%s %s", clockCalibText(), th);
+        else snprintf(left, sizeof(left), "%s", clockCalibText());
+        while (utf8Width(left) > 168 && strlen(left) > 1) left[strlen(left) - 1] = '\0';   // 不压右侧日期
+        drawTextUTF8(4, 96, left, 168, true);
+        drawTextUTF8(180, 96, line, 112, true);
+        // 底部 B 行: 倒计时/B粉 简洁也支持 (一言/自定义句不显示)
+        char sub[96];
+        clockBuildSubText(sub, sizeof(sub), false);
+        if (sub[0]) {
+            int sw = utf8Width(sub);
+            int sx = (SCR_W - sw) / 2;
+            if (sx < 0) sx = 0;
+            drawTextUTF8(sx, 114, sub, SCR_W - 2, true);
+        }
     } else {
-        drawTextUTF8(4, 103, clockManagerIsSynced() ? "已校准" : "未校准", 174, true);
+        // ---------- 精美 (重新设计布局; 7 段数码管风格不变) ----------
+        // 顶行: 日期 | 校准 | (12h 上午/下午)
+        snprintf(line, sizeof(line), "%04d年%02d月%02d日", tmNow->tm_year + 1900, tmNow->tm_mon + 1, tmNow->tm_mday);
+        drawTextUTF8(4, 2, line, 132, true);
+        drawTextUTF8(150, 2, clockCalibText(), 60, true);
+        if (settingsGetClockFormat() == 1) drawTextUTF8(258, 2, isAm ? "上午" : "下午", 36, true);
+        // 中置时间数码管 (尺寸适中)
+        const int dw = 46, dh = 60, dt = 6, gap = 6, colonW = 16;
+        const int totalW = dw * 4 + gap * 3 + colonW;
+        int x = (SCR_W - totalW) / 2, y = 16;
+        snprintf(line, sizeof(line), "%02d:%02d", dispH, tmNow->tm_min);
+        drawClockTimeDigits(x, y, dw, dh, dt, gap, colonW, line);
+        // 温湿度: 7 段小号数字大字感 (标签+温度+℃ / 标签+湿度+%), 顺序排布不重叠; 缺失则留空
+        if (wDataValid) {
+            const int mdw = 22, mdh = 28, mdt = 5, mgap = 4;
+            const int gy = 84;
+            const char *tp = wActual.temp[0] ? wActual.temp : "--";
+            const char *hum = wActual.humidity[0] ? wActual.humidity
+                              : (wFuture.humidity[0] ? wFuture.humidity : "--");
+            int gx = 42;
+            drawTextUTF8(gx, gy + 6, "温", 20, true);
+            gx += 16 + 8;
+            gx += drawMini7Seq(gx, gy, mdw, mdh, mdt, mgap, tp, true);
+            drawTextUTF8(gx + 4, gy + 6, "℃", 20, true);
+            gx += 24 + 18;
+            drawTextUTF8(gx, gy + 6, "湿", 20, true);
+            gx += 16 + 8;
+            gx += drawMini7Seq(gx, gy, mdw, mdh, mdt, mgap, hum, true);
+            drawTextUTF8(gx + 4, gy + 6, "%", 20, true);
+        }
+        // 副文本行: 一言/自定义句(仅精美) 与 倒计时/B粉(两风格共用入口)
+        fillRect(0, 100, SCR_W, 1, true);
+        char sub[96];
+        clockBuildSubText(sub, sizeof(sub), true);
+        if (sub[0]) drawTextUTF8(4, 114, sub, 288, true);
     }
     refresh(full);
 }
@@ -5336,6 +5594,7 @@ void setup() {
             // 老板快捷键伪装模式唤醒: 未按 KEY3 → 继续伪装时钟页 (局刷, 面板已是时钟页)。
             // 按了 KEY3 会走上面的 key3Held 分支全刷回主页 (退出伪装 = KEY1 复位 + 1 秒内按 KEY3)。
             appMode = APP_CLOCK_DISGUISE;
+            gClockDisguiseMode = true;   // 伪装恢复: 强制简洁外观
             fbRot = 90;
             yiyanText[0] = '\0';
             lastClockDisplayedMinute = clockManagerNow() / 60;
@@ -5443,6 +5702,16 @@ void setup() {
 
 void loop() {
     uint32_t loopStarted = millis();
+    clockManagerCompTick();   // 时钟手动补偿结算 (内部按分钟闸门, 芯片在场改写芯片秒)
+    // 每天 23:30 静默联网校准 (仅空闲界面且非构建/非配网; 官方: 开=失败停机休眠 / 关=不睡次日再试)
+    if (!txtIndexBuilding && (appMode == APP_HOME || appMode == APP_CLOCK)) {
+        int sc = clockManagerSilentCalTick();
+        if (sc == 2) {
+            Serial.println(F("SILENT_CAL fail & force -> sleep"));
+            enterSleepMode();
+            return;
+        }
+    }
     if (diagLastLoopMs) {
         uint32_t gap = loopStarted - diagLastLoopMs;
         if (gap > diagMaxLoopGap) diagMaxLoopGap = gap;

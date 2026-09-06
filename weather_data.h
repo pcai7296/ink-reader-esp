@@ -14,6 +14,7 @@ struct ActualWeather {
     char weatherName[16]; // 天气现象 (UTF-8, 如"晴")
     char weatherCode[4];  // 天气代码 (如 "0")
     char temp[5];         // 温度 (如 "26", 含负号)
+    char humidity[4];     // 实况相对湿度 % (now.humidity, 如 "62"); 缺失为空串
     char lastUpdate[25];  // 更新时间 (ISO8601, 取 HH:MM 用 [11..14])
 };
 

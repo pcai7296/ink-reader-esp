@@ -69,6 +69,7 @@ bool parseActual(const char* buf, ActualWeather* out) {
     if (!extractString(now, "\"text\"", out->weatherName, sizeof(out->weatherName))) return false;
     if (!extractString(now, "\"code\"", out->weatherCode, sizeof(out->weatherCode))) return false;
     if (!extractString(now, "\"temperature\"", out->temp, sizeof(out->temp))) return false;
+    extractString(now, "\"humidity\"", out->humidity, sizeof(out->humidity));   // 可选(缺省空串)
 
     if (!extractString(buf, "\"last_update\"", out->lastUpdate, sizeof(out->lastUpdate))) return false;
 

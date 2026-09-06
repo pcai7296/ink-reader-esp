@@ -619,6 +619,70 @@ void handleStatus() {
   server.send(200, "application/json; charset=utf-8", json);
 }
 
+// ---- WiFi 历史记录 (2026-09 P5; 官方 /system/wifi.config 的轻量版: LittleFS /wifi_hist.dat) ----
+// historyEnabled=开: 保存连接时记录/去重(上限 8), 配网页「历史网络」下拉可回选;
+// historyEnabled=关: 不再新增记录, 端点返回空(前端隐藏下拉)。格式每行 "ssid|password"。
+static const char WIFI_HIST_PATH[] = "/wifi_hist.dat";
+static const int WIFI_HIST_MAX = 8;
+
+static String wifiHistReadRaw() {
+    String all;
+    File f = LittleFS.open(WIFI_HIST_PATH, "r");
+    if (f) { all = f.readString(); f.close(); }
+    return all;
+}
+
+// 清洗字段: 去掉 | 与换行/控制字符 (防格式破坏), 截到 maxLen
+static String wifiHistCleanField(const String &s, int maxLen) {
+    String out;
+    for (size_t i = 0; i < s.length() && (int)out.length() < maxLen; i++) {
+        char c = s[i];
+        if (c == '|' || c == '\r' || c == '\n' || (unsigned char)c < 0x20) continue;
+        out += c;
+    }
+    return out;
+}
+
+// 新增/去重保存 (新条目放最前, 超上限丢末尾); 返回是否写成功
+static bool wifiHistAdd(const String &ssid, const String &pass) {
+    if (!fileApiEnsureLfsMount()) return false;
+    String s = wifiHistCleanField(ssid, 32);
+    String p = wifiHistCleanField(pass, 63);
+    if (s.length() == 0) return false;
+    String raw = wifiHistReadRaw();
+    String rebuilt;
+    rebuilt.reserve(64 * WIFI_HIST_MAX);
+    rebuilt += s; rebuilt += '|'; rebuilt += p; rebuilt += '\n';
+    int kept = 1;
+    int start = 0;
+    while (kept < WIFI_HIST_MAX) {
+        int nl = raw.indexOf('\n', start);
+        if (nl < 0) nl = raw.length();
+        String line = raw.substring(start, nl);
+        line.trim();
+        start = nl + 1;
+        if (line.length() == 0) { if (nl >= (int)raw.length()) break; continue; }
+        int bar = line.indexOf('|');
+        String oldSsid = (bar > 0) ? line.substring(0, bar) : line;
+        if (oldSsid == s) continue;   // 同 ssid 更新 → 跳过旧条 (新条已在前)
+        rebuilt += line; rebuilt += '\n';
+        kept++;
+        if (nl >= (int)raw.length()) break;
+    }
+    File f = LittleFS.open(WIFI_HIST_PATH, "w");
+    if (!f) return false;
+    f.print(rebuilt);
+    f.close();
+    return true;
+}
+
+static void handleWifiHistGet() {
+    if (settingsGetHistoryEnabled() == 0) { server.send_P(200, PSTR("text/plain; charset=utf-8"), PSTR("")); return; }
+    if (!fileApiEnsureLfsMount()) { server.send_P(500, PSTR("text/plain; charset=utf-8"), PSTR("fs")); return; }
+    String raw = wifiHistReadRaw();
+    server.send(200, "text/plain; charset=utf-8", raw);
+}
+
 void handleSave() {
   bool hasWeather = server.hasArg("city") || server.hasArg("wkey") || server.hasArg("night");
   if (hasWeather) {
@@ -663,6 +727,8 @@ void handleSave() {
   }
   // ★ 照官方"保存立即返回 + 后台连接": 此处只保存凭据并【先发响应】(保持 AP), 不断 AP——避免停 AP 截断 HTTP 响应。
   //   断 AP → 切 STA → 连接 交给 loop 下一轮 wifiConnectPending 处理(响应已发出, fetch 不再 Failed to fetch)。
+  // WiFi 历史 (2026-09 P5): 开关开时记录本次凭据 (去重/上限 8, 配网页「历史网络」回选)
+  if (settingsGetHistoryEnabled()) wifiHistAdd(ssid, password);
   Serial.printf_P(PSTR("WIFI_WEB_SAVE ssidLen=%u\n"), static_cast<unsigned>(ssid.length()));
   server.send_P(200, PSTR("text/html; charset=utf-8"), PSTR("<meta charset='utf-8'><p>已保存，正在连接 WiFi…</p><a href='/'>返回</a>"));
   wifiSaveResult = 0; wifiSaveIp[0] = '\0';   // 重置为"进行中"
@@ -723,6 +789,11 @@ void startAp() {
 
 // ---- 天气配置（定义在匿名命名空间外，与 wifi_manager.h 的全局声明匹配；
 //     匿名空间内符号（WEATHER_EEPROM_ADDR/WEATHER_MAGIC/weatherChecksum）同编译单元可见）----
+// 公开: 清除 WiFi 凭据（匿名 clearConfig 内部链接, 供 ino "重置系统/出厂恢复" 调用）
+void wifiManagerClearConfig() {
+    clearConfig();
+}
+
 bool loadWeatherConfig(WeatherConfig &out) {
   EEPROM.begin(EEPROM_SIZE);   // 确保已初始化（天气页路径不经过 wifiManagerBegin/clockManagerBegin）
   EEPROM.get(WEATHER_EEPROM_ADDR, out);
@@ -1562,6 +1633,7 @@ void wifiManagerBegin(void (*renderCallback)(bool), void (*exitCallback)()) {
     if (uri == "/webdav")                     { handleWebdavAny(); return; }
     if (uri == "/scanwifi" && m == HTTP_GET)  { handleScanWifi(); return; }
     if (uri == "/scandevices" && m == HTTP_GET){ handleScanDevices(); return; }
+    if (uri == "/wifi_hist" && m == HTTP_GET) { handleWifiHistGet(); return; }
     if (uri == "/target")                     { handleTargetAny(); return; }
     if (uri == "/update") {
       server.send_P(200, PSTR("text/html; charset=utf-8"), PSTR("<meta charset='utf-8'><p>OTA 未启用：请先在配网页设置 OTA 密码。</p><a href='/'>返回</a>"));
@@ -1964,14 +2036,107 @@ void clockManagerProbeRtc() {
 }
 
 bool clockManagerIsSynced() { return syncedTime > 1600000000; }
+
+// ---- 时钟手动补偿 (2026-09 P3) ----
+// 官方语义(GCSBS"方法"): 软件钟 = 当前值±[误差秒÷时长(分)×1000] (如 480 分快 50s → +104);
+// 即 clockCompensate ≈ 每真实分钟需修正的毫秒数。方向"快加慢减": 时钟偏快 → 正值 → 回拨。
+// 实现:
+//   * 外挂 BL8025T 在场: 每满 ±1000ms 直接把芯片 epoch 回拨/拨快 1s(持久, 芯片秒寄存器修正);
+//   * 无芯片(软件钟): RAM 累积, clockManagerNow 显示时整体扣除 (余数保留, 深睡/复位丢失, 见文档注)。
+static int32_t gCompAccMs = 0;
+static uint32_t gCompLastMin = 0;
+
+void clockManagerCompTick() {
+    uint32_t m = millis() / 60000UL;
+    if (gCompLastMin == 0) { gCompLastMin = m; return; }
+    if (m == gCompLastMin) return;
+    int32_t mins = (int32_t)(m - gCompLastMin);
+    gCompLastMin = m;
+    if (mins <= 0 || mins > 2) return;   // 深睡后分钟大跳不补偿(避免一次性拨快/拨慢)
+    int32_t comp = settingsGetClockCompensate();
+    if (comp == 0) { gCompAccMs = 0; return; }
+    int64_t acc = (int64_t)gCompAccMs + (int64_t)comp * mins;
+    if (rtc8025Present) {
+        // 芯片路径: 每满 ±1000ms 修正一次芯片(写回秒, 持久)
+        while (acc >= 1000) {
+            time_t e = 0;
+            if (rtc8025ReadEpoch(e)) { e -= 1; rtc8025WriteEpoch(e); }
+            acc -= 1000;
+        }
+        while (acc <= -1000) {
+            time_t e = 0;
+            if (rtc8025ReadEpoch(e)) { e += 1; rtc8025WriteEpoch(e); }
+            acc += 1000;
+        }
+        gCompAccMs = (int32_t)acc;   // 仅余数
+        return;
+    }
+    gCompAccMs = (int32_t)acc;       // 软件钟: 由 clockManagerNow 扣除
+}
+
+// ---- 每天 23:30 静默联网校准 (2026-09 P4) ----
+// 条件: 已存 WiFi 凭据 + 当前时间有效(芯片/软件钟) + 本地 23:30-23:44 窗口 + 当日未尝试。
+// 成功: 写板载 BL8025T/EEPROM 并更新校准时刻(静默, 无校准页/提示)。
+// 失败: 依据强制校准开关返回 2(开→调用方停机休眠) / 3(关→不睡, 次日再试)。
+int clockManagerSilentCalTick() {
+    uint32_t nowMs = millis();
+    static uint32_t lastMinCheck = 0;
+    uint32_t m = nowMs / 60000UL;
+    if (m == lastMinCheck) return 0;
+    lastMinCheck = m;
+    time_t nowT = clockManagerNow();
+    if (nowT < 1600000000UL) return 0;
+    struct tm *tmv = localtime(&nowT);
+    if (!tmv || tmv->tm_hour != 23 || tmv->tm_min < 30 || tmv->tm_min > 44) return 0;
+    int ymd = (tmv->tm_year + 1900) * 10000 + (tmv->tm_mon + 1) * 100 + tmv->tm_mday;
+    static int doneDate = 0;
+    if (doneDate == ymd) return 0;
+    doneDate = ymd;
+    if (!wifiManagerHasCredentials()) return 0;
+    Serial.println(F("SILENT_CAL start 23:30"));
+    if (!wifiManagerEnsureSta(8000UL)) {
+        WiFi.mode(WIFI_OFF);
+        WiFi.disconnect(true);
+        Serial.println(F("SILENT_CAL wifi fail"));
+        return settingsGetClockCalibrationState() ? 2 : 3;
+    }
+    configTime(settingsGetTzOffsetMin() * 60, 0, NTP_SERVER);
+    time_t got = 0;
+    uint32_t dl = millis() + 3500UL;
+    while (static_cast<int32_t>(dl - millis()) > 0) {
+        ESP.wdtFeed();
+        got = time(nullptr);
+        if (got > 1600000000UL) break;
+        delay(100);
+    }
+    if (got <= 1600000000UL) {
+        WiFi.mode(WIFI_OFF);
+        WiFi.disconnect(true);
+        Serial.println(F("SILENT_CAL ntp fail"));
+        return settingsGetClockCalibrationState() ? 2 : 3;
+    }
+    syncedTime = got;
+    syncedAtMs = millis();
+    rtcBaseValid = false;
+    lastCalibrationTime = got;
+    clockManagerPersistSync(got);
+    WiFi.mode(WIFI_OFF);
+    WiFi.disconnect(true);
+    Serial.printf_P(PSTR("SILENT_CAL ok epoch=%lu\n"), (unsigned long)got);
+    return 1;
+}
+
 time_t clockManagerNow() {
   // 用户要求(重要): 读取时间只读外挂 BL8025T (KEY1 复位会清掉 ESP8266 内部 RTC 内存/内存漂移)
   time_t t = 0;
-  if (rtc8025ReadEpoch(t)) return t;
-  // BL8025T 不可用(总线忙/未探测到) → 回退内存漂移
+  if (rtc8025ReadEpoch(t)) return t;   // 芯片路径: 修正已写回芯片, 显示无需再扣
+  // BL8025T 不可用(总线忙/未探测到) → 回退内存漂移 (软件钟: 扣除手动补偿累积)
   if (syncedTime > 1600000000UL) {
-    if (rtcBaseValid) return syncedTime + (system_get_rtc_time() - syncedRtcTicks) / RTC_TICKS_PER_SECOND;
-    return syncedTime + (millis() - syncedAtMs) / 1000UL;
+    time_t raw = 0;
+    if (rtcBaseValid) raw = syncedTime + (system_get_rtc_time() - syncedRtcTicks) / RTC_TICKS_PER_SECOND;
+    else raw = syncedTime + (millis() - syncedAtMs) / 1000UL;
+    if (gCompAccMs != 0) raw -= (time_t)(gCompAccMs / 1000);
+    return raw;
   }
   return 0;
 }

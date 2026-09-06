@@ -14,6 +14,9 @@ void wifiManagerSetWebNotifyCb(WebSettingsNotifyCb cb);
 // 配网堆预算审计探针（临时, 审计完成后移除）
 void auditHeap(const char *phase);
 
+// 清除 WiFi 凭据（EEPROM 区）; 供"重置系统/恢复出厂"调用（内部 clearConfig 在匿名命名空间, 需公开封装）
+void wifiManagerClearConfig();
+
 void wifiManagerBegin(void (*renderCallback)(bool), void (*exitCallback)());
 void wifiManagerLoop();
 void wifiManagerHandleKeys(int middleEvent, int rightEvent);
@@ -28,6 +31,10 @@ void clockManagerBegin(void (*renderCallback)(bool), void (*doneCallback)());
 void clockManagerLoop();
 void clockManagerHandleKeys(int middleEvent, int rightEvent);
 void clockManagerProbeRtc();   // 开机早期探测外挂 BL8025T (否则 rtc8025Present=false, 时间读不到)
+void clockManagerCompTick();   // 时钟补偿结算: 每秒/每分钟由主 loop 调用; 芯片在场改写芯片秒, 否则累积供软件钟修正
+// 每天 23:30 静默联网校准 (需已存 WiFi 凭据 + 时间有效): 返回 0=未到窗口/无凭据 1=成功
+// 2=失败且强制校准开启(调用方应停机休眠) 3=失败且强制校准关闭(不睡, 次日再试)
+int clockManagerSilentCalTick();
 bool clockManagerIsActive();
 bool clockManagerIsSynced();
 void clockManagerPersistNow();

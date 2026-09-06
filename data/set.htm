@@ -43,7 +43,7 @@
 <body>
 <div class="wrap">
   <h1>墨水屏管理设置</h1>
-  <p class="sub">设备全部设置项集中于此；标注 <span class="tag warn">仅存值</span> 的项可保存并持久化，屏幕端行为随后续固件版本开放。</p>
+  <p class="sub">设备全部设置项集中于此；保存后即时生效（时钟类型/一言/倒计时/B粉需进时钟页查看）。</p>
 
   <div class="toolbar">
     <a class="btn primary" href="/fs/edit">📁 文件管理</a>
@@ -64,6 +64,12 @@
       <button type="button" class="btn" onclick="scanWifi()">扫描</button>
       <button type="button" class="btn" onclick="useWifi()">选用</button>
       <span class="hint">可扫描选用，也可手动输入网络名</span>
+    </div>
+    <div class="row" id="rowHist" style="display:none">
+      <span class="lbl">历史网络</span>
+      <select id="histList" style="min-width:220px"><option value="">-- 无历史 --</option></select>
+      <button type="button" class="btn" onclick="useHist()">选用</button>
+      <span class="hint">开启「历史记录」时保存的 WiFi；点选用回填上方名称/密码</span>
     </div>
     <div class="row">
       <span class="lbl">WiFi 名称</span>
@@ -108,18 +114,16 @@
     </div>
     <div class="row">
       <span class="lbl">历史记录</span>
-      <span class="tag warn">仅存值</span>
       <input type="checkbox" id="sw_hist" onchange="saveField('history',this.checked?'1':'0')">
       <label for="sw_hist" class="state" id="st_hist">-</label>
-      <span class="hint">最近阅读/历史的记录与展示开关；当前仅保存回显，屏幕端展示行为随后续固件版本生效</span>
+      <span class="hint">WiFi 历史记录（官方语义）：开=保存已连接网络并在上方「历史网络」回选；关=停止记录并隐藏列表</span>
     </div>
     <div class="row">
       <span class="lbl">时钟强制校准</span>
-      <span class="tag warn">仅存值</span>
       <select id="sw_ccs" onchange="saveField('clockCalibrationState',this.value)">
         <option value="1">开</option><option value="0">关</option>
       </select>
-      <details><summary>说明</summary><div class="help">每天 23:30 静默联网校准；开启=校准失败停机休眠 / 关闭=校准失败不停机。当前仅保存回显，设备端策略随后续固件版本生效。</div></details>
+      <details><summary>说明</summary><div class="help">每天 23:30 静默联网校准（需已存 WiFi 凭据且当时空闲）；开启=校准失败停机休眠；关闭=校准失败不停机，次日再试。</div></details>
     </div>
     <div class="row">
       <span class="lbl">时钟格式</span>
@@ -127,11 +131,10 @@
     </div>
     <div class="row">
       <span class="lbl">时钟类型</span>
-      <span class="tag warn">仅存值</span>
       <select id="sw_clkmod" onchange="saveField('clockMod',this.value)">
         <option value="0">简洁</option><option value="1">精美</option>
       </select>
-      <details><summary>说明</summary><div class="help">简洁=大时间小温湿度无一言；精美=中置时间大温湿度、支持一言自定义句；均支持倒计时与 B 粉。当前仅保存回显，时钟页样式随后续固件版本生效。</div></details>
+      <details><summary>说明</summary><div class="help">简洁=大时间(数码管)、小温湿度、不显示一言/自定义句；精美=新布局、大温湿度、支持一言/自定义句；倒计时与 B粉 两风格都支持。数码管风格不变。</div></details>
     </div>
     <div class="row">
       <span class="lbl">SD 卡启用</span>
@@ -160,9 +163,8 @@
     </div>
     <div class="row">
       <span class="lbl">时钟补偿</span>
-      <span class="tag warn">仅存值</span>
       <input type="number" id="nm_cp" min="-32767" max="32767" step="1" style="width:110px">
-      <span class="hint">软硬件时钟补偿值，需按换算公式设置；当前仅保存回显，设备端换算随后续固件版本生效</span>
+      <details><summary>换算</summary><div class="help">快加慢减。软件钟：误差秒÷时长(分)×1000（如 480 分快 50s → +104）；硬件(有时钟芯片)：一天快 1 秒填 1000、慢 1 秒填 -1000。补偿按分钟结算，芯片在场直接修正芯片秒。</div></details>
     </div>
     <div class="row">
       <span class="lbl">时钟校准间隔</span>
@@ -204,18 +206,18 @@
     <div class="row">
       <span class="lbl">一言</span>
       <select id="dev_hito" onchange="saveField('hitokoto',this.value)"><option value="1">开启</option><option value="0">关闭</option></select>
-      <span class="hint">时钟页显示一言；自定义内容请用下方“多功能输入框”（当前仅存值，效果随后续固件版本开放）</span>
+      <span class="hint">时钟页显示一言（仅“精美”时钟）；自定义内容用下方“多功能输入框”</span>
     </div>
   </div>
 
   <!-- ⑥ 多功能输入框 -->
   <div class="card">
-    <h2>多功能输入框（InAWord） <span class="tag warn">仅存值</span></h2>
+    <h2>多功能输入框（InAWord）</h2>
     <div class="row">
       <textarea id="ta_word" maxlength="64" rows="2" style="width:100%" placeholder="一言模式…"></textarea>
     </div>
     <div class="row">
-      <span class="hint">语法（官方）：空白=一言模式 · 自定义句 ≤21 汉字 · “倒+年月日+事件”（补 0，如 倒20230607高考）=倒计时 · “B粉+UID”=B站粉丝 · 文本“重置系统”=恢复出厂。当前仅保存回显，上述语义随后续固件版本生效。</span>
+      <span class="hint">语法（官方，进时钟页生效）：空白=一言（仅精美显示）· 自定义句 ≤21 汉字（仅精美）· “倒+年月日+事件”（补 0，如 倒20230607高考）=倒计时（两风格）· “B粉+UID”=B站粉丝（两风格）· 文本“重置系统”=恢复出厂并重启。</span>
     </div>
     <div class="row"><button type="button" class="btn primary" onclick="saveInAWord()">保存</button></div>
   </div>
@@ -232,7 +234,7 @@
 
   <footer>
     <nav class="links"><a href="/status">状态 JSON</a> · <a href="/info">信息 JSON</a> · <a href="/settings.json">设置快照</a></nav>
-    <div style="margin-top:6px">面板 v2 · 标注「仅存值」的项可保存/持久化/回显，屏幕端行为随后续固件版本开放</div>
+    <div style="margin-top:6px">面板 v3 · 全部设置项即时生效；WiFi 历史/时钟校准等字段语义与官方一致</div>
   </footer>
 </div>
 
@@ -256,12 +258,15 @@ function loadAll(){
     $('dev_hito').value=String(S.hitokotoEnabled);
     $('cityState').textContent=S.city||'(未设置，默认深圳)';
     $('keyState').textContent=(S.weatherKey==1)?'已配置':'未配置';
-    // 2026-09 新增: Web 层可设置项（仅存值, 屏幕端行为随后续固件版本）
+    // 2026-09 已实装生效: 历史/强制校准/时钟类型/补偿/多功能输入框
     $('sw_hist').checked=(S.history==1); $('st_hist').textContent=(S.history==1)?'开':'关';
     $('sw_ccs').value=String(S.clockCalibrationState);
     $('sw_clkmod').value=String(S.clockMod);
     $('nm_cp').value=S.clockCompensate;
     $('ta_word').value=S.inAWord||'';
+    // WiFi 历史下拉: 开关开 → 拉取并显示; 关 → 隐藏
+    $('rowHist').style.display=(S.history==1)?'flex':'none';
+    if(S.history==1) loadHist();
   }).catch(function(e){msg('设置回显失败:'+e,'err');});
   fetch('/status').then(function(r){return r.json();}).then(function(j){
   }).catch(function(){});
@@ -277,6 +282,24 @@ function scanWifi(){
   }).catch(function(e){msg('扫描失败:'+e,'err');});
 }
 function useWifi(){var s=$('wifiList');if(s&&s.value)$('ssid').value=s.value;}
+// ---- WiFi 历史 (P5): 服务端 /wifi_hist 返回 "ssid|pass" 每行; 点选用回填
+function loadHist(){
+  fetch('/wifi_hist').then(function(r){return r.text();}).then(function(t){
+    var sel=$('histList'); sel.innerHTML='';
+    var n=0;
+    t.split('\n').forEach(function(ln){
+      ln=ln.trim(); if(!ln) return;
+      var i=ln.indexOf('|'); if(i<=0) return;
+      var o=document.createElement('option'); o.value=ln; o.text=ln.substring(0,i);
+      sel.appendChild(o); n++;
+    });
+    if(n===0){var o=document.createElement('option');o.value='';o.text='-- 无历史 --';sel.appendChild(o);}
+  }).catch(function(){});
+}
+function useHist(){
+  var v=$('histList').value; var i=v.indexOf('|');
+  if(i>0){ $('ssid').value=v.substring(0,i); $('wpass').value=v.substring(i+1); }
+}
 
 // ---- 通用 POST ----
 function post(url,fd,okText){
@@ -338,7 +361,7 @@ function clearConfig(){
   post('/clear',fd,'配置已清除');
 }
 
-// ---- 多功能输入框 InAWord（2026-09 已可保存/回显; 语义随后续固件版本）----
+// ---- 多功能输入框 InAWord（已实装: 进时钟页按官方语法生效）----
 function saveInAWord(){
   var fd=new FormData();
   fd.set('inAWord',$('ta_word').value);
