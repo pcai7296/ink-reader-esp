@@ -101,6 +101,13 @@ ink-reader-esp/
 arduino-cli compile --fqbn esp8266:esp8266:d1_mini --libraries libraries --build-path "J:\code\esp8266\ink-reader-esp\build" ink-reader-esp.ino
 # 烧录前核对 build\ink-reader-esp.ino.bin 时间戳（bin 名是 ink-reader-esp.ino.bin，不是 .d1_mini.bin）
 esptool.py --port COM20 --baud 460800 write_flash 0x0 "J:\code\esp8266\ink-reader-esp\build\ink-reader-esp.ino.bin"
+# ⭐ 一体化工具(勿重建, 详见根 AGENTS.md): 条件编译+烧录+串口监听+自动释放占口+日志递增
+python esp_dev.py                          # 全流程(无宏/普通版)
+python esp_dev.py --boot-ap                # = BOOT_AP_MODE=1 编译并烧录监听
+python esp_dev.py -D SERIAL_REMOTE=1 --steps build
+python esp_dev.py --fs 0x200000=build/data.littlefs.bin   # 固件+数据一起烧
+python esp_dev.py --steps monitor          # 只监听(日志 serial_logs/log_N.txt 自动递增, 断线自连)
+python esp_dev.py --dry-run --boot-ap      # 打印命令不执行
 ```
 
 ## NOTES
