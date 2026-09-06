@@ -1740,8 +1740,8 @@ void renderClockPage(bool full) {
         drawClockTimeDigits(x, y, dw, dh, dt, gap, colonW, line);
         // 温湿度: 7 段小号数字大字感 (标签+温度+℃ / 标签+湿度+%), 顺序排布不重叠; 缺失则留空
         if (wDataValid) {
-            const int mdw = 22, mdh = 28, mdt = 5, mgap = 4;
-            const int gy = 84;
+            const int mdw = 22, mdh = 24, mdt = 4, mgap = 4;
+            const int gy = 84;   // 温湿度区 84..108, 为下方副文本行让位
             const char *tp = wActual.temp[0] ? wActual.temp : "--";
             const char *hum = wActual.humidity[0] ? wActual.humidity
                               : (wFuture.humidity[0] ? wFuture.humidity : "--");
@@ -1756,11 +1756,10 @@ void renderClockPage(bool full) {
             gx += drawMini7Seq(gx, gy, mdw, mdh, mdt, mgap, hum, true);
             drawTextUTF8(gx + 4, gy + 6, "%", 20, true);
         }
-        // 副文本行: 一言/自定义句(仅精美) 与 倒计时/B粉(两风格共用入口)
-        fillRect(0, 100, SCR_W, 1, true);
+        // 副文本行: 一言/自定义句(仅精美) 与 倒计时/B粉(两风格共用入口); 无分割线避免与温湿度区交错
         char sub[96];
         clockBuildSubText(sub, sizeof(sub), true);
-        if (sub[0]) drawTextUTF8(4, 114, sub, 288, true);
+        if (sub[0]) drawTextUTF8(4, 112, sub, 288, true);
     }
     refresh(full);
 }
