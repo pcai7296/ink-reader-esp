@@ -733,7 +733,6 @@ struct ChapterRow {
     char title[64];
     uint32_t page;
 };
-ChapterRow chapterRows[LIST_ROWS];
 uint32_t chapterTopOffset = 0;
 uint32_t chapterNextOffset = 0;
 uint32_t chapterTopLine = 0;
@@ -745,7 +744,31 @@ int chapterCountLoaded = 0;
 // ③页偏移表: 建表一次 O(n) (6000 章约 2.2s, 建表时有喂狗), 之后向前/向后翻页全 O(1)。
 // (P0 内存审计: 原 chapterRowOffsets[6] 只写不读已删)
 static const int CHAPTER_PAGE_TABLE_MAX = 1024;   // 最多 1024 页 (= 6144 章, 覆盖《武炼巅峰》947 页)
-static uint32_t chapterPageOffsets[CHAPTER_PAGE_TABLE_MAX];   // pageOffsets[p-1] = 第 p 页首行偏移 (4KB RAM)
+// P1 内存审计: 章节行数组(408B)+页表(4KB)只在 APP_CHAPTERS 会话存活 → 合并为一块
+// 惰性 malloc, 进目录/唤醒恢复时分配, 退出(closeTxtReader/跳章回正文)释放——阅读期间
+// 这 4.5KB 归还给堆。失败降级: 保持 NULL → 建表/装行失败, chapterPrevPage 走
+// seekChapterOffset 全扫兜底, 空列表可渲染不崩。
+static uint8_t *chapterBuf = NULL;   // [ChapterRow[LIST_ROWS]][uint32[CHAPTER_PAGE_TABLE_MAX]]
+ChapterRow *chapterRows = NULL;
+static uint32_t *chapterPageOffsets = NULL;
+static const size_t kChapterPageTabOff = sizeof(ChapterRow) * LIST_ROWS;
+static const size_t kChapterBufSize = kChapterPageTabOff + sizeof(uint32_t) * CHAPTER_PAGE_TABLE_MAX;
+
+static bool chapterEnsureBuffers() {
+    if (chapterBuf) return true;
+    chapterBuf = (uint8_t *)malloc(kChapterBufSize);
+    if (!chapterBuf) { traceFmtLevel('W', "CH_BUF_ALLOC_FAIL need=%lu", (unsigned long)kChapterBufSize); return false; }
+    chapterRows = (ChapterRow *)chapterBuf;
+    chapterPageOffsets = (uint32_t *)(chapterBuf + kChapterPageTabOff);
+    return true;
+}
+static void chapterFreeBuffers() {
+    if (!chapterBuf) return;
+    free(chapterBuf);
+    chapterBuf = NULL;
+    chapterRows = NULL;
+    chapterPageOffsets = NULL;
+}
 
 // ---------- 阅读器菜单 (局部刷新弹窗, 对齐 A7 7 项 + 扩展) ----------
 bool readerMenuOpen = false;
@@ -4704,6 +4727,7 @@ void loadChapterRows(uint32_t offset) {
         chapterCountLoaded = 0;
         return;
     }
+    if (!chapterEnsureBuffers()) { chapterCountLoaded = 0; return; }   // 低堆: 空列表不崩
     chapterCountLoaded = 0;
     chapterTopOffset = offset;
     File f = readerFs().open(txtChapterPath.c_str(), "r");
@@ -4731,6 +4755,7 @@ void loadChapterRows(uint32_t offset) {
 static uint32_t chapterPageTableCount = 0;   // 已建表页数 (== chapterTotalPages 精确值)
 
 static void chapterBuildPageTable() {
+    if (!chapterEnsureBuffers()) { chapterPageTableCount = 0; return; }   // 低堆: 翻页走 seek 兜底
     if (!readerBusReady("chapter_table")) return;
     File f = readerFs().open(txtChapterPath.c_str(), "r");
     if (!f) { chapterPageTableCount = 0; return; }
@@ -4989,6 +5014,7 @@ static void abortIndexBuild() {
 }
 
 void closeTxtReader() {
+    chapterFreeBuffers();   // P1: 离开章节目录, 4.5KB 章节缓冲归还堆
     progressFlushForce("close");   // P6: 退出阅读落盘待写进度
     if (txtIndexBuilding) {
         // 构建中退出: 保留构建句柄后台继续 (loop 公共 indexTaskStep 继续喂),
@@ -6678,6 +6704,7 @@ void loop() {
                         writeProgress(txtPageStart);
                         appMode = APP_READER;
                         renderTxtPage(true);
+                        chapterFreeBuffers();   // P1: 回正文, 章节缓冲归还堆 (渲染已完成)
                     }
                 } else if (chapterSel == 6) {
                     chapterPrevPage();
