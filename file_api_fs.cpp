@@ -20,13 +20,17 @@
 #include "wifi_manager.h"
 #include "sd_path.h"
 #include "sd_file_ops.h"
-#include <SDFS.h>   // SDFS.openDir + Dir::next()（官方 A7 枚举同款; 大目录枚举修复）
+#include <SDFS.h>   // 官方 A7 同款枚举能力: Dir::next()（大目录枚举修复）
+// 介质抽象 (定义于 ink-reader-esp.ino): 管理器跟随 gBrowseLocal 选择 LittleFS/SD
+fs::FS &activeFileFs();
+bool activeFsIsLocal();
+bool activeFsBusReady(const char *reason);
 #include "fs_cache.h"
 #include <LittleFS.h>
 #include <ESP8266WebServer.h>
 
 extern bool sdAvailable;   // ink-reader-esp.ino 全局: SD 挂载标志（/fs/status O(1) 只读）
-extern bool reinitSdBus(const char *reason);
+extern bool activeFsBusReady(const char *reason);
 bool fileApiGetCachedCapacity(uint64_t *total, uint64_t *used);   // file_api.cpp
 
 static ESP8266WebServer &srv() { return wifiManagerServer(); }
@@ -176,7 +180,7 @@ static void ofsParent(const char *path, char *out, size_t outSize) {
 // 官方 lastExistingParent: 父链上溯到现存祖先（rename/delete 响应用）; 无现存 → 空串
 static void ofsLastExistingParent(const char *path, char *out, size_t outSize) {
   ofsParent(path, out, outSize);
-  while (out[0] && !SD.exists(out)) {
+  while (out[0] && !activeFileFs().exists(out)) {
     char up[300];
     ofsParent(out, up, sizeof(up));
     snprintf(out, outSize, "%s", up);
@@ -258,15 +262,15 @@ static void handleOfsList() {
   // ★ 浏览走 LittleFS 缓存（进 AP 前 fsCacheBuild 扫描好的 SD 目录树; 照抄官方"文件管理用 LittleFS"）。
   //   避开"配网会话实时遍历 SD × AP hostap_input"的 esf_buf_alloc 竞争（崩溃根因）。
   //   缓存不存在（扫描失败/超上限目录）→ 回退直接读 SD（保留原路径, 不静默 500）。
-  if (fsCacheServeList(path, start, count, hideAuto)) {
+  if (!activeFsIsLocal() && fsCacheServeList(path, start, count, hideAuto)) {
     fsListProbeDetail("FSREQ_DONE(cached)", start, count, 0, false);
     gFsListJustHandled = true;
     return;
   }
 
-  if (!reinitSdBus("fs_list")) { ofsReply(500, "FS INIT ERROR"); return; }
-  if (strcmp(path, "/") != 0 && !SD.exists(path)) { ofsReplyBadRequest("BAD PATH"); return; }
-  { File probe = SD.open(path, FILE_READ);
+  if (!activeFsBusReady("fs_list")) { ofsReply(500, "FS INIT ERROR"); return; }
+  if (strcmp(path, "/") != 0 && !activeFileFs().exists(path)) { ofsReplyBadRequest("BAD PATH"); return; }
+  { File probe = activeFileFs().open(path, "r");
     if (!probe || !probe.isDirectory()) { if (probe) probe.close(); ofsReplyBadRequest("BAD PATH"); return; }
     probe.close(); }
   if (!s.chunkedResponseModeStart(200, "text/json")) {
@@ -311,11 +315,11 @@ static void handleOfsEditPut() {
   char *path = gOpPath;
   if (!normalizeApiPath(pathArg.c_str(), path, 300)) { ofsReplyBadRequest("BAD PATH"); return; }
   if (strcmp(path, "/") == 0) { ofsReplyBadRequest("BAD PATH"); return; }
-  if (!reinitSdBus("fs_put")) { ofsReply(500, "FS INIT ERROR"); return; }
+  if (!activeFsBusReady("fs_put")) { ofsReply(500, "FS INIT ERROR"); return; }
 
   String srcArg = s.arg("src");
   if (srcArg.length() == 0) {
-    if (SD.exists(path)) { ofsReplyBadRequest("PATH FILE EXISTS"); return; }
+    if (activeFileFs().exists(path)) { ofsReplyBadRequest("PATH FILE EXISTS"); return; }
     if (isProtectedPath(path)) { ofsReply(403, "protected"); return; }
     size_t plen = strlen(path);
     bool isDir = (plen > 0 && path[plen - 1] == '/');
@@ -327,7 +331,7 @@ static void handleOfsEditPut() {
       snprintf(lab, 220, "新建文件夹:%s", d);
       ofsOpReport(OFS_OP_PHASE_START, lab);
       ESP.wdtFeed();
-      if (!SD.mkdir(d)) { ofsOpReport(OFS_OP_PHASE_FAIL, lab); ofsReply(500, "MKDIR FAILED"); return; }
+      if (!activeFileFs().mkdir(d)) { ofsOpReport(OFS_OP_PHASE_FAIL, lab); ofsReply(500, "MKDIR FAILED"); return; }
       ESP.wdtFeed();
       ofsOpReport(OFS_OP_PHASE_DONE, lab);
       char *parent = gOpC;
@@ -340,7 +344,7 @@ static void handleOfsEditPut() {
       snprintf(lab, 220, "新建:%s", path);
       ofsOpReport(OFS_OP_PHASE_START, lab);
       ESP.wdtFeed();
-      File f = SD.open(path, "w");
+      File f = activeFileFs().open(path, "w");
       if (!f) { ofsOpReport(OFS_OP_PHASE_FAIL, lab); ofsReply(500, "CREATE FAILED"); return; }
       f.write((const char *)0);           // Print::write 有 NULL 保护, 等价建空文件
       f.close();
@@ -358,7 +362,7 @@ static void handleOfsEditPut() {
   char *src = gOpA;
   if (!normalizeApiPath(srcArg.c_str(), src, 300)) { ofsReplyBadRequest("BAD SRC"); return; }
   if (strcmp(src, "/") == 0) { ofsReplyBadRequest("BAD SRC"); return; }
-  if (!SD.exists(src)) { ofsReply(404, "SRC FILE NOT FOUND"); return; }
+  if (!activeFileFs().exists(src)) { ofsReply(404, "SRC FILE NOT FOUND"); return; }
   if (isProtectedPath(src) || isProtectedPath(path)) { ofsReply(403, "protected"); return; }
   char *t = gOpB;
   snprintf(t, 300, "%s", path);
@@ -366,12 +370,12 @@ static void handleOfsEditPut() {
   char *s2 = src;                          // src 用后即弃, 就地除尾斜杠作 s2
   size_t sl = strlen(s2); if (sl > 1 && s2[sl - 1] == '/') s2[sl - 1] = '\0';
   if (strcmp(s2, t) == 0) { ofsReplyBadRequest("PATH FILE EXISTS"); return; }
-  if (SD.exists(t)) { ofsReplyBadRequest("PATH FILE EXISTS"); return; }
+  if (activeFileFs().exists(t)) { ofsReplyBadRequest("PATH FILE EXISTS"); return; }
   char *lab = gOpLab;
   snprintf(lab, sizeof(gOpLab), "重命名/移动:%s → %s", s2, t);
   ofsOpReport(OFS_OP_PHASE_START, lab);
   ESP.wdtFeed();
-  if (!SD.rename(s2, t)) { ofsOpReport(OFS_OP_PHASE_FAIL, lab); ofsReply(500, "RENAME FAILED"); return; }
+  if (!activeFileFs().rename(s2, t)) { ofsOpReport(OFS_OP_PHASE_FAIL, lab); ofsReply(500, "RENAME FAILED"); return; }
   ESP.wdtFeed();
   ofsOpReport(OFS_OP_PHASE_DONE, lab);
   char *parent = gOpC, *srcParent = gOpPath;   // gOpPath 的 path 已用完
@@ -388,18 +392,18 @@ static void handleOfsEditPut() {
 #define OFS_MAX_DEPTH 16
 static bool ofsDeleteRecursive(const char *path, int depth, int *count) {
   if (depth > OFS_MAX_DEPTH) return false;
-  File f = SD.open(path, FILE_READ);
+  File f = activeFileFs().open(path, "r");
   if (!f) return false;
   bool isDir = f.isDirectory();
   f.close();
-  if (!isDir) return SD.remove(path);
+  if (!isDir) return activeFileFs().remove(path);
   {
-    File p = SD.open(path, FILE_READ);
+    File p = activeFileFs().open(path, "r");
     bool okDir = p && p.isDirectory();
     if (p) p.close();
     if (!okDir) return false;
   }
-  Dir d = SDFS.openDir(path);
+  Dir d = activeFileFs().openDir(path);
   bool ok = true;
   int sinceFeed = 0;
   while (d.next()) {
@@ -413,7 +417,7 @@ static bool ofsDeleteRecursive(const char *path, int depth, int *count) {
     (*count)++;
   }
   if (!ok) return false;
-  return SD.rmdir(path);
+  return activeFileFs().rmdir(path);
 }
 
 static void handleOfsEditDelete() {
@@ -423,9 +427,9 @@ static void handleOfsEditDelete() {
   char *path = gOpPath;
   if (!normalizeApiPath(pathArg.c_str(), path, 300)) { ofsReplyBadRequest("BAD PATH"); return; }
   if (strcmp(path, "/") == 0) { ofsReplyBadRequest("BAD PATH"); return; }
-  if (!reinitSdBus("fs_del")) { ofsReply(500, "FS INIT ERROR"); return; }
+  if (!activeFsBusReady("fs_del")) { ofsReply(500, "FS INIT ERROR"); return; }
   if (isProtectedPath(path)) { ofsReply(403, "protected"); return; }
-  if (!SD.exists(path)) { ofsReply(404, "FILE NOT FOUND"); return; }
+  if (!activeFileFs().exists(path)) { ofsReply(404, "FILE NOT FOUND"); return; }
   // ★ 通用操作墨水屏通知: 动手删除前 START, 成/败 DONE/FAIL（渲染在 loop, 此处只记录）
   char *lab = gOpLab;
   snprintf(lab, sizeof(gOpLab), "删除:%s", path);
@@ -524,8 +528,8 @@ static void handleOfsEditUploadCb() {
     if (!normalizeApiPath(filename.c_str(), ofsUpPath, sizeof(ofsUpPath))) { ofsUpFail(400, "BAD PATH"); return; }
     if (strcmp(ofsUpPath, "/") == 0) { ofsUpFail(400, "BAD PATH"); return; }
     if (isProtectedPath(ofsUpPath)) { ofsUpFail(403, "protected"); return; }
-    if (!reinitSdBus("fs_upopen")) { ofsUpFail(500, "FS INIT ERROR"); return; }
-    ofsUpFile = SD.open(ofsUpPath, "w");
+    if (!activeFsBusReady("fs_upopen")) { ofsUpFail(500, "FS INIT ERROR"); return; }
+    ofsUpFile = activeFileFs().open(ofsUpPath, "w");
     if (!ofsUpFile) { ofsUpFail(500, "创建失败"); return; }
     Serial.printf_P(PSTR("OFS_UP_START %s heap=%u\n"), ofsUpPath, (unsigned)ESP.getFreeHeap());
     ofsUpReport(OFS_UP_PHASE_UPLOADING);   // ★ 上传开始 → 墨水屏"上传中"
@@ -537,7 +541,7 @@ static void handleOfsEditUploadCb() {
     if (bytesWritten != upload.currentSize) {
       // 写入失败(空间不足等): 删半成品 + 标记错误(官方 LittleFS.remove + replyServerError)
       ofsUpFile.close(); ofsUpFile = File();
-      if (ofsUpPath[0] && SD.exists(ofsUpPath)) SD.remove(ofsUpPath);
+      if (ofsUpPath[0] && activeFileFs().exists(ofsUpPath)) activeFileFs().remove(ofsUpPath);
       ofsUpFail(507, "存储空间不足");
       Serial.printf_P(PSTR("OFS_UP_WRITE_FAIL path=%s wrote=%u cur=%u\n"),
                     ofsUpPath, (unsigned)bytesWritten, (unsigned)upload.currentSize);
@@ -552,7 +556,7 @@ static void handleOfsEditUploadCb() {
       ofsUpFile.close();
     }
     if (ofsUpErr == 0 && ofsUpSize == 0) {
-      SD.remove(ofsUpPath);
+      activeFileFs().remove(ofsUpPath);
       ofsUpFail(500, "上传失败，空文件或存储空间不足");
     }
     Serial.printf_P(PSTR("OFS_UP_END %s size=%llu err=%d\n"), ofsUpPath,
@@ -565,7 +569,7 @@ static void handleOfsEditUploadCb() {
     Serial.printf_P(PSTR("OFS_UP_ABORTED path=%s size=%llu\n"), ofsUpPath, (unsigned long long)ofsUpSize);
     ofsUpReport(OFS_UP_PHASE_FAIL);   // ★ 上传中止/失败 → 墨水屏"上传失败"（须在 reset 前, 拿 path）
     if (ofsUpFile) { ofsUpFile.close(); ofsUpFile = File(); }
-    if (ofsUpPath[0] && SD.exists(ofsUpPath)) SD.remove(ofsUpPath);   // 清理半成品
+    if (ofsUpPath[0] && activeFileFs().exists(ofsUpPath)) activeFileFs().remove(ofsUpPath);   // 清理半成品
     ofsUpReset();
     ofsReply(500, "upload_aborted");
   }
@@ -624,8 +628,8 @@ static void handleOfsFile() {
   static char path[300];
   if (!normalizeApiPath(pathArg.c_str(), path, sizeof(path))) { ofsReplyBadRequest("BAD PATH"); return; }
   if (isUploadingTemp(path)) { ofsReply(403, "upload_in_progress"); return; }
-  if (!reinitSdBus("fs_file")) { ofsReply(500, "FS INIT ERROR"); return; }
-  File f = SD.open(path, FILE_READ);
+  if (!activeFsBusReady("fs_file")) { ofsReply(500, "FS INIT ERROR"); return; }
+  File f = activeFileFs().open(path, "r");
   if (!f) { ofsReply(404, "FILE NOT FOUND"); return; }
   if (f.isDirectory()) { f.close(); ofsReplyBadRequest("BAD PATH"); return; }
   uint64_t size = (uint64_t)f.size();
@@ -791,10 +795,10 @@ static void ofsAbSample(int kind) {
 void ofsAbTestTick() {
 #if OFS_ABTEST_MODE == 1
   // 实验组 B: 极小 SD 读（严格单变量: 唯一新增 = "SD 访问"; 不复用 reinitSdBus, 因 reinit 是
-  // "恢复 SPI 总线"机制而非"SD 访问"本身, 且 setup 已 SD.begin 挂载保持 sdAvailable=true）。
-  // PHP: SD 若已卸载 SD.exists 也会触发底层探测——若返回 false 打 SD_NOMNT, 单凭这点即知 SD 状态。
+  // "恢复 SPI 总线"机制而非"SD 访问"本身, 且 setup 已 activeFileFs().begin 挂载保持 sdAvailable=true）。
+  // PHP: SD 若已卸载 activeFileFs().exists 也会触发底层探测——若返回 false 打 SD_NOMNT, 单凭这点即知 SD 状态。
   {
-    File f = SD.open("/test.txt", FILE_READ);
+    File f = activeFileFs().open("/test.txt", "r");
     if (f) {
       uint8_t tmp[16];
       f.read(tmp, sizeof(tmp));
@@ -802,7 +806,7 @@ void ofsAbTestTick() {
       ofsAbSample(1);
     } else {
       // /test.txt 不在: 读 SD 根目录首个文件前 16B（等价的极小 SD 访问, 单变量不变）
-      Dir root = SDFS.openDir("/");
+      Dir root = activeFileFs().openDir("/");
       if (root.next()) {
         File ef = root.openFile("r");
         if (ef) { uint8_t tmp[16]; ef.read(tmp, sizeof(tmp)); ef.close(); }
@@ -814,7 +818,7 @@ void ofsAbTestTick() {
   }
 #elif OFS_ABTEST_MODE == 2
   // 实验组 C: 最接近 /fs/list 的 SD 访问（sdListDirPaged 前 10 项, 无 HTTP/JSON/chunked/sendContent）
-  if (reinitSdBus("abtest_lst")) {
+  if (activeFsBusReady("abtest_lst")) {
     size_t emitted = 0; bool hasMore = false;
     sdListDirPaged("/", 0, 10, ofsAbReadTinyCb, NULL, &emitted, &hasMore);
     (void)hasMore;

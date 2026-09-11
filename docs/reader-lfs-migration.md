@@ -142,3 +142,102 @@ P2 之后阅读期间 SD 处于 `end()` 状态，因此以下**非阅读实时�
 - 调用点：时钟校准终态（校时成功 `clock_ntp_ok` / 天气时间成功 `clock_weather_ok` / 无凭据 `clock_no_creds` / WiFi 超时 `clock_wifi_timeout` / 天气失败 `clock_weather_fail` / 跳过 `clock_skip`）；天气页退出 `weather_exit`；配网页退出 `network_exit`；进入阅读 `reader_enter`（`startTxtReader`）；阅读循环兜底断言 `reader_assert`（任何漏关都会在此纠正并留日志）。
 - 依据：官方 `WifiShutdown()`（`Other.ino:25-29`）= `WiFi.mode(WIFI_OFF)`，在 `Clock_8025T.ino:93`、`DisplaySetup.ino:194-195`、`DisplayTxt.ino:854` 处调用（见 `REVERSE_NOTES.md §13`）。
 - 验收：串口日志出现对应 `RF_OFF reason=…`；阅读页不再出现 `reader_assert`（出现即说明仍有流程漏关）。
+
+---
+
+## 14. P3/P4 实机验收记录（2026-09，T1 测试书；无按键自动化）
+
+**部署方式（用户定稿路径）**：设备切内部介质 → Web 文件管理 `POST /fs/edit` 上传 `T1_300k.txt` → 校验 `GET /fs/file?path=/T1_300k.txt` 返回 **200 / 307,356 字节**（与源文件一致 ⇒ 确认落在 LittleFS）。
+> ⚠️ 前置修复：原 `/fs/edit` 上传**硬编码写 SD**（管理器不跟随介质）；已改为 `activeFileFs()` 介质抽象（见 §8 P3 前置提交 `079ed6b`）。
+
+**索引（在 LittleFS 上构建，官方同款 8B/页格式）**：`IDX async done pages=681 chapters=53 indexSize=5456 z1Size=1095`（307KB 正文，构建 ≈90s；`indexTaskStep` 分片驱动；自测固件需自行驱动该步进，否则页码恒为 1）。
+
+**验收 A（正向 1 → 末页，最终干净运行）**：`AUTOTEST_FWD_DONE fwdOk=680 stoppedAtEnd=1 page=681 total=681`
+- 从第 1 页连续翻到末页（680 次翻页覆盖全部 681 页），**零失败**；随后 1 次"末页无法再前进"为**预期停止**（`AUTOTEST_DONE sent=900 ok=905 fail=1 page=681 total=681 rf=0`）。
+- 异常扫描全为 0：`PAGE_REC_*` / `PAGE_NEXT_RECFAIL` / `PAGE_READ_FAIL` / `PROGRESS_ZERO_SKIP` / `Fatal exception` / `Soft WDT` / 中途 `BOOT reason`；阅读期间 `SD_REINIT`(SD 访问) = **0**；`rf=0` = WiFi OFF。
+- `PROG_FLUSH reason=threshold off=…` 每 50 页出现一次 ⇒ P6 进度节流按设计工作。
+
+**验收 A'（反向）**：`AUTOTEST_BACK_DONE backOk=225 page=456` —— 末页回翻 225 次全部成功，同样零异常。
+
+**判定**：P3（开书/首页/上下翻/末页停止）✅；P4（连续翻页零 SD 访问）✅。
+
+**验收用编译开关（默认全关，仅测试固件）**：`-DREADER_AUTOTEST=1 -DREADER_AUTOTEST_PAGES=N -DFORCE_LOCAL_MEDIUM_TEST=1`；需要配网页部署时再加 `-DBOOT_AP_MODE=1 -DWIFI_TEST_FORCE_AP=1`（强制热点、不连已保存 STA，便于 PC 上传）。
+
+---
+
+## 15. P10 最小版：SD → LittleFS 自动导入（2026-09，修复"SD 介质下点 TXT 进不去"）
+
+**背景**：P1 的入口守卫在 SD 介质下直接显示"SD 仅文件管理"，导致用户实际设备（SD 启用、卡在位）**无论如何都进不去书**。用户定稿的产品形态是"书在 SD，当前阅读的书部署到内部"，因此补齐最小导入：**点 SD 上的 TXT = 自动导入 LittleFS 后阅读**。
+
+**实现**（`ink-reader-esp.ino::readerImportFromSd`，由 `startTxtReader` 在 `!gBrowseLocal` 时调用）：
+- 同名内部文件已存在且**大小一致** → `IMPORT_SKIP` 秒开，不重复拷贝。
+- **前置拒绝**：空文件；`>100MB`（官方规则）→ "文件过大 / 超过100MB"。
+- **容量校验**：`需要 = 正文 + 正文×2.07%(索引估算) + 16KB 余量`，超 `LittleFS.info()` 可用 → 提示 "需XKB / 可用YKB"（`IMPORT_NOSPACE`），**绝不在拷贝到一半才失败**。
+- **拷贝**：1KB 块 + 每 20% 局刷进度（"导入中 nn%"）+ `ESP.wdtFeed()`；写失败即删除半成品并报"空间不足"。
+- **校验**：写完回读 size 必须等于源 size，否则删除并报"校验不一致"。
+- 旁带 `.i1/.v1/.i1p/.z1/.vz1/.bm`（≤256KB 且空间足够）一并复制 ⇒ 大书免整本重建索引；失败则回退由阅读器重建。
+
+**仍存在的硬边界（需用户决策）**：LittleFS ≈1.98MiB ⇒ 单本正文上限 ≈1.8–1.9MB。用户的主力书（如《武炼巅峰》55MB）**无法导入**，会提示 "需约56MB / 可用1.9MB"。可选方向见对话中给出的 A/B/C/D 方案（分区扩容到 3MB / 大书分段导入 / 双轨（小书 LittleFS+大书 SD 直读）/ 放弃 LittleFS-only 回 SD）。
+
+---
+
+## 16. ⭐ 架构修正（2026-09，用户拍板"抄官方"）：媒体跟随，不是 LittleFS-only
+
+**用户决策**：遇到"MSP-50BB 设备点 TXT 提示 SD 仅文件管理、无论如何进不去"后，用户选择 **"抄官方"**。
+
+**官方真实做法（A7 反编译 + 源码交叉）**：`fsSetBySdState()`（A7 `0x4020BBA0`，见 `REVERSE_NOTES.md §6.5`）把全局 `fileSystem` 指针在 **LittleFS `0x3FFF3850` ↔ SDFS `0x3FFF3860`** 间切换：
+- SD 启用（默认）→ `fileSystem = &SDFS`，**书/`.i1`/`.z1` 全在 SD，阅读直读 SD**（大书无容量问题，索引与正文同介质）；
+- 内部模式 → `fileSystem = &LittleFS`，全部走内部 flash。
+
+**因此本轮实现修正为**：
+- `readerFs()` = **`browseFs()`（当前介质）**，不再硬编码 LittleFS；`readerBusReady(reason)` 在 SD 介质下恢复 SD 总线（`reinitSdBus`），内部介质恒真。
+- `startTxtReader`：SD 介质 → 直读 SD（不再强制导入）；内部介质 → 确保 LittleFS 挂载后直读。**两种介质都可用**。
+- `SD.end()` 仅在内部介质阅读时执行（SD 介质阅读时 SD 就是数据源，必须在线）。
+- 保留 `readerImportFromSd()`（>100MB/容量前置校验 + 回读校验 + 旁带复制）作为**可选**"拷到内部"能力，不再进入打开书的必经路径。
+- 本轮全部稳定性/续航修复（页表读取失败重试且不翻页、进度 50 页/5 分钟节流、统计节流、RF 关断、EPD 生命周期）对**两种介质同时生效**。
+
+**SD 直读实测（2026-09）**：SD 来源书 `IDX async done pages=681 chapters=53`（索引建在 SD，**6.8s**；对比内部 LittleFS 90s），连续翻页 `AUTOTEST_PROGRESS sent=100 ok=100 fail=0`（从 1→101 页）无异常。
+
+---
+
+## 17. 构建索引期间按键灵敏度（2026-09，用户反馈 → 对齐官方 A7）
+
+**官方对照（两种版本行为不同，用户设备=A7 语义）**：
+- **V14 源码（旧版）= 完全阻塞**：`DisplayTxt.ino:444 display_txt_total_page_count()` 是 `while (txtFile.available())` 大循环，只 `ESP.wdtFeed()`、**不读任何按键**，屏上写"检测到为首次打开，正在创建索引文件 / 请耐心等待..."→ 构建期间按键完全无响应。
+- **A7 真实固件（用户设备）= 后台可交互**（`REVERSE_NOTES.md` §（阅读器）反编译结论）：
+  - 字符串 `索引后台建立中（进度百分比）`、"索引、章节建立中\n再等等吧\n短按任意按键可以刷新章节"；
+  - **"啥都能干"**：构建期间可正常翻页/开菜单/导航；**唯一限制是不能跳到尚未构建的页码**；索引与章节**并行后台**构建，章节总数随构建增长。
+- 因此我们的目标语义 = A7：**构建在后台小步进行，绝不长时间霸占按键扫描**。
+
+**我们的问题（根因）**：`indexTaskStep()` 原为"每 loop 最多构建 **100ms**"，而这 100ms 内主循环不扫键 → 一次短按（几十~百毫秒）可能整段落在两次扫描之间被丢掉；且 `delay(txtIndexBuilding ? 5 : 30)` 又叠加 5ms。此外每页 `flush()` 让 SD 构建变慢（6.8s），放大了"不灵敏"的体感窗口。
+
+**修复（对齐 A7 语义）**：
+1. 每 loop 构建预算 **100ms → 10ms**；
+2. 构建步进内**每 2ms 让步检测按键**，检测到按下立即 `break` 返回主循环（计数器 `gIndexStepKeyYield`）；
+3. 构建期 loop 延时 **5ms → 2ms**（全部 5 处分支）；
+4. `.i1` 每页 `flush()` → **每 8 页 flush**（掉电最多丢 8 页需重扫，构建更快）；
+5. 诊断：`KEYLAG gap=…`（相邻两次按键扫描 >80ms 时告警）+ 构建结束打印 `IDX_KEYSTATS maxGapMs=… yields=…`，用于量化验证。
+
+**"跳到未建页"限制**：与 A7 一致，已存在（`nextTxtPage` 超出已建页会失败、`jumpToPage` clamp 到 `txtIndexedPages`）。
+
+---
+
+## 18. 构建期禁休眠规则（2026-09 用户定稿）
+
+**规则**：
+1. **索引构建期间，任何界面都不自动休眠**（不再出现"构建到一半睡着"）；
+2. 若已 idle ≥5 分钟而构建仍在进行 → 记为**待休眠**（日志 `SLEEP_DEFER building=1 idle=… mode=…`），**构建一完成立刻休眠**（`SLEEP_DEFER_EXEC` → `SLEEP_ENTER`）；
+3. **任何按键重置 5 分钟倒计时，并取消待休眠**（用户还在操作就不睡）；
+4. 例外（既有规则不变）：伪装模式 `APP_CLOCK_DISGUISE`、AP 配网 `APP_NETWORK` 本就不自动休眠；远程控制版默认禁用一切自动休眠；低电休眠（`checkLowBattery` → `enterLowBatterySleep`）不受此规则影响。
+
+**实现**：新增 `gSleepDeferForBuild`；`notePhysicalKeyActivity` 在任何按键事件时刷新 `lastPhysicalKeyMs` 并清除该标志；主 loop 先处理"待休眠且构建已完成 → 立即休眠"，再判断 5 分钟 idle → 若构建中则只记待休眠，否则 `SLEEP_AUTO` 正常休眠。
+
+**实机验证**（测试固件 `-DAUTO_SLEEP_MS_OVERRIDE=5000` 把倒计时缩到 5 秒以便量化；种子书 307KB，SD 构建 ≈7s）：
+
+| 场景 | 日志证据 | 结论 |
+|---|---|---|
+| 构建中到点不睡 | `u=5631 SLEEP_DEFER building=1 idle=5631 mode=2`；全程 `SLEEP_AUTO` **0 次** | 规则① ② |
+| 构建完成即睡 | `u=7164 IDX EOF` → `u=9216 SLEEP_DEFER_EXEC idle=9216 mode=2` → `SLEEP_ENTER` → `SLEEP m…` | 规则② |
+| 按键取消待休眠并重置 | 构建中注入右键 `u=5619 REMOTE_INJ key3=1`（`SLEEP_DEFER` **0 次**）→ `u=11325 SLEEP_AUTO idle=5029 building=0`（末次按键后正好 5s 才睡） | 规则③ |
+
+**测试开关（默认关，产品行为不变）**：`-DAUTO_SLEEP_MS_OVERRIDE=5000`（缩短倒计时）、`-DREMOTE_ALLOW_SLEEP=1`（远程版允许自动休眠，供自动化验证）。

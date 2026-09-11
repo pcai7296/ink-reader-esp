@@ -1599,7 +1599,17 @@ void wifiManagerBegin(void (*renderCallback)(bool), void (*exitCallback)()) {
   // ★ 共存(WIFI_AP_STA)已判死刑: STA beacon 解析/共存触发 SDK phy 崩溃(Exception 29),
   //   任何时刻只保持一种模式: TRY_STA/STA_ONLY 阶段纯 STA, AP_ONLY 阶段纯 AP。
   loadConfig();
-  if (wifiManagerHasCredentials()) {
+  // ---- 测试开关 (默认 0; 仅验收固件用): 强制走热点配网, 不尝试已保存 STA ----
+  // 用途: P3/P4 验收时需要在已知 AP 下用 Web 文件管理部署测试书; 已保存的路由器凭据会让
+  // 设备直连 STA 而不起 AP。此开关不修改 EEPROM。
+#ifndef WIFI_TEST_FORCE_AP
+#define WIFI_TEST_FORCE_AP 0
+#endif
+  bool hasCreds = wifiManagerHasCredentials();
+#if WIFI_TEST_FORCE_AP
+  hasCreds = false;
+#endif
+  if (hasCreds) {
     WiFi.persistent(false);
     WiFi.mode(WIFI_STA);
     WiFi.begin(config.ssid, config.password);

@@ -51,6 +51,13 @@ void refresh(bool full);
 // ---------- SD 总线管理 ----------
 bool reinitSdBus(const char *reason);
 
+// ---------- 文件管理器介质抽象 (2026-09 P3 前置: 管理器跟随介质选择) ----------
+// activeFileFs(): 当前介质 (内部 LittleFS / SD SDFS), 由 gBrowseLocal 决定;
+// activeFsIsLocal(): true=内部 LittleFS; activeFsBusReady(): SD 时=reinitSdBus, 本地=恒真。
+fs::FS &activeFileFs();
+bool activeFsIsLocal();
+bool activeFsBusReady(const char *reason);
+
 // ---------- 消息显示 ----------
 void showMsg(const char *msg, const char *msg2);
 void showMiniPrompt(const char *text);
