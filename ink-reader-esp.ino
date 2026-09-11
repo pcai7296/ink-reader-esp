@@ -606,14 +606,14 @@ FutureWeather wFuture;
 LifeIndex wLife;
 bool wDataValid = false;
 
-// ===== 阅读数据源抽象 (2026-09 官方同款: 媒体跟随) =====
-// 官方 A7 用 fsSetBySdState() 把全局 fileSystem 在 LittleFS/SDFS 间切换 —— 阅读数据源 = **当前介质**:
-//   SD 启用(默认) → 书/`.i1`/`.z1` 都在 SD, 直读 SD(大书 55MB 无障碍);
-//   内部介质模式(sdEnabled=0/无卡) → 全部走 LittleFS。
-// 本轮稳定性/续航修复(页表读取失败重试+不翻页、进度节流、RF 关断、EPD 生命周期)对两种介质同时生效。
-// 定义在 browseFs() 之后(见 activeFileFs 段), 这里只做前向声明。
-static fs::FS &readerFs();
-static bool readerBusReady(const char *reason);
+// ===== P1 (2026-09): 阅读数据源抽象 =====
+// 架构定稿: 阅读实时链路只走 LittleFS(正文/.i1/.z1/阅读状态); SD 仅文件管理/导入。
+// 阅读相关函数统一用 readerFs(), 禁止再直接使用 SdFat 的 SD. 对象(见 docs/reader-lfs-migration.md §8)。
+static fs::FS &readerFs() { return LittleFS; }
+
+// 阅读链路不再有"SD 总线恢复"概念(LittleFS 不与 EPD/电池采样共用引脚)。
+// 保留同名占位以便原调用点零改动, 恒返回 true。
+static inline bool readerBusReady(const char *reason) { (void)reason; return true; }
 bool wFetching = false;
 bool wNightSkip = false;   // 本次进入因夜间跳过联网
 char wErrCode[16] = {0};
@@ -665,8 +665,6 @@ uint32_t txtPage = 1;
 uint32_t txtTotalPages = 1;
 uint32_t txtPageStart = 0;
 uint32_t txtIndexedPages = 1;
-uint32_t gIndexStepKeyYield = 0;   // 构建步进因按键让步次数 (诊断: 构建期按键灵敏度)
-uint32_t gIndexStepMaxGapMs = 0;   // 构建中两次按键扫描的最大间隔 (诊断)
 uint32_t txtChapterCount = 0;
 bool txtIndexBuilding = false;
 uint32_t txtPendingProgress = 0;
@@ -2392,13 +2390,6 @@ bool activeFsBusReady(const char *reason) {
     if (gBrowseLocal) return true;        // 内部 LittleFS: 不与 EPD/电池采样共用总线
     return reinitSdBus(reason);
 }
-
-// ===== 阅读数据源 = 当前介质 (官方 fsSetBySdState 同款) =====
-static fs::FS &readerFs() { return browseFs(); }
-static bool readerBusReady(const char *reason) {
-    if (gBrowseLocal) return true;        // 内部介质: 无共享总线问题
-    return reinitSdBus(reason);           // SD 介质: 阅读链路每次 SD 访问前恢复总线(EPD/电池采样争抢)
-}
 // 本地介质隐藏系统资源: web 界面文件/系统缓存/统计目录（仅本地浏览层过滤, 不写入共享黑名单以免污染 SD 同名目录）
 static bool localSystemEntry(const char *name) {
     if (!name || !name[0]) return false;
@@ -2862,28 +2853,13 @@ void refresh(bool full) {
 }
 
 uint32_t lastPhysicalKeyMs = 0;
-// 5 分钟无操作自动休眠; 测试可用 -DAUTO_SLEEP_MS_OVERRIDE=5000 缩短倒计时(默认关, 不改产品行为)
-#ifndef AUTO_SLEEP_MS_OVERRIDE
-#define AUTO_SLEEP_MS_OVERRIDE (5UL * 60UL * 1000UL)
-#endif
-const uint32_t AUTO_SLEEP_MS = AUTO_SLEEP_MS_OVERRIDE;
-// 远程控制版默认禁用自动休眠(深睡无法被串口唤醒); 仅验收测试可 -DREMOTE_ALLOW_SLEEP=1 打开
-#ifndef REMOTE_ALLOW_SLEEP
-#define REMOTE_ALLOW_SLEEP 0
-#endif
-// ===== 构建期禁休眠 (2026-09 用户定稿) =====
-// 规则: ①索引构建期间, 任何界面都不自动休眠; ②若已 idle≥5 分钟而构建仍在进行 → 记为待休眠,
-//       构建一完成立刻休眠; ③任何按键重置 5 分钟倒计时并取消待休眠。
-bool gSleepDeferForBuild = false;
+const uint32_t AUTO_SLEEP_MS = 5UL * 60UL * 1000UL;
 
 void notePhysicalKeyActivity(int r2, int r3) {
     // 只认真实按键事件(短按/长按边沿), 不认持续按压态: 电源噪声(EPD 刷新/SD 写卡的
     // 大电流脉冲经电源耦合到 GPIO3=RX / GPIO0=DC)会误判"一直按住", 永久刷新休眠计时
     // → 构建期间永不自动休眠。真实交互不存在按住超过 5 分钟的操作, 按键事件足以反映活跃。
-    if (r2 || r3) {
-        lastPhysicalKeyMs = millis();       // ③ 任何按键重置倒计时
-        gSleepDeferForBuild = false;        // ③ 用户还在操作 → 取消"构建完成后休眠"待办
-    }
+    if (r2 || r3) lastPhysicalKeyMs = millis();
 }
 
 void drawSleepNotice() {
@@ -3193,7 +3169,6 @@ void finishTxtIndexBuild() {
     debugFmt("IDX async done pages=%lu chapters=%lu indexSize=%lu z1Size=%lu", (unsigned long)txtTotalPages,
              (unsigned long)txtChapterCount, (unsigned long)doneIndexSize,
              (unsigned long)doneChapterSize);
-    traceFmt("IDX_KEYSTATS maxGapMs=%lu yields=%lu", (unsigned long)gIndexStepMaxGapMs, (unsigned long)gIndexStepKeyYield);
     // 主页正显示该书且构建刚在后台完成: 刷新最近阅读(页码回归真实总页数、去掉"构建中"标注), 局刷主卡
     if (appMode == APP_HOME && recentReadPath == txtPath) {
         loadRecentReadSummary();
@@ -3361,25 +3336,14 @@ void indexTaskStep() {
     if (!txtIndexBuilding || !txtIndexScanFile) return;
     static uint32_t lastDebugPos = 0;
     uint32_t stepStart = txtIndexScanFile.position();
-    // ===== 构建期间保持可交互 (对齐官方 A7: 构建中翻页/菜单/导航都能用, 只有"跳到未建页"被阻止) =====
-    // 原实现每 loop 构建至多 100ms → 这 100ms 内不扫键, 短按可能整段落在两次扫描之间被丢掉
-    // ("构建索引期间按键灵敏度降低")。现: 每 loop 至多 10ms, 且每 2ms 让步检测按键, 按下立即返回。
-    uint32_t deadline = millis() + 10;
-    uint32_t lastKeyChk = millis();
+    uint32_t deadline = millis() + 100;   // 每 loop 至多 100ms 构建; 过大则按键短按丢失(loop 周期>短按时长)
     while ((int32_t)(deadline - millis()) > 0) {
         ESP.wdtFeed();
-        if (millis() - lastKeyChk >= 2) {
-            lastKeyChk = millis();
-            if (readKey2() == 0 || readKey3() == 0) {   // 按键按下 → 立刻把控制权交回主循环
-                gIndexStepKeyYield++;
-                break;
-            }
-        }
         if (indexLineOld != indexLine) { indexLineOld = indexLine; indexHskgState = true; }
         if (indexPageStartPending && indexLine == 0) {
             indexPageStartPending = false;
             appendIndexRecord(txtIndexBuildFile, indexScanPos);   // 真实字节偏移 (勿用 position(): 块读时是 2048 对齐)
-            if ((txtIndexedPages & 7) == 0) txtIndexBuildFile.flush();   // 每 8 页落盘(掉电最多丢 8 页重建), 避免每页 flush 拖慢构建
+            txtIndexBuildFile.flush();
             txtIndexedPages++;
             txtTotalPages = txtIndexedPages;
         }
@@ -5099,171 +5063,42 @@ uint32_t findPageCeil(const String &indexPath, uint32_t saved) {
     return best;
 }
 
-// ---- P10 最小版: SD → LittleFS 导入（点 SD 上的 TXT 即自动导入后阅读）----
-// 规则: >100MB 直接拒绝(官方规则); 需要空间 = 正文 + 索引估算(≈2.07%) + 16KB 余量, 超 LittleFS 可用 → 拒绝。
-// 已存在且大小一致 → 直接复用(秒开, 不重复拷贝)。旁带(.i1/.v1/.i1p/.z1/.vz1/.bm)存在则一并复制, 免整本重建。
-// 阅读数据源仍是 LittleFS: SD 只作为"导入来源", 不进入阅读实时链路(架构见 docs/reader-lfs-migration.md)。
-static bool readerImportFromSd(const char *sdPath, String &outLfsPath) {
-    if (!sdPath || !sdPath[0]) { showMsg("导入失败", "路径无效"); return false; }
-    String base = String(sdPath);
-    int slash = base.lastIndexOf('/');
-    if (slash >= 0) base = base.substring(slash + 1);
-    if (base.length() == 0) { showMsg("导入失败", "路径无效"); return false; }
-    String lfsPath = "/" + base;
-
-    if (!LittleFS.begin()) { showMsg("内部存储", "挂载失败"); return false; }
-    if (!activeFsBusReady("import")) { showMsg("SD 读取失败", "请重试"); return false; }
-    File src = SD.open(sdPath, "r");
-    if (!src) { showMsg("打开失败", "SD 读取失败"); return false; }
-    uint32_t srcSize = src.size();
-    const uint32_t LIMIT_100MB = 100UL * 1024UL * 1024UL;
-    if (srcSize == 0) { src.close(); showMsg("导入失败", "文件为空"); return false; }
-    if (srcSize > LIMIT_100MB) { src.close(); showMsg("文件过大", "超过100MB"); return false; }
-
-    File exist = LittleFS.open(lfsPath, "r");
-    if (exist && exist.size() == srcSize) {   // 已导入且一致 → 秒开
-        exist.close(); src.close();
-        traceFmt("IMPORT_SKIP %s size=%lu", lfsPath.c_str(), (unsigned long)srcSize);
-        outLfsPath = lfsPath;
-        return true;
-    }
-    if (exist) exist.close();
-
-    FSInfo info;
-    LittleFS.info(info);
-    uint32_t freeB = (uint32_t)(info.totalBytes - info.usedBytes);
-    uint32_t need = srcSize + (uint32_t)(((uint64_t)srcSize * 8ULL) / 386ULL) + 16384UL;
-    if (need > freeB) {
-        src.close();
-        char m1[24], m2[24];
-        snprintf(m1, sizeof(m1), "需%luKB", (unsigned long)(need / 1024));
-        snprintf(m2, sizeof(m2), "可用%luKB", (unsigned long)(freeB / 1024));
-        traceFmtLevel('W', "IMPORT_NOSPACE need=%lu free=%lu size=%lu",
-                      (unsigned long)need, (unsigned long)freeB, (unsigned long)srcSize);
-        showMsg(m1, m2);
-        return false;
-    }
-
-    traceFmt("IMPORT_BEGIN %s size=%lu need=%lu free=%lu",
-             lfsPath.c_str(), (unsigned long)srcSize, (unsigned long)need, (unsigned long)freeB);
-    showMsg("导入中", "0%");
-    File dst = LittleFS.open(lfsPath, "w");
-    if (!dst) { src.close(); showMsg("导入失败", "创建失败"); return false; }
-    static uint8_t buf[1024];   // static: 循环栈仅 4KB, 大缓冲不上栈
-    uint32_t done = 0;
-    uint8_t lastBucket = 0xFF;
-    while (src.available()) {
-        size_t n = src.read(buf, sizeof(buf));
-        if (n == 0) break;
-        if (dst.write(buf, n) != n) {
-            dst.close(); src.close(); LittleFS.remove(lfsPath);
-            traceFmtLevel('E', "IMPORT_WRITE_FAIL done=%lu", (unsigned long)done);
-            showMsg("导入失败", "空间不足");
-            return false;
-        }
-        done += n;
-        uint8_t pct = (uint8_t)(((uint64_t)done * 100ULL) / srcSize);
-        if (pct / 20 != lastBucket / 20) {   // 每 20% 提示一次
-            lastBucket = pct;
-            char p[12];
-            snprintf(p, sizeof(p), "%u%%", (unsigned)pct);
-            showMsg("导入中", p);
-        }
-        ESP.wdtFeed();
-    }
-    dst.close();
-    src.close();
-    File chk = LittleFS.open(lfsPath, "r");
-    uint32_t got = chk ? chk.size() : 0;
-    if (chk) chk.close();
-    if (got != srcSize) {
-        LittleFS.remove(lfsPath);
-        traceFmtLevel('E', "IMPORT_VERIFY_FAIL got=%lu want=%lu", (unsigned long)got, (unsigned long)srcSize);
-        showMsg("导入失败", "校验不一致");
-        return false;
-    }
-    traceFmt("IMPORT_OK %s size=%lu", lfsPath.c_str(), (unsigned long)srcSize);
-
-    // 旁带(页表/章节/标签): 存在且内部尚无 → 复制, 免整本重建索引
-    {
-        const char *sfx[] = {".i1", ".v1", ".i1p", ".z1", ".vz1", ".bm", nullptr};
-        for (int i = 0; sfx[i]; i++) {
-            String s = String(sdPath) + sfx[i];
-            String d = lfsPath + sfx[i];
-            if (!SD.exists(s.c_str()) || LittleFS.exists(d.c_str())) continue;
-            File a = SD.open(s.c_str(), "r");
-            if (!a) continue;
-            if (a.size() > 262144UL) { a.close(); continue; }   // 大索引不复制(内部会重建)
-            FSInfo fi;
-            LittleFS.info(fi);
-            if ((uint32_t)(fi.totalBytes - fi.usedBytes) < a.size() + 4096U) { a.close(); continue; }
-            File b = LittleFS.open(d.c_str(), "w");
-            if (!b) { a.close(); continue; }
-            bool ok = true;
-            while (a.available()) {
-                size_t n = a.read(buf, sizeof(buf));
-                if (n == 0) break;
-                if (b.write(buf, n) != n) { ok = false; break; }
-                ESP.wdtFeed();
-            }
-            b.close(); a.close();
-            if (!ok) LittleFS.remove(d.c_str());
-            else traceFmt("IMPORT_SIDECAR %s", d.c_str());
-        }
-    }
-    outLfsPath = lfsPath;
-    return true;
-}
-
 void startTxtReader(const char *path, bool forceRebuild) {
-    // ===== 阅读数据源 = 当前介质 (2026-09 官方同款: fsSetBySdState 媒体跟随) =====
-    // SD 启用 → 书/.i1/.z1 都在 SD, 直读 SD(大书无容量问题);
-    // 内部介质(sdEnabled=0/无卡) → 走 LittleFS。稳定性修复对两种介质同时生效。
-    String localPath = path ? String(path) : String();
-    if (gBrowseLocal) {
-        // 内部介质: 确保 LittleFS 已挂载(只挂一次, 重复 begin 会各吃 ~1KB 堆)
-        static bool lfsReady = false;
+    // ===== P1 架构边界 (2026-09) =====
+    // 阅读数据源只有 LittleFS(内部介质浏览模式 gBrowseLocal); SD 只做文件管理/导入。
+    // SD 介质下点开 TXT 直接提示, 不做 SD→阅读 的自动 fallback (见 docs/reader-lfs-migration.md §8)。
+    if (!gBrowseLocal) {
+        showMsg("SD 仅文件管理", "请切到内部介质或先导入");
+        return;
+    }
+    // ===== 阅读前确保内部 LittleFS 已挂载 (本地介质模式必须; 只挂一次, 重复 begin 会各吃 ~1KB 堆) =====
+    static bool lfsReady = false;
+    if (!lfsReady) {
+        lfsReady = LittleFS.begin();
         if (!lfsReady) {
-            lfsReady = LittleFS.begin();
-            if (!lfsReady) {
-                traceFmtLevel('E', "LFS_MOUNT_FAIL");
-                showMsg("内部存储", "挂载失败");
-                return;
-            }
-            traceFmt("LFS_MOUNT ok");
-        }
-    } else {
-        // SD 介质: 阅读前恢复 SD 总线(EPD 刷新/电池采样与 SD 共用引脚)
-        if (!readerBusReady("reader_enter")) {
-            traceFmtLevel('E', "READER_SD_BUS_FAIL");
-            showMsg("SD 读取失败", "请重试");
+            traceFmtLevel('E', "LFS_MOUNT_FAIL");
+            showMsg("内部存储", "挂载失败");
             return;
         }
-        traceFmt("READER_SRC sd path=%s", localPath.c_str());
+        traceFmt("LFS_MOUNT ok");
     }
-    traceFmt("TXT open step=flush_begin");
     progressFlushForce("book_change");   // P6: 换书前把上一本的待写进度落盘
-    traceFmt("TXT open step=flush_done");
-    // 仅"内部介质阅读"时关闭 SD(省电 + 免 GPIO5/GPIO12 争抢); SD 介质阅读时 SD 就是数据源, 必须在线。
-    if (gBrowseLocal) {
-        SD.end();
-        digitalWrite(5, HIGH);
-        pinMode(5, OUTPUT);
-        traceFmt("SD_OFF reader_enter");
-    }
-    traceFmt("TXT open step=path_check");
+    // ===== P2: 阅读期间关闭 SD/SDFS =====
+    // 阅读数据全在 LittleFS; 关掉 SD 既省电(卡待机/寻道电流) 又彻底移除 GPIO5/GPIO12 争抢。
+    // 退出阅读后文件管理器按需重新挂载(listDir 内 SD.begin)。
+    SD.end();
+    digitalWrite(5, HIGH);
+    pinMode(5, OUTPUT);
+    traceFmt("SD_OFF reader_enter");
     if (!isTxtPath(path)) {
         traceFmtLevel('W', "TXT unsupported path=%s", path ? path : "(null)");
         showMsg("不支持打开", "仅支持TXT文件");
         return;
     }
-    traceFmt("TXT open step=list_free_begin");
     freeItemList();   // 大目录 items≈34KB+ 是堆大户, 进阅读器前释放 (浏览模式回退时 listDir 重建)
-    traceFmt("TXT open step=list_free_done");
     wifiManagerRfOff("reader_enter");   // P5: 进入阅读强制关 RF (官方 DisplayTxt.ino:854 WifiShutdown 对齐)
-    traceFmt("TXT open step=rf_off_done");
-    debugFmt("TXT open path=%s rebuild=%d", localPath.c_str(), forceRebuild ? 1 : 0);
-    statsOnSessionStart(localPath.c_str());   // 阅读统计: 会话开始, 记录当前书 + 今日/本周/连续天数检查
+    debugFmt("TXT open path=%s rebuild=%d", path, forceRebuild ? 1 : 0);
+    statsOnSessionStart(path);   // 阅读统计: 会话开始, 记录当前书 + 今日/本周/连续天数检查
     // 旋转续读: 读走即清零 (任何路径都不残留; 失败提前 return 也安全)
     uint32_t rotateResume = gRotateResumeOffset;
     gRotateResumeOffset = 0;
@@ -5271,7 +5106,7 @@ void startTxtReader(const char *path, bool forceRebuild) {
     gBootHintPage = 0;
     bool bootPartialRestore = gBootPartialRefresh;   // 启动恢复局刷: 仅 setup 设置, 读走即清零 (优化④)
     gBootPartialRefresh = false;
-    txtPath = localPath;   // P10: SD 来源已导入 → 阅读一律用 LittleFS 路径
+    txtPath = path;
     txtIndexPath = txtPath;
     int txtDot = txtIndexPath.lastIndexOf('.');
     if (txtDot > 0) txtIndexPath = txtIndexPath.substring(0, txtDot);
@@ -5785,39 +5620,6 @@ void enterMarksList() {
     // 睡眠快照降级: saveSleepRecord 将 APP_MARKS 映射为 APP_READER (唤醒回正文)
 }
 
-#if TEST_CLEANUP
-// ===== 仅验收用: 清理测试产物 (默认 0, 产品固件不编译) =====
-// 删除自动化验收生成的合成测试书/索引, 并清掉指向它们的最近阅读/睡眠记录,
-// 避免设备开机自动恢复进"重复段落内容"的测试书(用户观感 = 卡在固定页)。
-static void testCleanupRun(const char *tag) {
-    const char *victims[] = {
-        "/IMPORT_T2.txt", "/IMPORT_T2.i1", "/IMPORT_T2.z1",
-        "/IMPORT_T6.txt", "/IMPORT_T6.i1", "/IMPORT_T6.z1",
-        "/IMPORT_T7.txt", "/IMPORT_T7.i1", "/IMPORT_T7.z1",
-        "/IMPORT_T8.txt", "/IMPORT_T8.i1", "/IMPORT_T8.z1",
-        "/T1_300k.txt", "/T1_300k.i1", "/T1_300k.z1",
-        "/IMPORT_T2.bm", "/IMPORT_T8.bm", nullptr
-    };
-    digitalWrite(EPD_CS_PIN, HIGH); digitalWrite(5, HIGH); pinMode(5, OUTPUT);
-    bool sdOk = SD.begin(5, SD_SCK_MHZ(20));
-    int n = 0;
-    for (int i = 0; victims[i]; i++) {
-        if (activeFileFs().exists(victims[i])) { activeFileFs().remove(victims[i]); Serial.printf_P(PSTR("CLEANUP_FS %s\n"), victims[i]); n++; }
-    }
-    if (LittleFS.begin()) {
-        for (int i = 0; victims[i]; i++) {
-            if (LittleFS.exists(victims[i])) { LittleFS.remove(victims[i]); Serial.printf_P(PSTR("CLEANUP_LFS %s\n"), victims[i]); n++; }
-        }
-    }
-    const char *state[] = { "/recentread.dat", "/sleepmode.dat", nullptr };
-    for (int i = 0; state[i]; i++) {
-        if (activeFileFs().exists(state[i])) { activeFileFs().remove(state[i]); Serial.printf_P(PSTR("CLEANUP_FS %s\n"), state[i]); n++; }
-        if (LittleFS.exists(state[i])) { LittleFS.remove(state[i]); Serial.printf_P(PSTR("CLEANUP_LFS %s\n"), state[i]); n++; }
-    }
-    Serial.printf_P(PSTR("CLEANUP_DONE tag=%s sd=%d removed=%d\n"), tag, sdOk ? 1 : 0, n);
-}
-#endif
-
 void setup() {
     // 调试日志写 SD，避免 GPIO3/RX 与串口冲突。
     // 注意: 不在此处全局禁用看门狗!
@@ -5831,10 +5633,6 @@ void setup() {
 
     Serial.begin(DEBUG_BAUD);
     delay(20);
-
-#if TEST_CLEANUP
-    testCleanupRun("early");   // 早跑一次(部分机型此处 SD 未挂载, 故 SD 初始化后再跑一次)
-#endif
     Serial.printf("[u=%lu][I][heap=%lu stack=%lu] BOOT reason=%s info=%s\n",
                   (unsigned long)millis(), (unsigned long)ESP.getFreeHeap(),
                   (unsigned long)ESP.getFreeContStack(), ESP.getResetReason().c_str(),
@@ -5875,9 +5673,6 @@ void setup() {
         traceFmt("SD_READY cs=5 speed=20MHz");
     }
     debugFmt("SD begin=%d wantSd=%d local=%d", sdOk ? 1 : 0, wantSd ? 1 : 0, gBrowseLocal ? 1 : 0);
-#if TEST_CLEANUP
-    testCleanupRun("afterSD");   // SD 已挂载: 再跑一次, 确保测试产物被真正删除
-#endif
 
     // ---------- BOOT_AP_MODE: 重启默认进配网界面引导 (AP 热点管理页 192.168.4.1) ----------
     // 条件编译开启时, 跳过 KEY3 窗口/最近阅读分流, 直接启动 AP 配网。
@@ -6135,52 +5930,10 @@ void setup() {
 // ⚠️ 必须由启动分流在"本地介质提前 return"之前调用(否则本地介质固件永远跑不到)。
 #if READER_AUTOTEST
 static void readerAutotestRun() {
-    // 可选: 先把内部书复制一份到 SD(仅验收用), 用于验证 "SD→LittleFS 自动导入" 成功路径
-#if IMPORT_TEST_SEED
-    const char *bookPath = "/IMPORT_T2.txt";   // 种子: 从内部复制到 SD 的新名字(强制走导入拷贝路径)
-    {
-        if (LittleFS.begin()) {
-            File a = LittleFS.open("/T1_300k.txt", "r");
-            if (a) {
-                if (!activeFsBusReady("seed")) { a.close(); }
-                else {
-                    File b = SD.open(bookPath, "w");
-                    if (b) {
-                        static uint8_t sbuf[1024];
-                        uint32_t n = 0;
-                        while (a.available()) {
-                            size_t k = a.read(sbuf, sizeof(sbuf));
-                            if (k == 0) break;
-                            if (b.write(sbuf, k) != k) break;
-                            n += k;
-                            ESP.wdtFeed();
-                        }
-                        b.close();
-                        Serial.printf_P(PSTR("IMPORT_SEED_OK bytes=%lu\n"), (unsigned long)n);
-                    } else {
-                        Serial.println(F("IMPORT_SEED_FAIL sd-open"));
-                    }
-                    a.close();
-                }
-            } else {
-                Serial.println(F("IMPORT_SEED_SKIP no-lfs-file"));
-            }
-        }
-    }
-#else
-    const char *bookPath = READER_AUTOTEST_BOOK;
-#endif
-#if IMPORT_TEST_OPEN
-    // 仅测试: 种完即打开书并交回主循环 → 索引在真实 loop 中后台构建,
-    // 用于测量"构建期按键采样间隔"(KEYLAG / IDX_KEYSTATS)。
-    Serial.printf_P(PSTR("IMPORT_TEST_OPEN book=%s\n"), bookPath);
-    startTxtReader(bookPath, false);
-    return;
-#endif
     Serial.printf_P(PSTR("AUTOTEST_BEGIN book=%s pages=%d rf=%d local=%d\n"),
-                    bookPath, READER_AUTOTEST_PAGES,
+                    READER_AUTOTEST_BOOK, READER_AUTOTEST_PAGES,
                     (int)WiFi.getMode(), gBrowseLocal ? 1 : 0);
-    startTxtReader(bookPath, false);
+    startTxtReader(READER_AUTOTEST_BOOK, false);
     delay(300);
     // ⚠️ 索引是"异步后台构建"(loop() 里 indexTaskStep 驱动)。自测阻塞在 setup, 必须自己驱动,
     //    否则 total=1/页码恒为 1, 翻页全部失败(实测 sent=50 ok=0 fail=50 page=1 total=1)。
@@ -6266,17 +6019,6 @@ void loop() {
         if (gap > diagMaxLoopGap) diagMaxLoopGap = gap;
     }
     diagFlushSd(false);
-    // 按键采样间隔探针 (构建期灵敏度诊断): 记录两次扫描最大间隔, >80ms 打点
-    {
-        static uint32_t lastKeyScanMs = 0;
-        uint32_t nowMs = millis();
-        if (lastKeyScanMs && txtIndexBuilding) {
-            uint32_t gap = nowMs - lastKeyScanMs;
-            if (gap > gIndexStepMaxGapMs) gIndexStepMaxGapMs = gap;
-            if (gap > 80) traceFmtLevel('W', "KEYLAG gap=%lu", (unsigned long)gap);
-        }
-        lastKeyScanMs = nowMs;
-    }
     int raw2 = readKey2();
     int raw3 = readKey3();
     int r2 = scanKey(k2, raw2 == 0);
@@ -6330,25 +6072,8 @@ void loop() {
         traceFmt("BATCHK mv=%d page=%lu mode=%d lfs=%d", lastBatteryMV, (unsigned long)txtPage, appMode, lfsOk);
     }
 
-    // ===== 构建期禁休眠 (用户定稿) =====
-    // ① 构建中: 到 5 分钟也不休眠, 只标记"待休眠" ② 构建一结束立刻执行待休眠 ③ 按键会取消待休眠(见 notePhysicalKeyActivity)
-    if (gSleepDeferForBuild && !txtIndexBuilding) {
-#if SERIAL_REMOTE && !REMOTE_ALLOW_SLEEP
-        gSleepDeferForBuild = false;   // 远程控制版禁用一切自动休眠(深睡无法被串口唤醒)
-#else
-        if (appMode == APP_CLOCK_DISGUISE || appMode == APP_NETWORK) {
-            gSleepDeferForBuild = false;   // 这两类界面本就不自动休眠(伪装闹钟 / AP 配网会话)
-        } else {
-            gSleepDeferForBuild = false;
-            traceFmt("SLEEP_DEFER_EXEC idle=%lu mode=%d", (unsigned long)(millis() - lastPhysicalKeyMs), appMode);
-            enterSleepMode();
-            return;
-        }
-#endif
-    }
-
     if (millis() - lastPhysicalKeyMs >= AUTO_SLEEP_MS) {
-#if SERIAL_REMOTE && !REMOTE_ALLOW_SLEEP
+#if SERIAL_REMOTE
         // 远程控制专用版: 深睡只能靠 KEY1 硬件复位唤醒, 摸不到设备时一旦睡着就再也醒不来,
         // 串口无法唤醒深睡 → 远程模式禁用自动休眠, 保证串口稳定在线。
         (void)0;
@@ -6358,18 +6083,10 @@ void loop() {
         //  - AP 配网(APP_NETWORK): 用户用手机管理页上传/浏览, 不按设备按键, 5 分钟无按键会
         //    误判 idle → 自动休眠重启 → 手机断连 → 上传 POST 到不了设备(实测根因 SLEEP_AUTO mode=4)
         if (appMode != APP_CLOCK_DISGUISE && appMode != APP_NETWORK) {
-            if (txtIndexBuilding) {
-                // ① 构建任务未完成: 任何界面都不休眠, 记待休眠(构建结束即睡)
-                if (!gSleepDeferForBuild) {
-                    gSleepDeferForBuild = true;
-                    traceFmt("SLEEP_DEFER building=1 idle=%lu mode=%d", (unsigned long)(millis() - lastPhysicalKeyMs), appMode);
-                }
-            } else {
-                traceFmt("SLEEP_AUTO idle=%lu building=%d mode=%d", (unsigned long)(millis() - lastPhysicalKeyMs),
-                         txtIndexBuilding ? 1 : 0, appMode);
-                enterSleepMode();
-                return;
-            }
+            traceFmt("SLEEP_AUTO idle=%lu building=%d mode=%d", (unsigned long)(millis() - lastPhysicalKeyMs),
+                     txtIndexBuilding ? 1 : 0, appMode);
+            enterSleepMode();
+            return;
         }
 #endif
     }
@@ -6411,7 +6128,7 @@ void loop() {
         }
         // 后台索引构建在主页也要喂步进: 否则退出阅读器停在主页时构建停摆,"构建中"永不结束
         if (txtIndexBuilding) indexTaskStep();
-        delay(txtIndexBuilding ? 2 : 30);   // 构建期缩短延时: 提高按键采样率(A7 语义: 构建中一切可操作)
+        delay(txtIndexBuilding ? 5 : 30);
         return;
     }
 
@@ -6618,7 +6335,7 @@ void loop() {
             }
         }
         indexTaskStep();
-        delay(txtIndexBuilding ? 2 : 30);
+        delay(txtIndexBuilding ? 5 : 30);
         return;
     }
     if (appMode == APP_CHAPTERS) {
@@ -6678,7 +6395,7 @@ void loop() {
                 }
             }
         }
-        delay(txtIndexBuilding ? 2 : 30);
+        delay(txtIndexBuilding ? 5 : 30);
         indexTaskStep();
         return;
     }
@@ -6741,7 +6458,7 @@ void loop() {
                 }
             }
         }
-        delay(txtIndexBuilding ? 2 : 30);
+        delay(txtIndexBuilding ? 5 : 30);
         indexTaskStep();
         return;
     }
@@ -6836,5 +6553,5 @@ void loop() {
         }
     }
     indexTaskStep();
-    delay(txtIndexBuilding ? 2 : 30);
+    delay(txtIndexBuilding ? 5 : 30);
 }
