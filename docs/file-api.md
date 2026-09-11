@@ -6,9 +6,11 @@
 
 ## 1. 通用约定
 
-- **认证**：读端点开放；**变更端点必验管理密码**——请求头 `X-Admin-Pass: <管理密码>`。
-  未设置密码或错误 → `401 {"ok":false,"error":"unauthorized"}`（fail-closed）。
-  v2 计划改为 Bearer Token（POST /api/login）。
+- **认证（2026-09-12 修订, 用户拍板）**：**全部端点免鉴权**（管理密码机制已整体废除, 与
+  官方 A7 管理页同款"无鉴权"语义）。服务端仅配网/同步会话在线（AP 192.168.4.1 需物理
+  接触才能连入; STA 局域网管理态同网段可达）——**本 API 仅限可信局域网使用**, 客户端
+  无需发送任何凭据头。`X-Admin-Pass` 头会被忽略; `401 unauthorized` 不再返回。
+  v2 若引入鉴权再走 Bearer Token（POST /api/login）。
 - **路径**：query 参数一律 UTF-8 percent 编码（`encodeURIComponent`，`+` 须传 `%2B`）。
   服务端 `server.arg()` 解码后经 `normalizeApiPath` 规范化：
   - 必须 `/` 开头；折叠连续 `/`；**拒绝 `..` / `.` 段、`\`、控制字符** → `400 invalid_path`
@@ -21,7 +23,6 @@
   | invalid_path | 400 | 路径非法/穿越 |
   | invalid_name | 400 | 文件名非法 |
   | invalid_query | 400 | 搜索空查询 |
-  | unauthorized | 401 | 密码缺失/错误 |
   | protected | 403 | 受保护路径（见 §6） |
   | upload_in_progress | 403 | 下载 .uploading |
   | not_found | 404 | 路径不存在 |
@@ -39,6 +40,8 @@
 
 ## 2. 端点总表
 
+> 2026-09-12 起全部端点免鉴权（见 §1）; 表内"鉴权"列保留 "无" 仅为历史对照。
+
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
 | GET | /api/status | 无 | 设备+SD 状态（容量会话缓存） |
@@ -48,11 +51,11 @@
 | GET | /api/search?q=&path=&depth= | 无 | 递归搜索（depth≤8, 结果≤200, 扫描≤10000） |
 | GET | /api/download?path= | 无 | 下载（支持 Range, 见 §4） |
 | GET | /api/upload-status?path=&name= | 无 | `.uploading` 临时文件状态（续传用） |
-| POST | /api/upload?path= | ✅ | multipart 上传（见 §5） |
-| POST | /api/mkdir?path= | ✅ | 新建目录 |
-| POST | /api/delete?path= | ✅ | 删除（文件/空目录） |
-| POST | /api/rename?path=&name= | ✅ | 同目录改名 |
-| POST | /api/move?path=&dest= | ✅ | 跨目录移动（防环） |
+| POST | /api/upload?path= | 无 | multipart 上传（见 §5） |
+| POST | /api/mkdir?path= | 无 | 新建目录 |
+| POST | /api/delete?path= | 无 | 删除（文件/空目录） |
+| POST | /api/rename?path=&name= | 无 | 同目录改名 |
+| POST | /api/move?path=&dest= | 无 | 跨目录移动（防环） |
 
 ## 3. 端点细节
 
@@ -128,7 +131,6 @@ GET /api/download?path=/books/novel.txt
 
 ```
 POST /api/upload?path=/books       （multipart/form-data; filename = 最终文件名）
-X-Admin-Pass: <密码>
 X-File-Size: <文件总字节>            （必填, 用于校验）
 X-Resume: 1                          （可选, 续传）
 X-Resume-Offset: <提示>              （可选, 与 .uploading 实际尺寸窗口差 ≤256KB）
@@ -173,10 +175,10 @@ curl "http://192.168.4.1/api/files?path=%2Fbooks"
 curl -r 0-1023 "http://192.168.4.1/api/download?path=%2Fbooks%2Fnovel.txt" -o part.bin
 # 上传（X-File-Size 必填）
 curl -X POST "http://192.168.4.1/api/upload?path=%2Fbooks" \
-  -H "X-Admin-Pass: 你的密码" -H "X-File-Size: 1048576" \
+  -H "X-File-Size: 1048576" \
   -F "file=@novel.txt"
 # 变更操作带密码
-curl -X POST "http://192.168.4.1/api/mkdir?path=%2Fbooks%2Fnew" -H "X-Admin-Pass: 你的密码"
+curl -X POST "http://192.168.4.1/api/mkdir?path=%2Fbooks%2Fnew"
 ```
 
 ## 8. 性能基线（S4.5 分层实测, 10MB, web_test STA）
@@ -200,6 +202,6 @@ curl -X POST "http://192.168.4.1/api/mkdir?path=%2Fbooks%2Fnew" -H "X-Admin-Pass
 3. 浏览：`GET /api/files`（客户端排序）；容量 `GET /api/capacity`
 4. 上传：multipart + X-File-Size；中断恢复见 §5 流程；进度用 XHR/OkHttp 上传监听
 5. 下载：OkHttp/Range 断点（§4）；文件名取 `Content-Disposition filename*`
-6. 变更操作统一带 `X-Admin-Pass`；401 时提示输入密码
+6. 变更操作无需凭据（免鉴权, 见 §1; 2026-09-12 修订）
 7. 错误处理：按 §1 错误码枚举映射 UI 文案
 8. 读开放/变更必验：**不要把密码存明文**（v1 为局域网明文 HTTP, v2 计划 Bearer/HTTPS）

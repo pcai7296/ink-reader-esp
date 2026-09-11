@@ -9,6 +9,8 @@
 
 // 与 ink-reader-esp.ino 共享的帧缓冲（物理 128×296）
 extern uint8_t fb[128 * 296 / 8];
+// 总线恢复（ink-reader-esp.ino）: EPD CS 拉高 + SPI.begin + SD.begin（SD 回退读前的约定入口）
+extern bool reinitSdBus(const char *reason);
 
 // 逻辑坐标写入（与 ink-reader-esp.ino 的 setPix 同映射；setPix 是 inline 无外部符号，此处自带一份）
 static inline void bmpSetPix(int x, int y, bool black) {
@@ -19,9 +21,6 @@ static inline void bmpSetPix(int x, int y, bool black) {
     uint8_t mask = 0x80 >> (px & 7);
     if (black) fb[idx] &= ~mask; else fb[idx] |= mask;
 }
-
-#define BMP_W 296
-#define BMP_H 128
 
 // 调色板缓冲（黑白屏只需黑白判定，不需要彩色调色板）
 static uint8_t mono_palette[40];   // 最多 256 项/8
@@ -45,11 +44,14 @@ static uint32_t read32(File &f) {
 
 bool bmpShowFromSd(const char *path) {
   // 架构(P1/P2): 阅读期间 SD 已卸载; 壁纸属天气/UI 域 → LittleFS 优先, SD 兼容回退(按需重挂载)。
+  // ⚠️ LittleFS.begin 只做一次（重复 begin 每次泄漏 ~1KB 挂载结构, file_api 实测）; SD 回退走
+  //    reinitSdBus 总线约定（EPD CS 拉高 + SPI.begin + SD.begin, 不再裸调 SD.begin 绕过 CS 管理）。
   File file;
-  if (LittleFS.begin()) file = LittleFS.open(path, "r");
+  static bool lfsMounted = false;
+  if (!lfsMounted) lfsMounted = LittleFS.begin();
+  if (lfsMounted) file = LittleFS.open(path, "r");
   if (!file) {
-    SD.begin(5, SD_SCK_MHZ(20));
-    file = SD.open(path, "r");
+    if (reinitSdBus("bmp_sd_fallback")) file = SD.open(path, "r");
   }
   if (!file) return false;
 
@@ -99,6 +101,9 @@ bool bmpShowFromSd(const char *path) {
       if (depth < 8) bitmask >>= depth;
 
       uint8_t input_buffer[150];   // 像素流读块
+      // 单像素字节数（24→3, 16→2, ≤8→1）: 重填判定用它——原条件 in_idx>=in_bytes 在 24/16 位
+      // 深度 + 块尾残 1-2 字节时会越过有效数据再读 1-2 字节（EOF 短读最坏越过栈缓冲边界）。
+      const uint32_t kBpp = (depth >= 24) ? 3 : (depth == 16 ? 2 : 1);
       uint32_t rowPos = flip ? imageOffset + (uint32_t)((int64_t)height - h) * rowSize : imageOffset;
       for (int32_t row = 0; row < h; row++, rowPos += rowSize) {
         int32_t yrow = flip ? (h - row - 1) : row;   // 逻辑行（自顶向下）
@@ -109,11 +114,17 @@ bool bmpShowFromSd(const char *path) {
         uint8_t in_bits = 0;
         file.seek(rowPos, SeekSet);
         for (int32_t col = 0; col < w; col++) {
-          if (in_idx >= (uint32_t)in_bytes) {   // 需要读下一块
-            in_bytes = file.read(input_buffer, in_remain > sizeof(input_buffer) ? sizeof(input_buffer) : in_remain);
-            if (in_bytes <= 0) break;   // 损坏文件/I/O 错误保护（read 失败返回 -1，防死循环防越界）
-            in_remain -= (uint32_t)in_bytes;
+          if (in_idx + kBpp > (uint32_t)in_bytes) {   // 块尾不足一个完整像素: 残余前移后补读
+            uint32_t residual = ((uint32_t)in_bytes > in_idx) ? ((uint32_t)in_bytes - in_idx) : 0;
+            if (residual) memmove(input_buffer, input_buffer + in_idx, residual);   // 流连续, 残余不能丢
             in_idx = 0;
+            uint32_t want = sizeof(input_buffer) - residual;
+            if (want > in_remain) want = in_remain;
+            if (want == 0) break;   // 本行数据已尽（畸形文件防御; 已绘部分保留）
+            int nb = file.read(input_buffer + residual, want);
+            if (nb <= 0) break;   // 损坏文件/I/O 错误保护（read 失败返回 -1，防死循环防越界）
+            in_remain -= (uint32_t)nb;
+            in_bytes = (int)residual + nb;
           }
           uint16_t red, green, blue;
           bool whitish;

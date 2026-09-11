@@ -12,6 +12,7 @@
 #include "wifi_manager.h"
 #include "sd_path.h"
 #include "sd_file_ops.h"
+#include "fs_cache.h"
 #include <LittleFS.h>
 #include <ESP8266WebServer.h>
 
@@ -313,14 +314,18 @@ static void handleApiUploadStatus() {
     sendApiErr(500, F("sd_error"));
     return;
   }
-  char tmpPath[560];
+  // ⚠️ 栈瘦身: SdEntry(~672B) 原栈上 → heap（同 handleApiStat 的栈炸弹修复）; 拼接路径 600B static
+  //   （深链剩余栈 0~100B, 见 gOp* 注释; 单线程顺序处理 static 安全）
+  static char tmpPath[600];
   snprintf(tmpPath, sizeof(tmpPath), "%s/%s.uploading", dir, name);
-  SdEntry e;
-  bool exists = sdStat(tmpPath, &e);
+  SdEntry *e = (SdEntry *)malloc(sizeof(SdEntry));
+  if (!e) { sendApiErr(500, F("internal_error")); return; }
+  bool exists = sdStat(tmpPath, e);
   char tmp[160];
   snprintf(tmp, sizeof(tmp), "{\"ok\":true,\"exists\":%s,\"size\":%llu}",
            exists ? "true" : "false",
-           exists ? (unsigned long long)e.size : 0ULL);
+           exists ? (unsigned long long)e->size : 0ULL);
+  free(e);
   srv.send(200, "application/json; charset=utf-8", tmp);
 }
 
@@ -331,6 +336,24 @@ static volatile bool gTransferActive = false;
 
 static bool apiBusy() {
   return gTransferActive;
+}
+
+// ---- fs_cache 失效（/api 变更端点与 /fs/* 双轨一致; 否则 /fs/list 读旧快照含已删/缺新文件）----
+// 父目录暂存 static: POST handler 处于 HTTP 深链（实测剩余栈 0~100B）, 再放 300B 栈局部必爆
+//（同 file_api_fs.cpp gOp* 同款理由; 单线程顺序处理, handler 不可重入 → static 安全）
+static char gApiParent[300];
+
+// 取 path 的父目录（"/a/b/c"→"/a/b", "/x"→"/"）并失效其缓存
+static void apiInvalidateParentOf(const char *path) {
+  const char *slash = strrchr(path, '/');
+  if (!slash || slash == path) { gApiParent[0] = '/'; gApiParent[1] = '\0'; }
+  else {
+    size_t n = (size_t)(slash - path);
+    if (n >= sizeof(gApiParent)) n = sizeof(gApiParent) - 1;
+    memcpy(gApiParent, path, n);
+    gApiParent[n] = '\0';
+  }
+  fsCacheInvalidateDir(gApiParent);
 }
 
 static void sendApiOk() {
@@ -360,7 +383,7 @@ static void handleApiMkdir() {
   if (isProtectedPath(path)) { sendApiErr(403, F("protected")); return; }
   if (!reinitSdBus("api_mkdir")) { sendApiErr(500, F("internal_error")); return; }
   SdErr r = sdMkdir(path);
-  if (r == SD_OK) sendApiOk(); else sendSdErr(r);
+  if (r == SD_OK) { apiInvalidateParentOf(path); sendApiOk(); } else sendSdErr(r);
 }
 
 // POST /api/delete?path=
@@ -374,7 +397,7 @@ static void handleApiDelete() {
   if (isProtectedPath(path)) { sendApiErr(403, F("protected")); return; }   // .uploading 可删（不在保护列表）
   if (!reinitSdBus("api_delete")) { sendApiErr(500, F("internal_error")); return; }
   SdErr r = sdDelete(path);
-  if (r == SD_OK) sendApiOk(); else sendSdErr(r);
+  if (r == SD_OK) { apiInvalidateParentOf(path); sendApiOk(); } else sendSdErr(r);
 }
 
 // POST /api/rename?path=&name=  （同目录改名）
@@ -400,7 +423,7 @@ static void handleApiRename() {
   if (isProtectedPath(target)) { sendApiErr(403, F("protected")); return; }
   if (!reinitSdBus("api_rename")) { sendApiErr(500, F("internal_error")); return; }
   SdErr r = sdRename(path, name);
-  if (r == SD_OK) sendApiOk(); else sendSdErr(r);
+  if (r == SD_OK) { apiInvalidateParentOf(path); sendApiOk(); } else sendSdErr(r);
 }
 
 // POST /api/move?path=&dest=  （跨目录; 防环）
@@ -427,7 +450,11 @@ static void handleApiMove() {
   if (isProtectedPath(target)) { sendApiErr(403, F("protected")); return; }
   if (!reinitSdBus("api_move")) { sendApiErr(500, F("internal_error")); return; }
   SdErr r = sdMove(path, dest);
-  if (r == SD_OK) sendApiOk(); else sendSdErr(r);
+  if (r == SD_OK) {
+    apiInvalidateParentOf(path);   // 源目录
+    apiInvalidateParentOf(dest);   // 目标目录（跨目录移动时不同）
+    sendApiOk();
+  } else sendSdErr(r);
 }
 
 // ---- S5: 下载 / 上传 ----
@@ -705,7 +732,7 @@ static void handleApiUploadCb() {
     Serial.printf_P(PSTR("UP_START %s expect=%llu skip=%llu\n"), gUp->tmpPath,
                   (unsigned long long)gUp->expected, (unsigned long long)gUp->skipRemaining);
   } else if (upload.status == UPLOAD_FILE_WRITE) {
-    if (!gUp->active || gUp->err != UP_NONE) return;
+    if (!gUp || !gUp->active || gUp->err != UP_NONE) return;   // gUp=NULL: START 低堆分配失败, 防空解引用
     const uint8_t *p = upload.buf;
     size_t n = (size_t)upload.currentSize;
     if (gUp->skipRemaining > 0) {
@@ -731,6 +758,7 @@ static void handleApiUploadCb() {
     }
     ESP.wdtFeed();
   } else if (upload.status == UPLOAD_FILE_END) {
+    if (!gUp) return;   // START 分配失败路径, 无状态可收尾
     if (gUpFile && !upFlush()) { /* err 已置 */ }
     if (gUpFile) gUpFile.close();
     gTransferActive = false;
@@ -744,10 +772,22 @@ static void handleApiUploadCb() {
     if (!reinitSdBus("api_upcommit")) { gUp->err = UP_IO; return; }
     if (SD.rename(gUp->tmpPath, gUp->finalPath)) {
       Serial.printf_P(PSTR("UP_DONE %s size=%llu\n"), gUp->finalPath, (unsigned long long)gUp->received);
+      apiInvalidateParentOf(gUp->finalPath);   // ★ 提交后失效缓存, /fs/list 立即可见（与 /fs/edit 同契约）
       gUp->done = true;   // 成功标志（active 会先被清理）
     } else {
       gUp->err = UP_IO;   // rename 失败 → .uploading 保留
     }
+  } else if (upload.status == UPLOAD_FILE_ABORTED) {
+    // ★ 断连时 core 只投 ABORTED 不投 END/done（file_api_fs.cpp 同款）; 此前无分支 →
+    //   gUpFile/gUpBuf/gUp 泄漏 + gTransferActive 永久 true → 此后所有变更端点恒 409 busy。
+    //   .uploading 保留（续传凭据, upload-status 读其尺寸）; 状态全部释放。
+    Serial.println(F("UP_ABORTED"));
+    if (gUpFile) gUpFile.close();
+    if (gUpBuf) { free(gUpBuf); gUpBuf = NULL; }
+    gUpBufLen = 0;
+    gTransferActive = false;
+    if (gUp) { free(gUp); gUp = NULL; }
+    gUpAllocFail = false;
   }
 }
 
@@ -765,6 +805,7 @@ static void handleApiUploadDone() {
     return;
   }
   UpErr err = gUp->err;
+  uint64_t actualSize = gUp->actualSize;   // ★ 先拷出: upReset() 后 gUp 已 free, 原地读必空解引用（resume_mismatch 分支）
   upReset();
   switch (err) {
     case UP_PROTECTED:      sendApiErr(403, F("protected")); break;
@@ -772,7 +813,7 @@ static void handleApiUploadDone() {
     case UP_RESUME_MISMATCH: {
       char tmp[180];
       snprintf(tmp, sizeof(tmp), "{\"ok\":false,\"error\":\"resume_mismatch\",\"serverOffset\":%llu}",
-               (unsigned long long)gUp->actualSize);
+               (unsigned long long)actualSize);
       srv.send(409, "application/json; charset=utf-8", tmp);
       break;
     }
@@ -871,12 +912,19 @@ static void handleFmStatic(const String &uri) {
   // ⚠️ substring(3) 而非 (4): "/fm/" 是 4 字符, substring(4) 返回空串 → open("") 失败 404（实测）
   String fsPath = uri.substring(3);   // 去掉 "/fm"
   if (fsPath == "/" || fsPath == "/index.html" || fsPath.length() == 0) fsPath = "/index.html";
+  // 路径规范化（与其余端点一致）: 拒 ".."/"\"/控制字符。LittleFS 本身不支持 "..", 防御性统一。
+  char normPath[128];
+  if (!normalizeApiPath(fsPath.c_str(), normPath, sizeof(normPath))) {
+    srv.send_P(404, PSTR("text/plain; charset=utf-8"), PSTR("Not Found"));
+    return;
+  }
   const char *mime = "application/octet-stream";
-  if (fsPath.endsWith(".html")) mime = "text/html; charset=utf-8";
-  else if (fsPath.endsWith(".css")) mime = "text/css; charset=utf-8";
-  else if (fsPath.endsWith(".js")) mime = "application/javascript; charset=utf-8";
-  else if (fsPath.endsWith(".png")) mime = "image/png";
-  File f = LittleFS.open(fsPath, "r");
+  size_t nl = strlen(normPath);
+  if (nl >= 5 && strcmp(normPath + nl - 5, ".html") == 0) mime = "text/html; charset=utf-8";
+  else if (nl >= 4 && strcmp(normPath + nl - 4, ".css") == 0) mime = "text/css; charset=utf-8";
+  else if (nl >= 3 && strcmp(normPath + nl - 3, ".js") == 0) mime = "application/javascript; charset=utf-8";
+  else if (nl >= 4 && strcmp(normPath + nl - 4, ".png") == 0) mime = "image/png";
+  File f = LittleFS.open(normPath, "r");
   if (!f) {
     srv.send_P(404, PSTR("text/plain; charset=utf-8"), PSTR("Not Found"));
     return;

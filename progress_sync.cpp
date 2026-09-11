@@ -160,6 +160,7 @@ static bool phoneSkipHeaders();   // 前置声明 (本文件下方定义)
 // 读响应状态行 "HTTP/1.1 XXX"; 3s 超时; 成功后消费头部并解析 Content-Length → gRespCL
 static int phoneReadStatus() {
   String line;
+  line.reserve(64);   // 一次到位: 阅读期低堆, 逐字节 += 的多次 realloc 碎片化
   gRespCL = -1;
   uint32_t t0 = millis();
   while ((int32_t)(millis() - t0) < 3000) {
@@ -187,6 +188,7 @@ static int phoneReadStatus() {
 // 跳过响应头 (读到 \r\n\r\n 或 \n\n), 解析 Content-Length 存入 gRespCL; 3s 超时
 static bool phoneSkipHeaders() {
   String buf;
+  buf.reserve(2048);   // 一次到位: 阅读期低堆, 逐字节 += 的多次 realloc 碎片化
   uint32_t t0 = millis();
   while ((int32_t)(millis() - t0) < 3000) {
     while (gWiFi.available()) {

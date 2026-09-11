@@ -56,6 +56,10 @@ void EPD_290A::reset() {
 }
 
 void EPD_290A::sleep() {
+    // 先断电再深睡（GxEPD2 同款 _PowerOff→_Sleep 时序）: 局刷后面板保持上电（displayPartial
+    // 语义）, 带电直接发 0x10 进深睡会保持 booster 异常态——多耗电且唤醒后首刷行为不定。
+    // powerOff 幂等: 已断电时 waitBusy 立即通过。
+    powerOff();
     sendCommand(0x10);
     sendData(0x01);
     delay(100);
@@ -133,7 +137,9 @@ void EPD_290A::waitBusy(int timeout) {
     unsigned long start = millis();
     while (digitalRead(EPD_BUSY_PIN) == HIGH) {
         if (millis() - start > timeout) {
+#if EPD_DEBUG
             Serial.println("EPD busy timeout!");
+#endif
             break;
         }
         delay(10);

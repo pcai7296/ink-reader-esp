@@ -81,7 +81,7 @@ static int fsCacheScanOne(const char *dir, int depth, int *dirCount,
     bool isDir = root.isDirectory();
     uint64_t sz = isDir ? 0 : (uint64_t)root.fileSize();
     if (!ofsEntryVisibleEx(nm.c_str(), isDir, false)) continue;
-    char nameEsc[160];
+    char nameEsc[260];   // 容得下 FAT LFN 255 字节 + 转义余量（原 160 截断长名且可能切在 UTF-8 中间）
     fsJsonEscape(nm.c_str(), nameEsc, sizeof(nameEsc));
     if (first) { cache.printf("["); first = false; } else { cache.printf(","); }
     if (isDir) cache.printf("{\"type\":\"dir\",\"name\":\"%s\"}", nameEsc);
@@ -126,6 +126,16 @@ int fsCacheBuild() {
   int dirCount = 0, fileCount = 0;
   char cachePath[32];
   fsCacheScanOne("/", 0, &dirCount, &fileCount, cachePath, sizeof(cachePath));
+  // ★ 截断标记: 扫描触及上限时部分目录无缓存（fsCacheServeList 读不到 → /fs/list 回退实时 SD）。
+  //   不因此禁用缓存（全量回退实时 SD 更危险——低堆 AP 会话 SD×AP 竞争崩溃）, 落标记文件供诊断。
+  if (dirCount >= FS_CACHE_MAX_DIRS || fileCount >= FS_CACHE_MAX_FILES) {
+    Serial.printf("FS_CACHE_TRUNCATED dirs=%d(>=%d) items=%d(>=%d)\n",
+                  dirCount, FS_CACHE_MAX_DIRS, fileCount, FS_CACHE_MAX_FILES);
+    String mark = String(FS_CACHE_DIR) + "/_TRUNCATED";
+    LittleFS.remove(mark);
+    File t = LittleFS.open(mark, "w");
+    if (t) t.close();
+  }
   Serial.printf("FS_CACHE_DONE dirs=%d items=%d\n", dirCount, fileCount);
   // 诊断: dump 根目录缓存文件前 120 字节（确认缓存格式/内容; 若空/畸形即写缓存或解析 bug）
   fsCacheNameFor("/", cachePath, sizeof(cachePath));
@@ -156,14 +166,33 @@ bool fsCacheServeList(const char *dir, size_t start, size_t count, bool hideAuto
   if (!c) { Serial.printf("FSLIST dir=%s OPEN_FAIL\n", dir); return false; }
   Serial.printf("FSLIST dir=%s len=%u\n", dir, (unsigned)c.size());   // 只打 size, 不位移文件指针
 
+  // ★ 首行 = 原始路径, 读回比对（落地头文件"防碰撞失真"承诺; 原先只跳过不比对, 纯属虚设）:
+  //   djb2 32 位 hash 碰撞或 /fslist 残留旧缓存时, 会把 A 目录内容当 B 目录返回——比对失败
+  //   弃缓存返回 false（回退实时列表）。full 缓冲此时已用完, 复用作行缓冲。
+  {
+    size_t plen = 0;
+    bool lineOk = false;
+    while (plen < sizeof(full) - 1) {
+      int chb = c.read();
+      if (chb < 0) break;
+      if (chb == '\n') { lineOk = true; break; }
+      full[plen++] = (char)chb;
+    }
+    full[plen] = '\0';
+    if (!lineOk || strcmp(full, dir) != 0) {
+      Serial.printf("FSLIST dir=%s CACHE_PATH_MISMATCH got=%s\n", dir, full);
+      c.close();
+      return false;
+    }
+  }
+
   ESP8266WebServer &s = wifiManagerServer();
   if (!s.chunkedResponseModeStart(200, "text/json")) { c.close(); s.send(505, "text/html", "HTTP1.1 required"); return true; }
   s.sendContent_P(PSTR("{\"items\":["));
 
-  // 流式 JSON 项扫描器: 跳过首行路径(\n 前), 之后逐字节识别 {..} 项, 按 idx/start/count 发送。
+  // 流式 JSON 项扫描器: 首行路径已在上面对比并消费, 这里逐字节识别 {..} 项, 按 idx/start/count 发送。
   // ⚠️ '}' 检测必须优先于 itemLen 上限——item 满了(长文件名)也必须能 emit(内容截断但不丢项)。
   size_t idx = 0, emitted = 0;
-  bool skipPathLine = true;            // 跳过首行（原始路径校验用）
   bool inItem = false;                 // 是否在 {...} 内
   int itemLen = 0;
   char item[400];                      // 单项缓冲（容纳长文件名 JSON; 超限截断但仍 emit）
@@ -175,7 +204,6 @@ bool fsCacheServeList(const char *dir, size_t start, size_t count, bool hideAuto
     if (n <= 0) break;
     for (int i = 0; i < n; i++) {
       char ch = (char)rb[i];
-      if (skipPathLine) { if (ch == '\n') skipPathLine = false; continue; }
       if (inItem) {
         if (ch == '}') {
           // 必须先测 '}'——emit 一个完整项。item 累积到 '}' 前的字符, 这里补上 '}' 再发（否则 JSON 缺闭合 '}' 畸形 → 前端 parse 失败）。
@@ -224,7 +252,7 @@ bool fsCacheServeList(const char *dir, size_t start, size_t count, bool hideAuto
   }
   c.close();
   Serial.printf("FSLIST emitted=%u more=%d\n", (unsigned)emitted, hasMore ? 1 : 0);
-  bool more = hasMore || (emitted >= count);  // 已发满且可能还有 → 由前端"加载更多"触发
+  bool more = hasMore;   // 仅窗口外确有可见项才 true（原 `|| emitted>=count` 在目录恰好 count 项时过报 → 前端多发一次空请求）
   s.sendContent_P(PSTR("],\"nextStart\":"));
   char num[16];
   snprintf(num, sizeof(num), "%u", (unsigned)(start + emitted));

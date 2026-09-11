@@ -112,8 +112,8 @@ python esp_dev.py --dry-run --boot-ap      # 打印命令不执行
 
 ## NOTES
 - IRAM ~60KB/64KB（当前 93%），慎用 IRAM 变量
-- RAM 70% 余量（56200/80192），避免大静态数组
-- `fb` 帧缓冲 4608 字节 (128×296/8)
+- RAM 86% 已用（69368/80192, 2026-09-12 实测; 旧记"70% 余量"已过期），新增大缓冲优先 malloc 请求级而非静态 BSS
+- `fb` 帧缓冲 4736 字节 (128×296/8; 2026-09-12 勘误, 原记 4608)
 - `diagRing` 24 条环形日志
 - 小说索引构建参考 `J:\code\esp8266\legacy\archive\test\` 的 `.i1`/`.z1` 样例
 - 排版算法已 PC 端 Python 模拟验证 100%（`simulate_index.py`）
@@ -152,13 +152,14 @@ python esp_dev.py --dry-run --boot-ap      # 打印命令不执行
 - **WiFi 生命周期（P5, 2026-09）**：`wifiManagerRfOff(reason)` 统一关 RF（对齐官方 `WifiShutdown`：Clock_8025T:93 / DisplaySetup:194 / DisplayTxt:854）；调用点=时钟各终态、天气页退出、配网页退出、进入阅读、阅读循环兜底断言；日志 `RF_OFF reason=…`。疑似 6–8h vs 25h 续航差的主因（RF 常开 ~70–100mA）。
 - **P3/P4 已实机验收（2026-09，T1=307KB 书）**：Web 文件管理 `POST /fs/edit` 上传 → `GET /fs/file?path=/T1_300k.txt` 校验 **307,356 B** 一致（确认落 LittleFS）；索引在 LittleFS 构建 `pages=681 chapters=53`；`AUTOTEST_FWD_DONE fwdOk=680 stoppedAtEnd=1 page=681 total=681`（整本零失败）+ `AUTOTEST_BACK_DONE backOk=225`；阅读期间**零 SD 访问**（无 `SD_REINIT`）、零 `PAGE_REC_*`/`READ_FAIL`/崩溃/WDT/重启，`rf=0`。细节见 `docs/reader-lfs-migration.md §14`。
 - **迁移期踩坑（勿重犯）**：① `/fs/*` 原先**硬编码 SD**（上传写 SD），已改 `activeFileFs()` 跟随介质——否则"Web 上传进 LittleFS"根本走不通；② `BOOT_AP_MODE` 分支原先在"本地介质提前 return"之后 → sdEnabled=0/无卡时**永远进不了配网页**，已前移到分流之前（本地介质跳过 SD 目录缓存）；③ 自测/脚本阻塞在 setup 时必须**自己驱动 `indexTaskStep()`**，否则异步索引永不完成（现象 `total=1`、翻页全失败）；④ 阅读期写睡眠快照/休眠原先 `reinitSdBus(...)` → 破坏"零 SD 访问"，已移除；⑤ 验收编译开关：`-DREADER_AUTOTEST=1 -DFORCE_LOCAL_MEDIUM_TEST=1`，配网页部署再加 `-DBOOT_AP_MODE=1 -DWIFI_TEST_FORCE_AP=1`（强制热点、不连已保存 STA）。
+- **2026-09-12 全库审查修复轮（要点存档）**：①HTTP 栈炸弹批量 heap 化——/api/upload-status 的 SdEntry、ofsDeleteRecursive/usedWalk/cleanupWalk/searchWalk 的每层 420B 路径缓冲（usedWalk/cleanupWalk 补深度上限 16；core 3.1.2 Dir::fileName() 返回 String，递归内每层存活 1 个属正常）；②上传三连修：done 回调 upReset 后读 gUp->actualSize 的 use-after-free（先拷出）、START calloc 失败后 WRITE/END 空解引用（加 !gUp 守卫）、补 UPLOAD_FILE_ABORTED 分支（断连后 gTransferActive 永久 true → 变更端点恒 409 死锁）；③自动翻页 25 档回绕到 0（原"超上限提示"让 25 档永久卡死无法关闭，单键循环下以回绕替代 A7 上限提示）；④finishTxtIndexBuild 收尾行上限 txtLineCount()-1（原硬编码 7 → 竖屏末页 9~17 行章节丢失）；⑤startTxtReader 有效索引分支二次打开 ready 判空（原 (0/8)-1 下溢 0xFFFFFFFF → 兜底走重建）、恢复偏移 ≥ txtFile.size() 作废（换小同名文件防"隐形阅读器"，对齐同步路径检查）、findPageByOffset/findPageCeil/offsetToPage 二分读回校验（read()=-1 垃圾不进搜索决策）；⑥组合键回首页对 APP_CLOCK_DISGUISE 失效（伪装契约=停用全部按键）；⑦索引构建步进统一提到 loop 前部（原设置/统计/时钟/天气/BMP/伪装页构建停摆；APP_NETWORK/APP_CLOCK_CONNECT 仍绝不喂——SD 扫描×WiFi 争堆）；⑧/api 变更端点补 fsCacheInvalidateDir（与 /fs/* 双轨一致，防 /fs/list 读旧快照）；fsCacheServeList 落地首行路径比对（原注释承诺读回校验但实现只跳过）+ 构建截断落 /fslist/_TRUNCATED 标记 + hasMore 只看窗口外实有项；⑨sdRename/sdMove 目标缓冲 560B（原 300/320 静默截断 → FAT 错名 rename 不可逆）；⑩bmp_show：块尾按 kBpp 判定重填+残余 memmove（24/16 位深 EOF 短读越界读栈）、SD 回退走 reinitSdBus + LittleFS.begin 只做一次（重复 begin 泄漏挂载结构）；⑪epd：EPD_DEBUG 默认 0（GPIO3=RX 与 KEY3 互扰）、sleep() 先 powerOff（局刷后带电进深睡）；⑫死代码删除 buildTxtIndex 同步版/readerImportFromSd；readLineCapped 限长行读（损坏 .z1 防 String 吞堆）；utf8ChopOne 砍尾不切多字节；BMP 退出不再 freeItemList（清窗口导致返回空列表）；globals.h AppMode 枚举补 APP_STATS=12；stats 写入去 remove→rename 掉电窗口
 - **UDP 发现细节（progress_sync.cpp）**：广播顺序=先子网定向广播再 255.255.255.255（部分热点/路由器对两类广播处理不同）；只接受 `LUMIACK <合法IPv4>` 前缀包；2s 超时回退 TargetConfig（无配置报"未配置手机地址"）；SYNC_DISCOVER 非阻塞轮询（100ms 间隔），每循环 `ESP.wdtFeed()`
 ## 文件管理 HTTP API（2026-08 新增, 契约见 docs/file-api.md）
 
 - 统一 API: Web/Android/Legado 都是客户端; 服务器复用配网会话的 ESP8266WebServer
 - 模块: sd_path(纯函数路径安全/保护) → sd_file_ops(SD 操作层) → file_api(HTTP 路由)
 - 端点: /api/status capacity files stat search download upload(仅配网会话) mkdir delete rename move
-- 读开放; 变更必验 X-Admin-Pass(wifiManagerAdminPassValid); 错误枚举见 docs/file-api.md §1
+- **全部端点免鉴权 (2026-09-12 用户拍板)**: 管理密码机制已整体废除, X-Admin-Pass 头被忽略; 仅限可信局域网使用 (AP 需物理接触连入; STA 管理态同网段可达)。契约见 docs/file-api.md §1
 - 关键坑(已踩):
   - File::name() 只返回 basename, 递归/完整路径必须用 fullName()(嵌套目录丢失路径)
   - fullName() 根相对无前导 /, fillEntry 需规范化, 否则 isProtectedPath 判不了

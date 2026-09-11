@@ -344,9 +344,8 @@ static void handleOfsEditPut() {
       snprintf(lab, 220, "新建:%s", path);
       ofsOpReport(OFS_OP_PHASE_START, lab);
       ESP.wdtFeed();
-      File f = activeFileFs().open(path, "w");
+      File f = activeFileFs().open(path, "w");   // "w" 即创建/截断为空文件, 无需再 write
       if (!f) { ofsOpReport(OFS_OP_PHASE_FAIL, lab); ofsReply(500, "CREATE FAILED"); return; }
-      f.write((const char *)0);           // Print::write 有 NULL 保护, 等价建空文件
       f.close();
       ESP.wdtFeed();
       ofsOpReport(OFS_OP_PHASE_DONE, lab);
@@ -408,12 +407,17 @@ static bool ofsDeleteRecursive(const char *path, int depth, int *count) {
   int sinceFeed = 0;
   while (d.next()) {
     if (++sinceFeed >= 64) { sinceFeed = 0; ESP.wdtFeed(); }
-    String nm = d.fileName();
-    char full[420];
-    if (nm.length() && nm[0] == '/') snprintf(full, sizeof(full), "%s%s", path, nm.c_str());
-    else if (strcmp(path, "/") == 0) snprintf(full, sizeof(full), "/%s", nm.c_str());
-    else snprintf(full, sizeof(full), "%s/%s", path, nm.c_str());
-    if (!ofsDeleteRecursive(full, depth + 1, count)) { ok = false; break; }
+    String nm = d.fileName();   // core 3.1.2 Dir API 只给 String; 每层同时仅存活 1 个, 块尺寸恒定可复用
+    // ★ 栈炸弹修复: full[420] 原栈上 × 最深 17 层 ≈ 7KB >> 4KB 循环栈（HTTP 深链实测剩余 0~100B）,
+    //   删深层目录必 Exception。改每层 heap（最深同时 16×420 ≈ 6.7KB; 低堆 malloc 失败 → 放弃并回 500, 不崩）。
+    char *full = (char *)malloc(420);
+    if (!full) { ok = false; break; }
+    if (nm.length() && nm[0] == '/') snprintf(full, 420, "%s%s", path, nm.c_str());
+    else if (strcmp(path, "/") == 0) snprintf(full, 420, "/%s", nm.c_str());
+    else snprintf(full, 420, "%s/%s", path, nm.c_str());
+    bool childOk = ofsDeleteRecursive(full, depth + 1, count);
+    free(full);
+    if (!childOk) { ok = false; break; }
     (*count)++;
   }
   if (!ok) return false;
@@ -470,13 +474,13 @@ static void ofsUpFail(int code, const char *msg) {
 }
 
 // ---- 上传墨水屏状态（file_manager 注入渲染; 深回调内只设状态/调回调, 不直接刷屏）----
+// (P0 内存审计: 原 gOfsUpPhasePath[300]+getter 全仓零消费者已删, 同 gOfsDlPhasePath 先例——
+//  渲染层只用回调入参 path, 从不查存储副本)
 static int gOfsUpPhase = OFS_UP_PHASE_IDLE;
-static char gOfsUpPhasePath[300] = {0};
 static OfsUpPhaseCallback gOfsUpPhaseCb = NULL;
 
 void ofsUpSetPhaseCallback(OfsUpPhaseCallback cb) { gOfsUpPhaseCb = cb; }
 int  ofsUpGetPhase() { return gOfsUpPhase; }
-const char *ofsUpGetPhasePath() { return gOfsUpPhasePath; }
 
 // ---- 下载墨水屏状态（/fs/file?download=true 下载起止上报; 渲染层显示"下载中/下载完毕/下载失败"）----
 // ⚠️ 静态瘦身(2026-09 Step B): 上报→渲染层回调是同步的, 渲染只用回调入参 path, 从不查存储的
@@ -510,8 +514,6 @@ static void ofsUpReport(int phase) {
   if (gOfsUpPhase == phase && phase != OFS_UP_PHASE_UPLOADING) return;   // 除"上传中"外去重
   gOfsUpPhase = phase;
   const char *p = ofsUpPath[0] ? ofsUpPath : NULL;
-  if (p) { size_t n = strlen(p); if (n >= sizeof(gOfsUpPhasePath)) n = sizeof(gOfsUpPhasePath) - 1; memcpy(gOfsUpPhasePath, p, n); gOfsUpPhasePath[n] = '\0'; }
-  else gOfsUpPhasePath[0] = '\0';
   if (gOfsUpPhaseCb) gOfsUpPhaseCb(phase, p);
 }
 

@@ -63,10 +63,12 @@ void showMsg(const char *msg, const char *msg2);
 void showMiniPrompt(const char *text);
 
 // ---------- 应用模式 ----------
+// ⚠️ 与 ink-reader-esp.ino 内部枚举保持数值一致（.ino 未 include 本头文件, 两处并列;
+// 新增模式必须同步两处, 否则其他 .cpp 引用会编译失败或范围判断漏项）
 enum AppMode { APP_HOME = 0, APP_BROWSER = 1, APP_READER = 2, APP_CHAPTERS = 3,
                APP_NETWORK = 4, APP_CLOCK_CONNECT = 5, APP_CLOCK = 6,
                APP_WEATHER = 7, APP_SETTINGS = 8, APP_BMP = 9,
-               APP_MARKS = 10, APP_CLOCK_DISGUISE = 11 };
+               APP_MARKS = 10, APP_CLOCK_DISGUISE = 11, APP_STATS = 12 };
 extern int appMode;
 extern bool sdAvailable;
 
@@ -79,7 +81,6 @@ bool isCharging();
 // ---------- 文件列表 / 浏览 ----------
 extern String currentPath;
 void listDir(const char *path);
-bool listDir(const char *path);
 void loadListWindow(const char *path, int offset);
 
 // ---------- 天气缓存 ----------

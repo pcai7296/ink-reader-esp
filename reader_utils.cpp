@@ -36,7 +36,7 @@ bool isChapterNumber(uint32_t cp) {
            cp == 0x3007 || cp == 0x4E00 || cp == 0x4E8C || cp == 0x4E09 ||
            cp == 0x56DB || cp == 0x4E94 || cp == 0x516D || cp == 0x4E07 ||
            cp == 0x516B || cp == 0x4E5D || cp == 0x5341 || cp == 0x767E ||
-           cp == 0x5343 || cp == 0x5343 || cp == 0x4E24;
+           cp == 0x5343 || cp == 0x96F6 || cp == 0x4E24;   // 末位原重复 0x5343(千), 笔误 → 0x96F6(零)
 }
 
 bool isChapterTitle(const char *line, char *title, size_t titleSize) {

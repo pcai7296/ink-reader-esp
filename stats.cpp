@@ -83,8 +83,12 @@ static bool writePayload(const char *path, const void *payload, size_t payloadSi
               (f.write((const uint8_t*)payload, payloadSize) == payloadSize);
     f.close();
     if (!ok) { LittleFS.remove(tmp); return false; }
-    if (LittleFS.exists(path)) LittleFS.remove(path);
-    if (!LittleFS.rename(tmp, path)) { LittleFS.remove(tmp); return false; }
+    // LittleFS rename = POSIX 语义（原子替换已存在目标）: 直接 rename 消除 remove→rename 之间的
+    // 掉电窗口（该窗口丢整个统计文件 → 下次 CRC 失败重置）。仅 rename 失败才走 remove+rename 兜底。
+    if (!LittleFS.rename(tmp, path)) {
+        LittleFS.remove(path);
+        if (!LittleFS.rename(tmp, path)) { LittleFS.remove(tmp); return false; }
+    }
     return true;
 }
 

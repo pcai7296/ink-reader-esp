@@ -11,6 +11,7 @@
 // 路径 hash: djb2 → hex12; 读回校验首行路径, 防碰撞失真。
 //
 // 扫描上限: FS_CACHE_MAX_DEPTH 层 / FS_CACHE_MAX_DIRS 目录 / FS_CACHE_MAX_ITEMS 每目录项。
+// 触及上限即"截断构建": 超限目录无缓存（/fs/list 自动回退实时列表）, 并落 /fslist/_TRUNCATED 标记文件（诊断用）。
 #include <Arduino.h>
 
 #define FS_CACHE_DIR       "/fslist"

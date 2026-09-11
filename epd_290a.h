@@ -11,9 +11,10 @@
 #include <Arduino.h>
 #include <SPI.h>
 
-// 调试开关：1=驱动串口输出调试信息（排障时开启，正式使用时改为0或删除）
+// 调试开关：1=驱动串口输出调试信息（排障时 -DEPD_DEBUG=1 临时开启）。
+// 默认 0: GPIO3=RX 与 KEY3 复用, 刷新热路径串口输出会与按键互相灌噪声（AGENTS 反模式）
 #ifndef EPD_DEBUG
-#define EPD_DEBUG 1
+#define EPD_DEBUG 0
 #endif
 
 // 引脚定义 - MoShuiPing-V2.9 (甘草酸不酸2.9寸ESP8266墨水屏)

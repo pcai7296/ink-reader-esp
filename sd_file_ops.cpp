@@ -76,18 +76,19 @@ int sdListDir(const char *path, SdListCb cb, void *ctx, int maxItems, bool *trun
   if (truncated) *truncated = false;
   if (!dirProbe(path)) return -1;
   Dir root = SDFS.openDir(path);
-  // 局部 SdEntry（sdListDir 非递归, 650B 栈可承受; 搜索递归才用堆 scratch）
-  SdEntry localEntry;
+  // SdEntry(650B)+full(420B) 改 static（同 sdListDirPaged 的深链理由: HTTP 调用链栈紧张;
+  // 单线程顺序执行, 与 paged 版本无并发/重入 → 各用独立 entry, full 缓冲共用无冲突）
+  static SdEntry listEntry;
   int count = 0;
   while (root.next()) {
     String nm = root.fileName();
     bool isDir = root.isDirectory();
-    char full[420];
-    joinFull(path, nm, full, sizeof(full));
+    char *full = gPagedFull;
+    joinFull(path, nm, full, 420);
     // 保护/临时判定需要完整路径——Dir 无 fullName, joinFull 已拼
-    fillEntry(full, isDir, isDir ? 0 : (uint64_t)root.fileSize(), &localEntry);
+    fillEntry(full, isDir, isDir ? 0 : (uint64_t)root.fileSize(), &listEntry);
     bool stop = false;
-    if (cb) cb(&localEntry, ctx);   // 写出这一项（ofsListItemCb → snprintf + sendContent）
+    if (cb) cb(&listEntry, ctx);   // 写出这一项（ofsListItemCb → snprintf + sendContent）
     count++;
     // 每项让出（顺序: 写出下一项前先 yield→wdtFeed）:
     // 缩短两次 SDK/loop 调度之间的最长连续执行时间, 防大目录(大量 txt/bmp 全过白名单)
@@ -156,7 +157,11 @@ static uint64_t sdCardTotalBytes() {
 
 // 目录遍历求和已用字节（递归累加所有文件真实字节; FAT 簇开销未计入, 近似值）
 // scanned 上限 20000 防恶意大目录拖死; 截断时返回 false
-static bool usedWalk(const char *dir, uint64_t *acc, int *scanned) {
+// ⚠️ 栈安全: 每层路径缓冲 heap 化（原 child[420] 栈上 × 无上限递归深度 → 必爆 4KB 小栈,
+// 实测 Exception 5）; 深度上限 16 兜底（SD 卡目录深度实际不可能超过, 防御环/异常目录项）
+#define SD_WALK_MAX_DEPTH 16
+static bool usedWalk(const char *dir, uint64_t *acc, int *scanned, int depth) {
+  if (depth > SD_WALK_MAX_DEPTH) return false;
   if (!dirProbe(dir)) return false;
   Dir d = SDFS.openDir(dir);
   while (d.next()) {
@@ -167,11 +172,13 @@ static bool usedWalk(const char *dir, uint64_t *acc, int *scanned) {
       yield();   // 软狗需让出主循环: 在 HTTP 处理器内冷启动遍历时防止 Soft WDT reset（实测）
     }
     if (d.isDirectory()) {
-      // 递归传拼好的完整路径（Dir 无 fullName; File::name() 只给 basename, 嵌套路径会丢上下文）;
-      // 不得复制大 char 缓冲: 每层栈缓冲超限撑爆 ESP8266 小栈（实测 Exception 5 Alloca 栈溢出）
-      char child[420];
-      joinFull(dir, d.fileName(), child, sizeof(child));
-      usedWalk(child, acc, scanned);
+      // 递归传拼好的完整路径（Dir 无 fullName; File::name() 只给 basename, 嵌套路径会丢上下文）
+      String nm = d.fileName();
+      char *child = (char *)malloc(420);
+      if (!child) return false;   // 低堆: 放弃遍历（used 为近似值, 不致命）
+      joinFull(dir, nm, child, 420);
+      usedWalk(child, acc, scanned, depth + 1);
+      free(child);
       continue;
     }
     *acc += (uint64_t)d.fileSize();
@@ -184,7 +191,7 @@ bool sdCapacity(uint64_t *total, uint64_t *used) {
   if (tot == 0) return false;
   uint64_t usedBytes = 0;
   int scanned = 0;
-  usedWalk("/", &usedBytes, &scanned);
+  usedWalk("/", &usedBytes, &scanned, 0);
   if (usedBytes > tot) usedBytes = tot;   // 防御
   if (total) *total = tot;
   if (used) *used = usedBytes;
@@ -214,7 +221,9 @@ SdErr sdMkdir(const char *path) {
 
 SdErr sdRename(const char *oldPath, const char *newName) {
   // 同目录: 目标 = oldPath 的目录 + "/" + newName
-  char dir[300];
+  // ⚠️ 缓冲须容得下「目录部分(≤300) + '/' + newName(≤240)」: 原 dir[300] 会 snprintf 静默截断
+  //   → SD.exists/rename 作用于被截断路径, FAT 上生成错名文件（不可逆）
+  char dir[560];
   snprintf(dir, sizeof(dir), "%s", oldPath);
   char *slash = strrchr(dir, '/');
   if (!slash || slash == dir) {
@@ -238,7 +247,8 @@ SdErr sdMove(const char *path, const char *destDir) {
   }
   d.close();
   if (!SD.exists(path)) return SD_NOT_FOUND;
-  char target[320];
+  // ⚠️ 缓冲须容下 destDir(≤300) + '/' + basename(≤256): 原 target[320] 静默截断 → 错名 rename（不可逆）
+  char target[560];
   const char *base = baseNameOf(path);
   snprintf(target, sizeof(target), "%s/%s", destDir, base);
   if (SD.exists(target)) return SD_EXISTS;
@@ -262,19 +272,26 @@ static int searchWalk(const char *dirPath, const char *query, int depth, int max
     }
     String nm = dir.fileName();
     bool match = (strcasestr(nm.c_str(), query) != NULL);
-    char full[420];
+    // ⚠️ 栈安全: full[420] 原栈上 × 8 层递归 ≈ 3.4KB, 加 Dir/String/调用链超 4KB 小栈 → 改 heap
     if (match) {
       // 保护/临时判定用拼好的完整路径（Dir 无 fullName; 嵌套路径）; path 字段带完整路径供客户端定位
-      joinFull(dirPath, nm, full, sizeof(full));
-      fillEntry(full, dir.isDirectory(), dir.isDirectory() ? 0 : (uint64_t)dir.fileSize(), gScratchEntry);
-      if (cb) cb(gScratchEntry, ctx);
+      char *full = (char *)malloc(420);
+      if (full) {
+        joinFull(dirPath, nm, full, 420);
+        fillEntry(full, dir.isDirectory(), dir.isDirectory() ? 0 : (uint64_t)dir.fileSize(), gScratchEntry);
+        if (cb) cb(gScratchEntry, ctx);
+        free(full);
+      }
       found++;
       if (found >= maxItems) { *truncated = true; break; }
     }
     if (dir.isDirectory()) {
-      // 递归传拼好的完整路径（Dir 无 fullName）; 不复制大缓冲防栈溢出
-      joinFull(dirPath, nm, full, sizeof(full));
+      // 递归传拼好的完整路径（Dir 无 fullName）; 大缓冲禁栈上（深链栈紧张, 同上）
+      char *full = (char *)malloc(420);
+      if (!full) { *truncated = true; break; }   // 低堆: 停止下钻并如实标记截断
+      joinFull(dirPath, nm, full, 420);
       int sub = searchWalk(full, query, depth + 1, maxDepth, cb, ctx, maxItems, scanned, truncated);
+      free(full);
       found += sub;
       if (found >= maxItems || *truncated) break;
     }
@@ -306,7 +323,9 @@ int sdSearch(const char *root, const char *query, int maxDepth,
 }
 
 // .uploading 清理递归: 删除所有临时文件, 返回删除数
-static int cleanupWalk(const char *dir, int *scanned) {
+// ⚠️ 栈安全（同 usedWalk）: 每层路径缓冲 heap 化 + 深度上限 16（原 child[420]+full[420] 栈上递归）
+static int cleanupWalk(const char *dir, int *scanned, int depth) {
+  if (depth > SD_WALK_MAX_DEPTH) return 0;
   if (*scanned > 10000) return 0;
   if (!dirProbe(dir)) return 0;
   Dir d = SDFS.openDir(dir);
@@ -319,17 +338,21 @@ static int cleanupWalk(const char *dir, int *scanned) {
     }
     String nm = d.fileName();
     if (d.isDirectory()) {
-      char child[420];
-      joinFull(dir, nm, child, sizeof(child));
-      removed += cleanupWalk(child, scanned);   // 递归用拼好的完整路径（嵌套路径）
+      char *child = (char *)malloc(420);
+      if (!child) break;   // 低堆: 停止下钻
+      joinFull(dir, nm, child, 420);
+      removed += cleanupWalk(child, scanned, depth + 1);
+      free(child);
       continue;
     }
     if (isUploadingTemp(nm.c_str())) {
       // 先关句柄再 remove（FAT 对打开文件的删除会失败）; 用拼好的完整路径
-      char full[420];
-      joinFull(dir, nm, full, sizeof(full));
+      char *full = (char *)malloc(420);
+      if (!full) break;
+      joinFull(dir, nm, full, 420);
       if (SD.remove(full)) removed++;
       else Serial.printf("CLN_FAIL %s\n", full);
+      free(full);
       continue;
     }
   }
@@ -338,7 +361,7 @@ static int cleanupWalk(const char *dir, int *scanned) {
 
 int sdCleanupUploading() {
   int scanned = 0;
-  int removed = cleanupWalk("/", &scanned);
+  int removed = cleanupWalk("/", &scanned, 0);
   Serial.printf("CLN_UPLOADING removed=%d scanned=%d\n", removed, scanned);
   return removed;
 }

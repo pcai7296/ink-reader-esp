@@ -84,12 +84,9 @@ EPD_290A epd;
 #ifndef SERIAL_REMOTE
 #define SERIAL_REMOTE 0
 #endif
-// 环形日志压缩 (2×128B): 串口实时输出不受影响; 静态 BSS 每减 1B 可用堆增 1B,
-// BearSSL TLS 同步需要大堆, 省下的 RAM 全部让给堆。
-#define DIAG_RING_COUNT 2
+// 调试行缓冲: DIAG_LINE_MAX 供 diagLog 栈上格式化 (P0 内存审计: 原常驻 diagRing[2][128]
+// 只写不读, 已删——静态 BSS 每减 1B 可用堆增 1B, 省下的 RAM 全部让给堆)
 #define DIAG_LINE_MAX 128
-char diagRing[DIAG_RING_COUNT][DIAG_LINE_MAX];
-uint8_t diagRingHead = 0;
 // diagSdBuffer 仅 DIAG_SD=1 时占用: 静态 BSS 每减 1B 可用堆就增 1B,
 // BearSSL TLS 需要 ~8-9KB 连续堆, 压缩调试缓冲给同步腾空间。
 #if DIAG_SD
@@ -145,9 +142,6 @@ void diagLog(char level, const char *msg) {
              (unsigned long)now, diagLevelName(level), (unsigned long)ESP.getFreeHeap(),
              (unsigned long)ESP.getFreeContStack(), (unsigned long)gap,
              (unsigned long)diagMaxLoopGap, msg ? msg : "");
-    strncpy(diagRing[diagRingHead], line, DIAG_LINE_MAX - 1);
-    diagRing[diagRingHead][DIAG_LINE_MAX - 1] = '\0';
-    diagRingHead = (diagRingHead + 1) % DIAG_RING_COUNT;
 #if DIAG_SERIAL
     Serial.print(line);
 #endif
@@ -740,7 +734,6 @@ struct ChapterRow {
     uint32_t page;
 };
 ChapterRow chapterRows[LIST_ROWS];
-uint32_t chapterRowOffsets[LIST_ROWS];
 uint32_t chapterTopOffset = 0;
 uint32_t chapterNextOffset = 0;
 uint32_t chapterTopLine = 0;
@@ -750,6 +743,7 @@ int chapterCountLoaded = 0;
 // 修复历程: ①向前翻每步 seekChapterOffset 全扫 .z1 (O(n²) 卡死); ②页码缓存/偏移栈在
 //   "恢复章节后向前翻" (栈空) 时每步 miss → 每步全扫 2.2s (实测日志 chapter_seek 循环)。
 // ③页偏移表: 建表一次 O(n) (6000 章约 2.2s, 建表时有喂狗), 之后向前/向后翻页全 O(1)。
+// (P0 内存审计: 原 chapterRowOffsets[6] 只写不读已删)
 static const int CHAPTER_PAGE_TABLE_MAX = 1024;   // 最多 1024 页 (= 6144 章, 覆盖《武炼巅峰》947 页)
 static uint32_t chapterPageOffsets[CHAPTER_PAGE_TABLE_MAX];   // pageOffsets[p-1] = 第 p 页首行偏移 (4KB RAM)
 
@@ -1206,7 +1200,7 @@ void enterHomeCard() {
             break;
         case 5:
             progressSyncFreeReaderHeap();   // 启动热点前腾堆: 关 txtFile + 清阅读行缓冲 (配网会话堆硬约束)
-            freeItemList();   // 大目录 items≈34KB+ 是堆大户, 配网会话堆 ~5KB 必须释放
+            freeItemList();   // 语义复位(窗口是静态数组不占堆; 历史: 全量缓存时代 items≈34KB 才是释放理由)
             fsCacheBuild();   // 进 AP 前扫描 SD 目录树 → LittleFS 缓存（/fs/list 浏览不碰 SD, 避开 SD×AP 崩溃）
             wifiManagerBegin(renderNetworkPage, exitNetworkPage);
             appMode = APP_NETWORK;
@@ -1243,6 +1237,17 @@ void renderBootStage(const char *line1, const char *line2) {
 // 复用配网页底行 gWebNotifyLine, 与 Web 设置"修改成功"通知同款显示: 局刷底行, 配网页保持可见）。
 // 由 file_api 上传状态回调触发。
 extern char gWebNotifyLine[160];   // 定义在 renderNetworkPage 前（配网页底行消息缓冲）
+
+// UTF-8 安全砍尾一格: 原逐字节砍可停在多字节序列中间 (u8g2 拿到非法序列, 渲染字宽异常)。
+// 砍 1 字节后把尾部延续字节(0x80-0xBF)一并砍掉, 保证停在字符边界。
+static void utf8ChopOne(char *buf) {
+    size_t n = strlen(buf);
+    if (n == 0) return;
+    n--;
+    while (n > 0 && ((unsigned char)buf[n] & 0xC0) == 0x80) n--;
+    buf[n] = '\0';
+}
+
 void renderUploadStatus(int phase, const char *path) {
     if (!textRendererReady) return;
     char titleBuf[24];
@@ -1260,7 +1265,7 @@ void renderUploadStatus(int phase, const char *path) {
         char nb[96];
         snprintf_P(nb, sizeof(nb), PSTR("%s"), b ? b : "");
         // 超长文件名截短（防底行溢出）
-        while (utf8Width(nb) > 250 && strlen(nb) > 2) nb[strlen(nb) - 1] = '\0';
+        while (utf8Width(nb) > 250 && strlen(nb) > 2) utf8ChopOne(nb);
         size_t a = strlen(gWebNotifyLine);
         snprintf_P(gWebNotifyLine + a, sizeof(gWebNotifyLine) - a, PSTR(":%s"), nb);
     } else if (phase == OFS_UP_PHASE_DONE) {
@@ -1290,7 +1295,7 @@ void renderDownloadStatus(int phase, const char *path) {
     if (phase == OFS_DL_PHASE_START) {
         char nb[96];
         snprintf_P(nb, sizeof(nb), PSTR("%s"), b ? b : "");
-        while (utf8Width(nb) > 250 && strlen(nb) > 2) nb[strlen(nb) - 1] = '\0';
+        while (utf8Width(nb) > 250 && strlen(nb) > 2) utf8ChopOne(nb);
         size_t a = strlen(gWebNotifyLine);
         snprintf_P(gWebNotifyLine + a, sizeof(gWebNotifyLine) - a, PSTR(":%s"), nb);
     } else if (phase == OFS_DL_PHASE_DONE) {
@@ -1686,7 +1691,7 @@ static void clockBuildSubText(char *out, size_t cap, bool pretty) {
         return;
     }
     if (mode == IAM_CUSTOM) {
-        if (pretty) { snprintf(out, cap, "%s", t); while (utf8Width(out) > 286 && strlen(out) > 1) out[strlen(out) - 1] = '\0'; }
+        if (pretty) { snprintf(out, cap, "%s", t); while (utf8Width(out) > 286 && strlen(out) > 1) utf8ChopOne(out); }
         return;
     }
     if (mode == IAM_COUNTDOWN) {
@@ -1753,7 +1758,7 @@ void renderClockPage(bool full) {
         th[0] = '\0';
         if (clockThText(th, sizeof(th))) snprintf(left, sizeof(left), "%s %s", clockCalibText(), th);
         else snprintf(left, sizeof(left), "%s", clockCalibText());
-        while (utf8Width(left) > 168 && strlen(left) > 1) left[strlen(left) - 1] = '\0';   // 不压右侧日期
+        while (utf8Width(left) > 168 && strlen(left) > 1) utf8ChopOne(left);   // 不压右侧日期
         drawTextUTF8(4, 96, left, 168, true);
         drawTextUTF8(180, 96, line, 112, true);
         // 底部 B 行: 倒计时/B粉 简洁也支持 (一言/自定义句不显示)
@@ -2676,7 +2681,8 @@ void showBmpFile(const char *path) {
 
 // 从文件管理器打开 BMP 图片（返回时回到文件管理器）
 void startBmpViewer(const char *path) {
-    freeItemList();   // 大目录 items≈34KB+ 是堆大户, 进图片前释放
+    // 注意: 不 freeItemList——窗口是静态数组(不占堆), 清了只会让"任意键退出 BMP"后
+    // renderAll 画出空列表(1/0), 用户得手动返回上级才能恢复。保留窗口原样回列表。
     showBmpFile(path);
     saveSleepRecord();   // 界面快照: 图片浏览（唤醒恢复为文件管理器）
 }
@@ -3049,111 +3055,6 @@ void appendIndexRecord(File &indexFile, uint32_t offset) {
     indexFile.print(record);
 }
 
-void buildTxtIndex() {
-    debugFmt("IDX begin txt=%s size=%lu", txtPath.c_str(), (unsigned long)txtFile.size());
-    readerFs().remove(txtIndexPath.c_str());
-    readerFs().remove(txtChapterPath.c_str());
-    File indexFile = readerFs().open(txtIndexPath.c_str(), "w");
-    File chapterFile = readerFs().open(txtChapterPath.c_str(), "w");
-    if (!indexFile || !chapterFile) return;
-    appendIndexRecord(indexFile, 0);
-    txtFile.seek(0);
-    String rows[9];
-    int8_t line = 0;
-    uint16_t enCount = 0;
-    uint16_t chCount = 0;
-    uint8_t lineOld = 0;
-    bool hskgState = false;
-    uint32_t page = 1;
-    bool pageStartPending = false;
-    uint32_t progressMark = 0;
-    while (txtFile.available()) {
-        ESP.wdtFeed();
-        uint32_t consumed = txtFile.position();
-        if (consumed - progressMark >= 1048576UL) {
-            progressMark = consumed;
-            debugFmt("IDX progress=%lu/%lu page=%lu", (unsigned long)consumed,
-                     (unsigned long)txtFile.size(), (unsigned long)page);
-        }
-        if (lineOld != line) { lineOld = line; hskgState = true; }
-        if (pageStartPending && line == 0) {
-            pageStartPending = false;
-            appendIndexRecord(indexFile, txtFile.position());
-        }
-        int c = txtFile.read();
-        while (c == '\n' && line <= 7) {
-            if (line == 0) {
-                if (rows[line].length() > 0) { appendChapter(chapterFile, rows[line], page); line++; }
-                else rows[line].clear();
-            } else if (rows[line].length() > 0) {
-                appendChapter(chapterFile, rows[line], page);
-                line++;
-            } else if (rows[line - 1].length() > 0) {
-                line++;
-            }
-            if (line <= 7) c = txtFile.read();
-            enCount = 0; chCount = 0;
-        }
-        if (c == '\t') {
-            rows[line] += rows[line].length() == 0 ? "    " : "       ";
-        } else if (!((c >= 0 && c <= 31) || c == 127)) {
-            rows[line] += (char)c;
-        }
-        bool asciiState = false;
-        uint8_t b = (uint8_t)c & 0xE0;
-        if (b == 0xE0) {
-            chCount++;
-            c = txtFile.read(); rows[line] += (char)c;
-            c = txtFile.read(); rows[line] += (char)c;
-        } else if (b == 0xC0) {
-            enCount += 14;
-            c = txtFile.read(); rows[line] += (char)c;
-        } else if (c == '\t') {
-            enCount += rows[line] == "    " ? 20 : 28;
-        } else if (c >= 0 && c <= 255) {
-            enCount += txtCharWidth((uint8_t)c) + 1;
-            asciiState = true;
-        }
-        uint16_t stringLength = enCount + chCount * 14;
-        if (stringLength >= 260 && hskgState) {
-            if (rows[line].length() >= 4 && rows[line][0] == ' ' && rows[line][1] == ' ' &&
-                rows[line][2] == ' ' && rows[line][3] == ' ') enCount += 8;
-            hskgState = false;
-        }
-        if (stringLength >= 283) {
-            if (!asciiState) {
-                appendChapter(chapterFile, rows[line], page);
-                rows[line].clear(); line++; enCount = 0; chCount = 0;
-            } else if (stringLength >= 286) {
-                int t = txtFile.peek();
-                int cz = 286 - stringLength;
-                int tLength = txtCharWidth((uint8_t)t);
-                uint8_t tb = (uint8_t)t & 0xE0;
-                if (tb == 0xE0 || tb == 0xC0 || tLength > cz) {
-                    rows[line].clear(); line++; enCount = 0; chCount = 0;
-                }
-            }
-        }
-        if (line == 8) {
-            pageStartPending = true;
-            page++;
-            line = 0; enCount = 0; chCount = 0;
-            for (uint8_t i = 0; i < 9; i++) rows[i].clear();
-        }
-    }
-    if (line >= 0 && line <= 7 && rows[line].length() > 0) appendChapter(chapterFile, rows[line], page);
-    appendIndexRecord(indexFile, txtFile.size());
-    indexFile.close();
-    chapterFile.close();
-    removeLegacyIndexFiles();
-    debugFmt("IDX done pages=%lu index=%s chapters=%s", (unsigned long)page,
-             txtIndexPath.c_str(), txtChapterPath.c_str());
-    File finalIndex = readerFs().open(txtIndexPath.c_str(), "r");
-    txtTotalPages = finalIndex ? ((finalIndex.size() / 8) - 1) : 1;
-    if (finalIndex) finalIndex.close();
-    txtFile.seek(0);
-}
-
 void appendChapterTracked(File &chapterFile, const String &line, uint32_t page) {
     char title[64];
     if (!isChapterTitle(line.c_str(), title, sizeof(title))) return;
@@ -3213,7 +3114,8 @@ void beginTxtIndexBuild() {
 }
 
 void finishTxtIndexBuild() {
-    if (indexLine >= 0 && indexLine <= 7 && indexRows[indexLine].length() > 0)
+    // 行上限定 txtLineCount()-1（横 8 行/竖 18 行）: 原硬编码 7 → 竖屏文件在末页第 9~17 行结束时丢该章节
+    if (indexLine >= 0 && indexLine <= txtLineCount() - 1 && indexRows[indexLine].length() > 0)
         appendChapterTracked(txtChapterBuildFile, indexRows[indexLine], indexPage);
     appendIndexRecord(txtIndexBuildFile, txtIndexScanFile.size());   // 扫描句柄仍在, 兼容后台构建时 txtFile 已关
     txtIndexBuildFile.flush();
@@ -3710,8 +3612,12 @@ uint32_t offsetToPage(uint32_t offset) {
     while (lo <= hi) {
         uint32_t mid = (lo + hi) / 2;
         f.seek(mid * 8);
-        for (uint8_t i = 0; i < 8; i++) rec[i] = (char)f.read();
-        rec[8] = '\0';
+        // 读回校验 (同 findPageByOffset): 垃圾记录不进二分决策; 失败时用已得 best
+        // (来自先前有效比较的合法页首, 调用方 progressSyncApplyRemote 另有 ps<=offset 校验)
+        int got = 0;
+        while (got < 8) { int c = f.read(); if (c < 0) break; rec[got++] = (char)c; }
+        rec[got] = '\0';
+        if (got < 8 || rec[0] < '0' || rec[0] > '9') break;
         uint32_t v = strtoul(rec, nullptr, 10);
         if (v <= offset) { best = mid; lo = mid + 1; }
         else hi = mid - 1;
@@ -4260,17 +4166,16 @@ void execReaderMenu() {
         case 1:  // 退出
             closeReaderMenu();
             break;
-        case 2: {  // 自动翻页: 循环档位 0=关/1/2/5/10/25; 超上限提示 (对齐 A7 "换页倍率过高")
+        case 2: {  // 自动翻页: 循环档位 0=关/1/2/5/10/25; 25 档再按回 0 (关)。
+                   // 原实现 25 档恒提示"换页倍率过高"→ 永久卡在该档无法关闭/调低, 只能重启。
+                   // 单键循环下用回绕代替 A7 的上限提示（A7 语义无法在单键菜单成立）。
             static const uint8_t speeds[6] = {0, 1, 2, 5, 10, 25};
             int idx = 0;
             while (idx < 5 && speeds[idx] != autoFlipSpeed) idx++;
-            if (speeds[idx] == 25) {
-                snprintf(readerMenuNote, sizeof(readerMenuNote), "换页倍率过高");
-            } else {
-                autoFlipSpeed = speeds[idx + 1];
-                autoFlipNextMs = millis() + autoFlipIntervalMs();
-                snprintf(readerMenuNote, sizeof(readerMenuNote), "自动翻页:%s", autoFlipSpeed ? "开" : "关");
-            }
+            if (idx >= 5) idx = -1;   // 25(或表外值) → 回 0 关
+            autoFlipSpeed = speeds[idx + 1];
+            autoFlipNextMs = millis() + autoFlipIntervalMs();
+            snprintf(readerMenuNote, sizeof(readerMenuNote), "自动翻页:%s", autoFlipSpeed ? "开" : "关");
             renderReaderMenu();
             break;
         }
@@ -4333,7 +4238,7 @@ void execReaderMenu() {
             readerMenuOpen = false;
             readerSyncOpen = false;
             progressSyncFreeReaderHeap();   // 启动热点前腾堆: 关 txtFile + 清阅读行缓冲 (配网会话堆硬约束)
-            freeItemList();   // 大目录 items≈34KB+ 是堆大户, 配网会话堆 ~5KB 必须释放
+            freeItemList();   // 语义复位(窗口是静态数组不占堆; 历史: 全量缓存时代 items≈34KB 才是释放理由)
             fsCacheBuild();   // 进 AP 前扫描 SD → LittleFS 缓存（浏览不碰 SD）
             appMode = APP_NETWORK;
             saveSleepRecord();
@@ -4779,6 +4684,19 @@ void previousTxtPage() {
     statsOnPageTurn();   // 阅读统计: 翻页(上一页也计, 指标=翻页次数)
 }
 
+// 限长行读: readStringUntil('\n') 无长度上限, 损坏的 .z1(无换行)会把整文件数百 KB 灌进
+// 一个 String (堆耗尽)。章节行格式 "标题-页", 标题至多几十字节, 超 200B 部分丢弃但
+// 继续消费到行尾 (文件位置仍落在下一行行首, rowOffset 语义不变)。
+static String readLineCapped(File &f, size_t maxLen = 200) {
+    String s;
+    while (f.available()) {
+        int c = f.read();
+        if (c < 0 || c == '\n') break;
+        if (c != '\r' && s.length() < maxLen) s += (char)c;
+    }
+    return s;
+}
+
 void loadChapterRows(uint32_t offset) {
     // ⚠️ 必须恢复 SD 总线: 翻页前列表/倍速弹窗都是局刷(EPD 侧), 直接 SD.open 会失败
     // → chapterCountLoaded=0 → 列表空 (实测 100x 翻页后列表直接空, 根因同标签系统白屏)。
@@ -4792,12 +4710,10 @@ void loadChapterRows(uint32_t offset) {
     if (!f) return;
     f.seek(offset);
     while (chapterCountLoaded < CHAPTER_ROWS && f.available()) {
-        uint32_t rowOffset = f.position();
-        String line = f.readStringUntil('\n');
+        String line = readLineCapped(f);
         line.trim();
         int dash = line.lastIndexOf('-');
         if (dash <= 0) continue;
-        chapterRowOffsets[chapterCountLoaded] = rowOffset;
         String title = line.substring(0, dash);
         title.toCharArray(chapterRows[chapterCountLoaded].title, sizeof(chapterRows[chapterCountLoaded].title));
         chapterRows[chapterCountLoaded].page = strtoul(line.substring(dash + 1).c_str(), nullptr, 10);
@@ -4821,15 +4737,23 @@ static void chapterBuildPageTable() {
     chapterPageOffsets[0] = 0;
     chapterPageTableCount = 1;
     uint32_t chapterIdx = 0;   // 已读有效章节行数
+    bool tableCapped = false;
     while (f.available()) {
         uint32_t pos = f.position();
-        String line = f.readStringUntil('\n');
+        String line = readLineCapped(f);
         line.trim();
         if (line.lastIndexOf('-') > 0) {   // 与 loadChapterRows 同判定 (dash>0 即有效行)
             chapterIdx++;
             if ((chapterIdx % CHAPTER_ROWS) == 0) {
-                if (chapterPageTableCount < CHAPTER_PAGE_TABLE_MAX)
+                if (chapterPageTableCount < CHAPTER_PAGE_TABLE_MAX) {
                     chapterPageOffsets[chapterPageTableCount++] = pos;   // 下一页首偏移
+                } else if (!tableCapped) {
+                    // 表上限(1024 页=6144 章): 之后的章节"上一页"不可达(表静默截断)。
+                    // 只告警不改结构 (扩表吃 4KB+ RAM; 现有最大书 947 页不触发, 属超长书边界)。
+                    tableCapped = true;
+                    traceFmtLevel('W', "CH_TABLE_CAPPED pages=%lu chapters>=%lu",
+                                  (unsigned long)CHAPTER_PAGE_TABLE_MAX, (unsigned long)chapterIdx);
+                }
             }
         }
         ESP.wdtFeed();
@@ -4863,7 +4787,7 @@ uint32_t seekChapterOffset(uint32_t chapterIndex) {
     uint32_t off = 0;
     while (f.available()) {
         uint32_t pos = f.position();
-        String line = f.readStringUntil('\n');
+        String line = readLineCapped(f);
         line.trim();
         int dash = line.lastIndexOf('-');
         if (dash > 0) {
@@ -5112,7 +5036,7 @@ void removeLegacyIndexFiles() {
 
 // 页表二分查找: 记录[1..N-2] 严格递增 (已校验) → 二分找 offset==saved 的页。
 // 替代 14 万条顺序扫描 (1.1MB 顺序读阻塞 2-4s, 旋转/启动恢复时屏幕长时间无变化 = "卡")。
-// 返回页号 (≥2) 或 0 (未找到/索引打不开)。
+// 返回页号 (≥2) 或 0 (未找到/索引打不开/记录读取失败)。
 uint32_t findPageByOffset(const String &indexPath, uint32_t saved) {
     File f = readerFs().open(indexPath.c_str(), "r");
     if (!f || f.size() < 24) {
@@ -5125,8 +5049,12 @@ uint32_t findPageByOffset(const String &indexPath, uint32_t saved) {
         uint32_t mid = (lo + hi) / 2;
         f.seek((mid - 1) * 8);   // 页 p 的记录在文件偏移 (p-1)*8
         char rec[9];
-        for (uint8_t i = 0; i < 8; i++) rec[i] = (char)f.read();
-        rec[8] = '\0';
+        // 读回校验: read() 失败返回 -1(写入 0xFF) → 栈垃圾参与二分决策会返回错误页码
+        // (静默显示错页)。失败即弃(0=未找到, 调用方保留 offset 直读, 内容保证正确)。
+        int got = 0;
+        while (got < 8) { int c = f.read(); if (c < 0) break; rec[got++] = (char)c; }
+        rec[got] = '\0';
+        if (got < 8 || rec[0] < '0' || rec[0] > '9') { f.close(); return 0; }
         uint32_t v = strtoul(rec, nullptr, 10);
         if (v == saved) { best = mid; break; }
         if (v < saved) { best = mid; lo = mid + 1; }
@@ -5139,7 +5067,7 @@ uint32_t findPageByOffset(const String &indexPath, uint32_t saved) {
 
 // 页表二分"向上取整": 找页首 >= saved 的最小页 (旋转进度转换用)。
 // ceil 语义: saved 恰在页首 → 该页 (不跳); saved 在页中间 → 下一页 (跳过已读部分, 不重复显示)。
-// 返回页号 (≥2) 或 0 (saved 超过最后页首 → 调用方用最后一页/兜底)。
+// 返回页号 (≥2) 或 0 (saved 超过最后页首/索引打不开/记录读取失败 → 调用方用最后一页/兜底)。
 uint32_t findPageCeil(const String &indexPath, uint32_t saved) {
     File f = readerFs().open(indexPath.c_str(), "r");
     if (!f || f.size() < 24) {
@@ -5152,8 +5080,11 @@ uint32_t findPageCeil(const String &indexPath, uint32_t saved) {
         uint32_t mid = (lo + hi) / 2;
         f.seek((mid - 1) * 8);
         char rec[9];
-        for (uint8_t i = 0; i < 8; i++) rec[i] = (char)f.read();
-        rec[8] = '\0';
+        // 读回校验 (同 findPageByOffset): 垃圾记录不进二分决策
+        int got = 0;
+        while (got < 8) { int c = f.read(); if (c < 0) break; rec[got++] = (char)c; }
+        rec[got] = '\0';
+        if (got < 8 || rec[0] < '0' || rec[0] > '9') { f.close(); return 0; }
         uint32_t v = strtoul(rec, nullptr, 10);
         if (v >= saved) { best = mid; hi = mid - 1; }
         else { lo = mid + 1; }
@@ -5161,122 +5092,6 @@ uint32_t findPageCeil(const String &indexPath, uint32_t saved) {
     }
     f.close();
     return best;
-}
-
-// ---- P10 最小版: SD → LittleFS 导入（点 SD 上的 TXT 即自动导入后阅读）----
-// 规则: >100MB 直接拒绝(官方规则); 需要空间 = 正文 + 索引估算(≈2.07%) + 16KB 余量, 超 LittleFS 可用 → 拒绝。
-// 已存在且大小一致 → 直接复用(秒开, 不重复拷贝)。旁带(.i1/.v1/.i1p/.z1/.vz1/.bm)存在则一并复制, 免整本重建。
-// 阅读数据源仍是 LittleFS: SD 只作为"导入来源", 不进入阅读实时链路(架构见 docs/reader-lfs-migration.md)。
-static bool readerImportFromSd(const char *sdPath, String &outLfsPath) {
-    if (!sdPath || !sdPath[0]) { showMsg("导入失败", "路径无效"); return false; }
-    String base = String(sdPath);
-    int slash = base.lastIndexOf('/');
-    if (slash >= 0) base = base.substring(slash + 1);
-    if (base.length() == 0) { showMsg("导入失败", "路径无效"); return false; }
-    String lfsPath = "/" + base;
-
-    if (!LittleFS.begin()) { showMsg("内部存储", "挂载失败"); return false; }
-    if (!activeFsBusReady("import")) { showMsg("SD 读取失败", "请重试"); return false; }
-    File src = SD.open(sdPath, "r");
-    if (!src) { showMsg("打开失败", "SD 读取失败"); return false; }
-    uint32_t srcSize = src.size();
-    const uint32_t LIMIT_100MB = 100UL * 1024UL * 1024UL;
-    if (srcSize == 0) { src.close(); showMsg("导入失败", "文件为空"); return false; }
-    if (srcSize > LIMIT_100MB) { src.close(); showMsg("文件过大", "超过100MB"); return false; }
-
-    File exist = LittleFS.open(lfsPath, "r");
-    if (exist && exist.size() == srcSize) {   // 已导入且一致 → 秒开
-        exist.close(); src.close();
-        traceFmt("IMPORT_SKIP %s size=%lu", lfsPath.c_str(), (unsigned long)srcSize);
-        outLfsPath = lfsPath;
-        return true;
-    }
-    if (exist) exist.close();
-
-    FSInfo info;
-    LittleFS.info(info);
-    uint32_t freeB = (uint32_t)(info.totalBytes - info.usedBytes);
-    uint32_t need = srcSize + (uint32_t)(((uint64_t)srcSize * 8ULL) / 386ULL) + 16384UL;
-    if (need > freeB) {
-        src.close();
-        char m1[24], m2[24];
-        snprintf(m1, sizeof(m1), "需%luKB", (unsigned long)(need / 1024));
-        snprintf(m2, sizeof(m2), "可用%luKB", (unsigned long)(freeB / 1024));
-        traceFmtLevel('W', "IMPORT_NOSPACE need=%lu free=%lu size=%lu",
-                      (unsigned long)need, (unsigned long)freeB, (unsigned long)srcSize);
-        showMsg(m1, m2);
-        return false;
-    }
-
-    traceFmt("IMPORT_BEGIN %s size=%lu need=%lu free=%lu",
-             lfsPath.c_str(), (unsigned long)srcSize, (unsigned long)need, (unsigned long)freeB);
-    showMsg("导入中", "0%");
-    File dst = LittleFS.open(lfsPath, "w");
-    if (!dst) { src.close(); showMsg("导入失败", "创建失败"); return false; }
-    static uint8_t buf[1024];   // static: 循环栈仅 4KB, 大缓冲不上栈
-    uint32_t done = 0;
-    uint8_t lastBucket = 0xFF;
-    while (src.available()) {
-        size_t n = src.read(buf, sizeof(buf));
-        if (n == 0) break;
-        if (dst.write(buf, n) != n) {
-            dst.close(); src.close(); LittleFS.remove(lfsPath);
-            traceFmtLevel('E', "IMPORT_WRITE_FAIL done=%lu", (unsigned long)done);
-            showMsg("导入失败", "空间不足");
-            return false;
-        }
-        done += n;
-        uint8_t pct = (uint8_t)(((uint64_t)done * 100ULL) / srcSize);
-        if (pct / 20 != lastBucket / 20) {   // 每 20% 提示一次
-            lastBucket = pct;
-            char p[12];
-            snprintf(p, sizeof(p), "%u%%", (unsigned)pct);
-            showMsg("导入中", p);
-        }
-        ESP.wdtFeed();
-    }
-    dst.close();
-    src.close();
-    File chk = LittleFS.open(lfsPath, "r");
-    uint32_t got = chk ? chk.size() : 0;
-    if (chk) chk.close();
-    if (got != srcSize) {
-        LittleFS.remove(lfsPath);
-        traceFmtLevel('E', "IMPORT_VERIFY_FAIL got=%lu want=%lu", (unsigned long)got, (unsigned long)srcSize);
-        showMsg("导入失败", "校验不一致");
-        return false;
-    }
-    traceFmt("IMPORT_OK %s size=%lu", lfsPath.c_str(), (unsigned long)srcSize);
-
-    // 旁带(页表/章节/标签): 存在且内部尚无 → 复制, 免整本重建索引
-    {
-        const char *sfx[] = {".i1", ".v1", ".i1p", ".z1", ".vz1", ".bm", nullptr};
-        for (int i = 0; sfx[i]; i++) {
-            String s = String(sdPath) + sfx[i];
-            String d = lfsPath + sfx[i];
-            if (!SD.exists(s.c_str()) || LittleFS.exists(d.c_str())) continue;
-            File a = SD.open(s.c_str(), "r");
-            if (!a) continue;
-            if (a.size() > 262144UL) { a.close(); continue; }   // 大索引不复制(内部会重建)
-            FSInfo fi;
-            LittleFS.info(fi);
-            if ((uint32_t)(fi.totalBytes - fi.usedBytes) < a.size() + 4096U) { a.close(); continue; }
-            File b = LittleFS.open(d.c_str(), "w");
-            if (!b) { a.close(); continue; }
-            bool ok = true;
-            while (a.available()) {
-                size_t n = a.read(buf, sizeof(buf));
-                if (n == 0) break;
-                if (b.write(buf, n) != n) { ok = false; break; }
-                ESP.wdtFeed();
-            }
-            b.close(); a.close();
-            if (!ok) LittleFS.remove(d.c_str());
-            else traceFmt("IMPORT_SIDECAR %s", d.c_str());
-        }
-    }
-    outLfsPath = lfsPath;
-    return true;
 }
 
 void startTxtReader(const char *path, bool forceRebuild) {
@@ -5322,7 +5137,7 @@ void startTxtReader(const char *path, bool forceRebuild) {
         return;
     }
     traceFmt("TXT open step=list_free_begin");
-    freeItemList();   // 大目录 items≈34KB+ 是堆大户, 进阅读器前释放 (浏览模式回退时 listDir 重建)
+    freeItemList();   // 语义复位 (窗口静态数组不占堆; 回浏览模式 listDir 重建窗口)
     traceFmt("TXT open step=list_free_done");
     wifiManagerRfOff("reader_enter");   // P5: 进入阅读强制关 RF (官方 DisplayTxt.ino:854 WifiShutdown 对齐)
     traceFmt("TXT open step=rf_off_done");
@@ -5480,6 +5295,14 @@ void startTxtReader(const char *path, bool forceRebuild) {
                 }
                 if (ready) ready.close();
             }
+            // ⚠️ 换过更小的同名文件: 记录[0]/sidecar 旧偏移可 ≥ 新文件大小 → seek 越过 EOF 读出
+            //    全空页 ("隐形阅读器": 面板停留旧画面但 appMode=READER), 且越界偏移会被写回进度。
+            //    越界即作废回第一页 (对齐 progressSyncApplyRemote 的 offset>size 检查)。
+            if (savedOffset >= txtFile.size()) {
+                traceFmtLevel('W', "RESTORE_OFFSET_OOB off=%lu size=%lu",
+                              (unsigned long)savedOffset, (unsigned long)txtFile.size());
+                savedOffset = 0;
+            }
             if (savedOffset > 0) {
                 if (rotateResume > 0) {
                     // 旋转进度转换 (向上取整); 目标方向索引可能不完整 → ceil 找不到则兜底显示当前 offset 内容
@@ -5524,6 +5347,22 @@ void startTxtReader(const char *path, bool forceRebuild) {
     } else {
         txtChapterCount = countTxtChapters();   // 修复 "0章": 有效索引时从未加载章节数
         File ready = readerFs().open(txtIndexPath.c_str(), "r");
+        if (!ready || ready.size() < 16) {
+            // ⚠️ 二次打开失败/尺寸异常 (上方校验已通过 → 竞争窗口): (0/8)-1 下溢 0xFFFFFFFF
+            //    + seek/read 空转 → 总页数巨大翻页异常。按"索引无效"兜底: 第一页 + 后台重建
+            //    (与 rebuild 分支同语义), 不带着坏页数进阅读。
+            if (ready) ready.close();
+            traceFmtLevel('E', "IDX_REOPEN_FAIL %s", txtIndexPath.c_str());
+            txtTotalPages = 1;
+            txtPage = 1;
+            txtPageStart = 0;
+            readTxtPage(0);
+            appMode = APP_READER;
+            renderTxtPage(true);
+            beginTxtIndexBuild();
+            saveSleepRecord();
+            return;
+        }
         txtTotalPages = (ready.size() / 8) - 1;
         ready.seek(0);
         char progress[9];
@@ -5534,6 +5373,12 @@ void startTxtReader(const char *path, bool forceRebuild) {
         txtPage = 1;
         txtPageStart = 0;
         if (rotateResume > 0) saved = rotateResume;   // 旋转: 用当前页字节偏移转换页码
+        // ⚠️ 换过更小的同名文件: 旧偏移 ≥ 新文件大小 → seek 越过 EOF → 空页隐形阅读器 (同 rebuild 分支)
+        if (saved >= txtFile.size()) {
+            traceFmtLevel('W', "RESTORE_OFFSET_OOB2 off=%lu size=%lu",
+                          (unsigned long)saved, (unsigned long)txtFile.size());
+            saved = 0;
+        }
         if (saved > 0) {
             if (rotateResume > 0) {
                 // 旋转进度转换 (索引完整): 向上取整一页 (saved 在页中间 → 下一页,
@@ -6541,12 +6386,16 @@ void loop() {
 
     // 组合键: 按 KEY2(中) 后 1 秒内按 KEY3(右) → 强制返回首页 (任何界面均可)
     // ⚠️ 需先读两键: KEY2 短按记时刻, KEY3 短按且距上次 KEY2 短按 <=1s → 触发
+    // ⚠️ APP_CLOCK_DISGUISE 例外: 伪装模式契约 = "停用全部按键" (KEY1 复位 + KEY3 窗口是唯一
+    //    退出方式); 组合键原先于此分发, 两键即戳穿伪装 —— 恰恰是最不该误触的场景。
     static uint32_t lastK2ShortMs = 0;
     bool comboHome = false;
     if (r2 == 1) lastK2ShortMs = millis();
     if (r3 == 1 && lastK2ShortMs && (millis() - lastK2ShortMs) <= 1000) {
-        comboHome = true;
-        lastK2ShortMs = 0;
+        if (appMode != APP_CLOCK_DISGUISE) {
+            comboHome = true;
+            lastK2ShortMs = 0;
+        }
     }
     if (comboHome) {
         traceFmt("COMBO_HOME from mode=%d", appMode);
@@ -6559,6 +6408,15 @@ void loop() {
         return;
     }
 
+    // ===== 后台索引构建步进（统一入口）=====
+    // 构建未完成时任何非网络界面都喂步进: 原先只喂 HOME/READER/CHAPTERS/MARKS/BROWSER,
+    // 构建中进设置/统计/时钟/天气/BMP/伪装页会停摆 → "构建中"永不结束。
+    // ⚠️ APP_NETWORK / APP_CLOCK_CONNECT 是 AP 配网/WiFi 会话: SD 扫描与 WiFi 争堆
+    //    (esf_buf_alloc 崩溃根因, 见 fs_cache.h), 这两个界面绝不喂。
+    if (txtIndexBuilding && appMode != APP_NETWORK && appMode != APP_CLOCK_CONNECT) {
+        indexTaskStep();
+    }
+
     if (appMode == APP_HOME) {
         if (r3 == 1) {
             homeSel = (homeSel + 1) % 7;
@@ -6569,8 +6427,7 @@ void loop() {
         } else if (r3 == 2) {
             enterHomeCard();
         }
-        // 后台索引构建在主页也要喂步进: 否则退出阅读器停在主页时构建停摆,"构建中"永不结束
-        if (txtIndexBuilding) indexTaskStep();
+        // 后台索引构建步进已统一提到 loop 前部 (本分支不再重复喂); 构建期短延时保持按键采样率
         delay(txtIndexBuilding ? 2 : 30);   // 构建期缩短延时: 提高按键采样率(A7 语义: 构建中一切可操作)
         return;
     }
@@ -6777,8 +6634,7 @@ void loop() {
                 }
             }
         }
-        indexTaskStep();
-        delay(txtIndexBuilding ? 2 : 30);
+        delay(txtIndexBuilding ? 2 : 30);   // 构建步进已在 loop 前部统一喂
         return;
     }
     if (appMode == APP_CHAPTERS) {
@@ -6838,8 +6694,7 @@ void loop() {
                 }
             }
         }
-        delay(txtIndexBuilding ? 2 : 30);
-        indexTaskStep();
+        delay(txtIndexBuilding ? 2 : 30);   // 构建步进已在 loop 前部统一喂
         return;
     }
     if (appMode == APP_MARKS) {
@@ -6901,8 +6756,7 @@ void loop() {
                 }
             }
         }
-        delay(txtIndexBuilding ? 2 : 30);
-        indexTaskStep();
+        delay(txtIndexBuilding ? 2 : 30);   // 构建步进已在 loop 前部统一喂
         return;
     }
 
@@ -6995,6 +6849,5 @@ void loop() {
             }
         }
     }
-    indexTaskStep();
-    delay(txtIndexBuilding ? 2 : 30);
+    delay(txtIndexBuilding ? 2 : 30);   // 构建步进已在 loop 前部统一喂 (APP_BROWSER 落到此尾)
 }

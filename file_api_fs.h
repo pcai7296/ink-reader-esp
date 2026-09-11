@@ -26,7 +26,6 @@ void fileApiFsRegisterUploadRoute();
 typedef void (*OfsUpPhaseCallback)(int phase, const char *path);
 void ofsUpSetPhaseCallback(OfsUpPhaseCallback cb);
 int  ofsUpGetPhase();          // 供主循环/渲染查询当前上传阶段
-const char *ofsUpGetPhasePath();// 本次上传的文件路径（完成/失败时可用）
 // 下载墨水屏状态: 0=空闲 1=下载中 2=下载完毕 3=下载失败/中止
 #define OFS_DL_PHASE_IDLE 0
 #define OFS_DL_PHASE_START 1
