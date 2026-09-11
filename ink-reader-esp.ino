@@ -472,6 +472,9 @@ int lastBatteryMV = 0;
 int readBatteryMV() {
     // 采样偶发失败 (sum=0, GPIO12 开关/SD 总线竞争) 时重试; 之前实测同一电池
     // 有时 sum=0(显示0%) 有时 sum=15840(4.34V), 重试可消除偶发 0。
+    // 官方对照 (REVERSE_NOTES §13): V14 Get_bat_vcc.ino:9-42 只驱动 GPIO12(bat_switch_pin=SD MISO),
+    // 3s 周期/3 次平均, **不碰 GPIO5(SD_CS)**; 本项目按 A7 反汇编笔记额外拉高 GPIO5 并按 60s/20 次采样
+    // (A7 该函数体现在未反汇编, 序列未复核)。此差异是"采样后首次 SD 访问失败"的嫌疑点之一。
     for (uint8_t attempt = 0; attempt < 3; attempt++) {
         // SD 与电池开关共用 SPI 相关引脚; 采样时确保 SD 未选中。
         pinMode(5, OUTPUT);
@@ -3352,6 +3355,9 @@ void indexTaskStep() {
 // 页首偏移读取 (带总线恢复重试 + 严格校验)。返回 false 表示**读失败**, 调用方不得把 0 当第 1 页翻页。
 // 修复: 原实现 SD.open 偶发失败即返回 0 → nextTxtPage 页码+1 却渲染第 1 页, 并把进度写成 0
 // (实测: 1024 页按右键显示第 1 页, 再按恢复 1026)。
+// 官方对照 (见 REVERSE_NOTES §13): V14 DisplayTxt.ino:50-52/333-336/369-378 把 .i/.txt 放 **LittleFS**,
+// 翻页路径**不判空、无重试、无 0 校验**; SD 失效恢复原语 = SdInit.ino:11-29 sdBeginCheck()(SDFS.end+SD.begin, 关WDT)。
+// 我们的书与索引在 SD 且逐页 open → 该失败面必须自己兜(失败重试 + reinitSdBus, 失败不递增页码)。
 static bool parsePageRecordEx(uint32_t page, uint32_t *out) {
     if (!out) return false;
     if (page <= 1) { *out = 0; return true; }
