@@ -84,7 +84,7 @@ static const char *diagLevelName(char level) {
 void traceOpen() {
 #if DIAG_SD
     if (SD.exists("/debug_trace.log")) {
-        File old = SD.open("/debug_trace.log", FILE_READ);
+        File old = SD.open("/debug_trace.log", "r");
         bool tooLarge = old && old.size() > 65536;
         if (old) old.close();
         if (tooLarge) SD.remove("/debug_trace.log");
@@ -567,8 +567,8 @@ int topIndex = 0;                 // 窗口首项（全局索引）
 
 String currentPath = "/";
 
-#define RECENT_READ_PATH "/.tiemereader/recentread.dat"
-#define SLEEP_RECORD_PATH "/.tiemereader/sleepmode.dat"
+#define RECENT_READ_PATH "/recentread.dat"   // P1: 阅读状态归 LittleFS(内部介质), 不再放 SD 的 /.tiemereader
+#define SLEEP_RECORD_PATH "/sleepmode.dat"
 
 // ---------- 主页 / 应用模式 ----------
 struct SleepRecord;   // 休眠记录 (定义在休眠区) — Arduino 自动原型需要此前向声明
@@ -582,6 +582,15 @@ ActualWeather wActual;
 FutureWeather wFuture;
 LifeIndex wLife;
 bool wDataValid = false;
+
+// ===== P1 (2026-09): 阅读数据源抽象 =====
+// 架构定稿: 阅读实时链路只走 LittleFS(正文/.i1/.z1/阅读状态); SD 仅文件管理/导入。
+// 阅读相关函数统一用 readerFs(), 禁止再直接使用 SdFat 的 SD. 对象(见 docs/reader-lfs-migration.md §8)。
+static fs::FS &readerFs() { return LittleFS; }
+
+// 阅读链路不再有"SD 总线恢复"概念(LittleFS 不与 EPD/电池采样共用引脚)。
+// 保留同名占位以便原调用点零改动, 恒返回 true。
+static inline bool readerBusReady(const char *reason) { (void)reason; return true; }
 bool wFetching = false;
 bool wNightSkip = false;   // 本次进入因夜间跳过联网
 char wErrCode[16] = {0};
@@ -593,7 +602,7 @@ char wCachedSummary[20] = {0};   // 主页天气摘要缓存（SD 持久化, 重
 void loadWeatherCache() {
     if (wCachedSummary[0] || !sdAvailable) return;
     if (!reinitSdBus("weather_load")) return;
-    File f = SD.open("/.tiemereader/weather.dat", FILE_READ);
+    File f = SD.open("/.tiemereader/weather.dat", "r");
     if (!f) {
         traceFmt("WEATHER_CACHE_READ_OPEN_FAIL");
         return;
@@ -843,23 +852,23 @@ void loadRecentReadSummary() {
     recentReadTotalPages = 0;
     recentReadValid = false;
     recentReadBuilding = false;
-    if (!sdAvailable || !SD.exists(RECENT_READ_PATH)) {
-        traceFmt("RECENT_ABORT sd=%d file=%d", sdAvailable ? 1 : 0, SD.exists(RECENT_READ_PATH) ? 1 : 0);
+    if (!readerFs().exists(RECENT_READ_PATH)) {
+        traceFmt("RECENT_ABORT file=%d", readerFs().exists(RECENT_READ_PATH) ? 1 : 0);
         return;
     }
-    File f = SD.open(RECENT_READ_PATH, FILE_READ);
+    File f = readerFs().open(RECENT_READ_PATH, "r");
     if (!f) {   // 构建写流/EPD 抢占后偶发打不开 → 恢复总线重试一次, 避免误报"暂无阅读记录"
-        reinitSdBus("recent_retry");
-        f = SD.open(RECENT_READ_PATH, FILE_READ);
+        readerBusReady("recent_retry");
+        f = readerFs().open(RECENT_READ_PATH, "r");
     }
     if (!f) return;
     recentReadPath = f.readStringUntil('\n');
     f.close();
     recentReadPath.trim();
-    if (recentReadPath.length() == 0 || !SD.exists(recentReadPath)) {
-        reinitSdBus("recent_txt_retry");   // 同上: 大书构建期 SD 忙, 存在性判定失败会误隐藏主卡
-        if (recentReadPath.length() == 0 || !SD.exists(recentReadPath)) {
-            traceFmt("RECENT_TXT_MISS len=%u exists=%d", (unsigned)recentReadPath.length(), SD.exists(recentReadPath) ? 1 : 0);
+    if (recentReadPath.length() == 0 || !readerFs().exists(recentReadPath)) {
+        readerBusReady("recent_txt_retry");   // 同上: 大书构建期 SD 忙, 存在性判定失败会误隐藏主卡
+        if (recentReadPath.length() == 0 || !readerFs().exists(recentReadPath)) {
+            traceFmt("RECENT_TXT_MISS len=%u exists=%d", (unsigned)recentReadPath.length(), readerFs().exists(recentReadPath) ? 1 : 0);
             recentReadPath = "";
             return;
         }
@@ -869,17 +878,17 @@ void loadRecentReadSummary() {
     int dot = indexPath.lastIndexOf('.');
     if (dot > 0) indexPath = indexPath.substring(0, dot);
     indexPath += readerIsPortrait() ? ".v1" : ".i1";   // 方向感知: 竖类(0/180).v1 / 横类(90/270).i1 (修复前硬编码 .i1, 竖屏用户启动提示取错索引)
-    if (!SD.exists(indexPath.c_str())) {
+    if (!readerFs().exists(indexPath.c_str())) {
         String legacyPath = recentReadPath + ".i1";
-        if (SD.exists(legacyPath.c_str())) indexPath = legacyPath;
+        if (readerFs().exists(legacyPath.c_str())) indexPath = legacyPath;
     }
     traceFmt("RECENT_INDEX path=%s", indexPath.c_str());
     // 构建中/构建中断进度在 sidecar (indexPath+"p", 如 小说.i1p), 优先于 .i1 记录[0]:
     // 后台构建或中断续建时主页才能与阅读器显示一致 (阅读器 startTxtReader 同优先级)。
     uint32_t savedOffset = 0;
     String sidecarPath = indexPath + "p";
-    if (SD.exists(sidecarPath.c_str())) {
-        File sp = SD.open(sidecarPath.c_str(), FILE_READ);
+    if (readerFs().exists(sidecarPath.c_str())) {
+        File sp = readerFs().open(sidecarPath.c_str(), "r");
         if (sp && sp.size() >= 8) {
             char rec[9];
             for (uint8_t i = 0; i < 8; i++) rec[i] = (char)sp.read();
@@ -891,22 +900,22 @@ void loadRecentReadSummary() {
     // 构建中/中断判定 (主页主卡"构建中"标注用):
     // ① 构建期 sidecar 存在(构建进行中或中断未合并); ② 运行时正在构建同一本书。
     // ③ 在索引"看似完整"分支再校验尾部 size 标记, 见下 (半截 .i1 不能当完整总页数显示)。
-    recentReadBuilding = SD.exists(sidecarPath.c_str()) ||
+    recentReadBuilding = readerFs().exists(sidecarPath.c_str()) ||
                          (txtIndexBuilding && txtPath == recentReadPath);
     uint32_t txtSize = 0;
-    File tf = SD.open(recentReadPath.c_str());
+    File tf = readerFs().open(recentReadPath.c_str(), "r");
     if (tf) { txtSize = tf.size(); tf.close(); }
-    File index = SD.open(indexPath.c_str(), FILE_READ);
+    File index = readerFs().open(indexPath.c_str(), "r");
     if (!index) {   // 构建写流/EPD 抢占后偶发打不开 → 恢复总线重试一次
-        reinitSdBus("recent_idx_retry");
-        index = SD.open(indexPath.c_str(), FILE_READ);
+        readerBusReady("recent_idx_retry");
+        index = readerFs().open(indexPath.c_str(), "r");
     }
     if (!index || index.size() < 16 || index.size() % 8 != 0) {
         if (index) index.close();
         // 索引不完整(构建中/中断): 仍视为"有上次阅读文件"(进入后阅读器从 sidecar/记录[0] 恢复,
         // 与 startTxtReader 同优先级), 但主页只显示文件名、不显示页码。记录[0] 尝试读出备用。
         if (savedOffset == 0) {
-            File idx = SD.open(indexPath.c_str(), FILE_READ);
+            File idx = readerFs().open(indexPath.c_str(), "r");
             if (idx && idx.size() >= 8) {
                 char rec[9];
                 for (uint8_t i = 0; i < 8; i++) rec[i] = (char)idx.read();
@@ -995,22 +1004,20 @@ void loadRecentReadSummary() {
 }
 
 void saveRecentReadPath(const String &path) {
-    if (!sdAvailable) return;
-    if (!SD.exists("/.tiemereader")) SD.mkdir("/.tiemereader");
-    File f = SD.open(RECENT_READ_PATH, "w");
+    File f = readerFs().open(RECENT_READ_PATH, "w");
     if (!f) return;
     f.println(path);
     f.close();
 }
 
 void clearRecentReadPathIfMatches(const String &path) {
-    if (!SD.exists(RECENT_READ_PATH)) return;
-    File f = SD.open(RECENT_READ_PATH, FILE_READ);
+    if (!readerFs().exists(RECENT_READ_PATH)) return;
+    File f = readerFs().open(RECENT_READ_PATH, "r");
     if (!f) return;
     String saved = f.readStringUntil('\n');
     f.close();
     saved.trim();
-    if (saved == path) SD.remove(RECENT_READ_PATH);
+    if (saved == path) readerFs().remove(RECENT_READ_PATH);
 }
 
 void openRecentRead() {
@@ -2918,10 +2925,10 @@ void appendIndexRecord(File &indexFile, uint32_t offset) {
 
 void buildTxtIndex() {
     debugFmt("IDX begin txt=%s size=%lu", txtPath.c_str(), (unsigned long)txtFile.size());
-    SD.remove(txtIndexPath.c_str());
-    SD.remove(txtChapterPath.c_str());
-    File indexFile = SD.open(txtIndexPath.c_str(), FILE_WRITE);
-    File chapterFile = SD.open(txtChapterPath.c_str(), FILE_WRITE);
+    readerFs().remove(txtIndexPath.c_str());
+    readerFs().remove(txtChapterPath.c_str());
+    File indexFile = readerFs().open(txtIndexPath.c_str(), "w");
+    File chapterFile = readerFs().open(txtChapterPath.c_str(), "w");
     if (!indexFile || !chapterFile) return;
     appendIndexRecord(indexFile, 0);
     txtFile.seek(0);
@@ -3015,7 +3022,7 @@ void buildTxtIndex() {
     removeLegacyIndexFiles();
     debugFmt("IDX done pages=%lu index=%s chapters=%s", (unsigned long)page,
              txtIndexPath.c_str(), txtChapterPath.c_str());
-    File finalIndex = SD.open(txtIndexPath.c_str());
+    File finalIndex = readerFs().open(txtIndexPath.c_str(), "r");
     txtTotalPages = finalIndex ? ((finalIndex.size() / 8) - 1) : 1;
     if (finalIndex) finalIndex.close();
     txtFile.seek(0);
@@ -3044,12 +3051,12 @@ void beginTxtIndexBuild() {
     if (txtChapterBuildFile) txtChapterBuildFile.close();
     resetIndexReaderState();   // 硬规则: 任何构建入口先清块读缓冲残留 (见 resetIndexReaderState 注释)
     debugFmt("IDX BUILD_OPEN index=%s chapter=%s txt=%s", txtIndexPath.c_str(), txtChapterPath.c_str(), txtPath.c_str());
-    SD.remove(txtIndexPath.c_str());
-    SD.remove(txtChapterPath.c_str());
-    SD.remove((txtIndexPath + "p").c_str());   // 全新构建: 清旧会话 sidecar (旧进度已在上游恢复进内存)
-    txtIndexBuildFile = SD.open(txtIndexPath.c_str(), FILE_WRITE);
-    txtChapterBuildFile = SD.open(txtChapterPath.c_str(), FILE_WRITE);
-    txtIndexScanFile = SD.open(txtPath.c_str());
+    readerFs().remove(txtIndexPath.c_str());
+    readerFs().remove(txtChapterPath.c_str());
+    readerFs().remove((txtIndexPath + "p").c_str());   // 全新构建: 清旧会话 sidecar (旧进度已在上游恢复进内存)
+    txtIndexBuildFile = readerFs().open(txtIndexPath.c_str(), "w");
+    txtChapterBuildFile = readerFs().open(txtChapterPath.c_str(), "w");
+    txtIndexScanFile = readerFs().open(txtPath.c_str(), "r");
     debugFmt("IDX BUILD_HANDLES index=%d chapter=%d scan=%d", (bool)txtIndexBuildFile, (bool)txtChapterBuildFile, (bool)txtIndexScanFile);
     if (!txtIndexBuildFile || !txtChapterBuildFile || !txtIndexScanFile) {
         debugLine("IDX async open failed");
@@ -3087,7 +3094,7 @@ void finishTxtIndexBuild() {
     // 记录[0] 写回当前阅读进度(构建中翻页位置; 未翻页则 0=从头读) — 必须用 "r+" 句柄 (FILE_WRITE 是追加模式, seek 无效)
     // ⚠️ 必须先把追加句柄 close 再开 "r+": 同文件双句柄写有概率破坏 FAT 引发 SD 卸载 (AGENTS.md 实测记录)
     txtIndexBuildFile.close();
-    File zeroRec = SD.open(txtIndexPath.c_str(), "r+");
+    File zeroRec = readerFs().open(txtIndexPath.c_str(), "r+");
     if (zeroRec) {
         zeroRec.seek(0);
         char rec[9];
@@ -3096,8 +3103,8 @@ void finishTxtIndexBuild() {
         zeroRec.close();
     }
     // 进度已合并进记录[0], 删除构建期 sidecar
-    if (SD.exists((txtIndexPath + "p").c_str())) {
-        SD.remove((txtIndexPath + "p").c_str());
+    if (readerFs().exists((txtIndexPath + "p").c_str())) {
+        readerFs().remove((txtIndexPath + "p").c_str());
         debugLine("IDX sidecar removed after merge");
     }
     txtChapterBuildFile.flush();
@@ -3107,8 +3114,8 @@ void finishTxtIndexBuild() {
     idxReleaseBuf();   // 生命周期化: 构建完成释放块读缓冲 (配网会话不占)
     txtTotalPages = txtIndexedPages;
     removeLegacyIndexFiles();
-    File doneIndex = SD.open(txtIndexPath.c_str());
-    File doneChapter = SD.open(txtChapterPath.c_str());
+    File doneIndex = readerFs().open(txtIndexPath.c_str(), "r");
+    File doneChapter = readerFs().open(txtChapterPath.c_str(), "r");
     uint32_t doneIndexSize = doneIndex ? doneIndex.size() : 0;
     uint32_t doneChapterSize = doneChapter ? doneChapter.size() : 0;
     if (doneIndex) doneIndex.close();
@@ -3193,7 +3200,7 @@ static inline int idxPeekByte(File &f) {
 void seedChapterResumeBoundary(uint32_t resumePage) {
     resumeChapterSeed[0] = '\0';
     resumeChapterSeedPage = 0;
-    File f = SD.open(txtChapterPath.c_str());
+    File f = readerFs().open(txtChapterPath.c_str(), "r");
     if (!f || f.size() < 3) { if (f) f.close(); return; }
     // 从末尾窗口向前找最后一条 "page == resumePage" 的条目
     uint32_t size = f.size();
@@ -3231,7 +3238,7 @@ void beginResumeIndexBuildFromPartial() {
     if (txtChapterBuildFile) txtChapterBuildFile.close();
     resetIndexReaderState();   // 硬规则: 续建入口同样清块读缓冲残留 (旋转切换后旧缓冲会导致页表错位)
     uint32_t offset = 0;
-    File last = SD.open(txtIndexPath.c_str());
+    File last = readerFs().open(txtIndexPath.c_str(), "r");
     if (last && last.size() >= 8) {
         last.seek(last.size() - 8);
         char rec[9];
@@ -3246,14 +3253,14 @@ void beginResumeIndexBuildFromPartial() {
         return;
     }
     uint32_t pagesDone = 0;
-    File sz = SD.open(txtIndexPath.c_str());
+    File sz = readerFs().open(txtIndexPath.c_str(), "r");
     if (sz) { pagesDone = sz.size() / 8; sz.close(); }
     if (pagesDone < 2) pagesDone = 2;
     txtChapterCount = countTxtChapters();   // 已有章节数(在创建句柄前统计, 避免双句柄)
     seedChapterResumeBoundary(pagesDone);   // 重扫页的章节跳过边界
-    txtIndexScanFile = SD.open(txtPath.c_str());
-    txtIndexBuildFile = SD.open(txtIndexPath.c_str(), FILE_WRITE);      // 追加, 不截断
-    txtChapterBuildFile = SD.open(txtChapterPath.c_str(), FILE_WRITE);
+    txtIndexScanFile = readerFs().open(txtPath.c_str(), "r");
+    txtIndexBuildFile = readerFs().open(txtIndexPath.c_str(), "a");      // 追加, 不截断
+    txtChapterBuildFile = readerFs().open(txtChapterPath.c_str(), "a");
     if (!txtIndexScanFile || !txtIndexBuildFile || !txtChapterBuildFile) {
         debugLine("IDX resume open failed -> full rebuild");
         if (txtIndexScanFile) txtIndexScanFile.close();
@@ -3363,14 +3370,14 @@ static bool parsePageRecordEx(uint32_t page, uint32_t *out) {
     if (!out) return false;
     if (page <= 1) { *out = 0; return true; }
     String path = txtIndexPath;
-    if (!SD.exists(path.c_str())) {
+    if (!readerFs().exists(path.c_str())) {
         String legacy = txtPath + ".i1";
-        if (SD.exists(legacy.c_str())) path = legacy;
+        if (readerFs().exists(legacy.c_str())) path = legacy;
     }
     for (uint8_t attempt = 0; attempt < 2; attempt++) {
-        File f = SD.open(path.c_str());
+        File f = readerFs().open(path.c_str(), "r");
         if (!f) {
-            if (attempt == 0) { reinitSdBus("page_rec_retry"); continue; }
+            if (attempt == 0) { readerBusReady("page_rec_retry"); continue; }
             traceFmtLevel('E', "PAGE_REC_OPEN_FAIL page=%lu path=%s", (unsigned long)page, path.c_str());
             return false;
         }
@@ -3423,8 +3430,8 @@ bool writeProgress(uint32_t offset) {
         // 完成时 finishTxtIndexBuild 合并回记录[0] 并删除 sidecar;
         // 构建被中断 (掉电/休眠/重启) 时 startTxtReader 优先读 sidecar 恢复阅读位置。
         String sidecar = txtIndexPath + "p";
-        File f = SD.open(sidecar.c_str(), "r+");
-        if (!f) f = SD.open(sidecar.c_str(), FILE_WRITE);   // 首次写入: 新建
+        File f = readerFs().open(sidecar.c_str(), "r+");
+        if (!f) f = readerFs().open(sidecar.c_str(), "w");   // 首次写入: 新建
         if (!f) {
             traceFmtLevel('E', "PROGRESS_OPEN_FAIL sidecar=%s offset=%lu", sidecar.c_str(), (unsigned long)offset);
             return false;
@@ -3437,18 +3444,18 @@ bool writeProgress(uint32_t offset) {
         return true;
     }
     String progressPath = txtIndexPath;
-    if (!SD.exists(progressPath.c_str())) {
+    if (!readerFs().exists(progressPath.c_str())) {
         String legacyPath = txtPath + ".i1";
-        if (SD.exists(legacyPath.c_str())) progressPath = legacyPath;
+        if (readerFs().exists(legacyPath.c_str())) progressPath = legacyPath;
     }
     // 打开失败重试: 电量采样/EPD 刷新可能动过共享 GPIO, 先恢复 SD 总线再试 (实测偶发打开失败)
     File f;
     bool opened = false;
     for (int attempt = 0; attempt < 2 && !opened; attempt++) {
-        f = SD.open(progressPath.c_str(), "r+");
+        f = readerFs().open(progressPath.c_str(), "r+");
         if (f) { opened = true; break; }
-        reinitSdBus("progress_retry");
-        f = SD.open(progressPath.c_str(), "r+");
+        readerBusReady("progress_retry");
+        f = readerFs().open(progressPath.c_str(), "r+");
         if (f) { opened = true; break; }
         traceFmtLevel('E', "PROGRESS_OPEN_FAIL path=%s offset=%lu", progressPath.c_str(), (unsigned long)offset);
         return false;
@@ -3467,7 +3474,7 @@ uint32_t readProgressOffset() {
     uint32_t off = 0;
     if (txtIndexBuilding) {
         String sidecar = txtIndexPath + "p";
-        File sp = SD.open(sidecar.c_str());
+        File sp = readerFs().open(sidecar.c_str(), "r");
         if (sp && sp.size() >= 8) {
             char rec[9];
             for (uint8_t i = 0; i < 8; i++) rec[i] = (char)sp.read();
@@ -3478,14 +3485,14 @@ uint32_t readProgressOffset() {
         return off;
     }
     String path = txtIndexPath;
-    if (!SD.exists(path.c_str())) {
+    if (!readerFs().exists(path.c_str())) {
         String legacy = txtPath + ".i1";
-        if (SD.exists(legacy.c_str())) path = legacy;
+        if (readerFs().exists(legacy.c_str())) path = legacy;
     }
     // 偶发 SD 打开失败会误报 0 (实测同步 BEGIN 读出 0 而重启后正常): 重试 3 次 + 失败日志
     bool opened = false;
     for (int attempt = 0; attempt < 3; attempt++) {
-        File f = SD.open(path.c_str());
+        File f = readerFs().open(path.c_str(), "r");
         if (f) {
             opened = true;
             if (f.size() >= 8) {
@@ -3508,7 +3515,7 @@ uint32_t readProgressOffset() {
 // 记录 idx 对应 页码 idx+1 (记录[1]=第2页首); 记录[0]=进度, 记录[N-1]=txt大小。
 // O(log N) 只读 8 字节/条, 不扫描整个 .i1。
 uint32_t offsetToPage(uint32_t offset) {
-    File f = SD.open(txtIndexPath.c_str());
+    File f = readerFs().open(txtIndexPath.c_str(), "r");
     if (!f) return 1;
     uint32_t n = f.size() / 8;
     if (n < 2) { f.close(); return 1; }
@@ -3689,9 +3696,9 @@ static bool readTxtPageCore(uint32_t offset) {
 bool readTxtPage(uint32_t offset) {
     if (readTxtPageCore(offset)) return true;
     traceFmtLevel('W', "PAGE_READ_RETRY page=%lu offset=%lu", (unsigned long)txtPage, (unsigned long)offset);
-    if (reinitSdBus("page_retry")) {
+    if (readerBusReady("page_retry")) {
         if (txtFile) txtFile.close();
-        txtFile = SD.open(txtPath.c_str());
+        txtFile = readerFs().open(txtPath.c_str(), "r");
         if (txtFile && readTxtPageCore(offset)) return true;
     }
     traceFmtLevel('E', "PAGE_READ_FAIL page=%lu offset=%lu", (unsigned long)txtPage, (unsigned long)offset);
@@ -4175,8 +4182,8 @@ void execReaderMenu() {
 
 bool progressSyncSnapshot(const String& txtPath, uint32_t& localOffset, uint32_t& txtSize, float& localPercent) {
     if (!txtFile) {
-        reinitSdBus("sync_snap");   // 网络阶段 GPIO12/GPIO5 可能被电量采样动过, 先恢复 SD 总线
-        txtFile = SD.open(txtPath.c_str());
+        readerBusReady("sync_snap");   // 网络阶段 GPIO12/GPIO5 可能被电量采样动过, 先恢复 SD 总线
+        txtFile = readerFs().open(txtPath.c_str(), "r");
     }
     if (!txtFile) return false;
     txtSize = txtFile.size();
@@ -4196,15 +4203,15 @@ void progressSyncFreeReaderHeap() {
 }
 void progressSyncRestoreReaderHeap() {
     if (!txtFile) {
-        reinitSdBus("sync_restore");
-        txtFile = SD.open(txtPath.c_str());
+        readerBusReady("sync_restore");
+        txtFile = readerFs().open(txtPath.c_str(), "r");
     }
     if (txtFile && txtPageStart <= txtFile.size()) readTxtPage(txtPageStart);
 }
 
 bool progressSyncApplyRemote(uint32_t offset) {
-    reinitSdBus("sync_apply");   // 网络阶段 GPIO12/GPIO5 可能被电量采样动过, 先恢复 SD 总线
-    if (!txtFile) txtFile = SD.open(txtPath.c_str());   // 网络阶段 Free hook 可能已关闭, 重开
+    readerBusReady("sync_apply");   // 网络阶段 GPIO12/GPIO5 可能被电量采样动过, 先恢复 SD 总线
+    if (!txtFile) txtFile = readerFs().open(txtPath.c_str(), "r");   // 网络阶段 Free hook 可能已关闭, 重开
     if (!txtFile || offset > txtFile.size()) {
         traceFmtLevel('E', "APPLY_FAIL txtFile=%d offset=%lu size=%lu",
                       (int)(txtFile ? 1 : 0), (unsigned long)offset,
@@ -4378,11 +4385,11 @@ void saveSleepRecord() {
         debugLine("SLEEP_SAVE sd-reinit-fail");
         return;
     }
-    if (!SD.exists("/.tiemereader")) SD.mkdir("/.tiemereader");
+
     // FILE_WRITE 在当前 SD 库中可能是追加模式；先删除旧快照，避免读取到旧记录。
-    bool removed = SD.exists(SLEEP_RECORD_PATH) ? SD.remove(SLEEP_RECORD_PATH) : true;
-    debugFmt("UI_SAVE_PRE exists=%d removed=%d", SD.exists(SLEEP_RECORD_PATH) ? 1 : 0, removed ? 1 : 0);
-    File f = SD.open(SLEEP_RECORD_PATH, FILE_WRITE);
+    bool removed = readerFs().exists(SLEEP_RECORD_PATH) ? readerFs().remove(SLEEP_RECORD_PATH) : true;
+    debugFmt("UI_SAVE_PRE exists=%d removed=%d", readerFs().exists(SLEEP_RECORD_PATH) ? 1 : 0, removed ? 1 : 0);
+    File f = readerFs().open(SLEEP_RECORD_PATH, "w");
     if (!f) {
         debugLine("SLEEP_SAVE open-fail");
         return;
@@ -4392,31 +4399,31 @@ void saveSleepRecord() {
     uint32_t pos = f.position();
     f.close();
     // 写后验证: 文件存在且大小正确
-    File vf = SD.open(SLEEP_RECORD_PATH, FILE_READ);
+    File vf = readerFs().open(SLEEP_RECORD_PATH, "r");
     uint32_t vsize = vf ? vf.size() : 0;
     if (vf) vf.close();
     debugFmt("SLEEP_SAVE mode=%d speed=%u popup=%u sel=%u page=%d chSel=%d selIdx=%d top=%d path=%s exist=%d size=%u wrote=%u pos=%lu",
              rec.mode, rec.chapterSpeed, rec.chapterSpeedPopup, rec.chapterSpeedSel,
              (int)rec.chapterPage, (int)rec.chapterSel,
              (int)rec.selIndex, (int)rec.topIndex, rec.path,
-             SD.exists(SLEEP_RECORD_PATH) ? 1 : 0, (unsigned)vsize,
+             readerFs().exists(SLEEP_RECORD_PATH) ? 1 : 0, (unsigned)vsize,
              (unsigned)wrote, (unsigned long)pos);
 }
 
 // 读取并清除休眠记录; 返回 true 且填充 rec 表示有有效记录。
 bool readSleepRecord(SleepRecord &rec) {
-    if (!SD.exists(SLEEP_RECORD_PATH)) {
+    if (!readerFs().exists(SLEEP_RECORD_PATH)) {
         debugLine("SLEEP_READ no-file");
         return false;
     }
-    File f = SD.open(SLEEP_RECORD_PATH, FILE_READ);
+    File f = readerFs().open(SLEEP_RECORD_PATH, "r");
     if (!f) {
         debugLine("SLEEP_READ open-fail");
         return false;
     }
     size_t got = f.read((uint8_t *)&rec, sizeof(rec));
     f.close();
-    SD.remove(SLEEP_RECORD_PATH);   // 一次性: 读完即删, 避免下次误用
+    readerFs().remove(SLEEP_RECORD_PATH);   // 一次性: 读完即删, 避免下次误用
     if (got != sizeof(rec)) {
         debugFmt("SLEEP_READ short got=%u", (unsigned)got);
         return false;
@@ -4590,13 +4597,13 @@ void previousTxtPage() {
 void loadChapterRows(uint32_t offset) {
     // ⚠️ 必须恢复 SD 总线: 翻页前列表/倍速弹窗都是局刷(EPD 侧), 直接 SD.open 会失败
     // → chapterCountLoaded=0 → 列表空 (实测 100x 翻页后列表直接空, 根因同标签系统白屏)。
-    if (!reinitSdBus("chapter_load")) {
+    if (!readerBusReady("chapter_load")) {
         chapterCountLoaded = 0;
         return;
     }
     chapterCountLoaded = 0;
     chapterTopOffset = offset;
-    File f = SD.open(txtChapterPath.c_str());
+    File f = readerFs().open(txtChapterPath.c_str(), "r");
     if (!f) return;
     f.seek(offset);
     while (chapterCountLoaded < CHAPTER_ROWS && f.available()) {
@@ -4623,8 +4630,8 @@ void loadChapterRows(uint32_t offset) {
 static uint32_t chapterPageTableCount = 0;   // 已建表页数 (== chapterTotalPages 精确值)
 
 static void chapterBuildPageTable() {
-    if (!reinitSdBus("chapter_table")) return;
-    File f = SD.open(txtChapterPath.c_str());
+    if (!readerBusReady("chapter_table")) return;
+    File f = readerFs().open(txtChapterPath.c_str(), "r");
     if (!f) { chapterPageTableCount = 0; return; }
     chapterPageOffsets[0] = 0;
     chapterPageTableCount = 1;
@@ -4650,8 +4657,8 @@ static void chapterBuildPageTable() {
 
 // 统计 .z1 总章节数 (每行一章)
 uint32_t countTxtChapters() {
-    if (!reinitSdBus("chapter_count")) return 0;   // 可能被局刷后调用, 先恢复总线
-    File f = SD.open(txtChapterPath.c_str());
+    if (!readerBusReady("chapter_count")) return 0;   // 可能被局刷后调用, 先恢复总线
+    File f = readerFs().open(txtChapterPath.c_str(), "r");
     if (!f) return 0;
     uint32_t n = 0;
     while (f.available()) {
@@ -4664,8 +4671,8 @@ uint32_t countTxtChapters() {
 
 // 定位第 chapterIndex 章 (0-based) 在 .z1 中的字节偏移 (从0扫描计数)
 uint32_t seekChapterOffset(uint32_t chapterIndex) {
-    if (!reinitSdBus("chapter_seek")) return 0;   // 可能被局刷后调用, 先恢复总线
-    File f = SD.open(txtChapterPath.c_str());
+    if (!readerBusReady("chapter_seek")) return 0;   // 可能被局刷后调用, 先恢复总线
+    File f = readerFs().open(txtChapterPath.c_str(), "r");
     if (!f) return 0;
     uint32_t idx = 0;
     uint32_t off = 0;
@@ -4869,7 +4876,7 @@ static void abortIndexBuild() {
     idxReleaseBuf();   // 生命周期化: 中止构建释放块读缓冲
     resetIndexReaderState();   // 中止即清残留: 后续 beginTxtIndexBuild/续建入口再 reset 一次, 双保险
     String sidecarPath = txtIndexPath + "p";
-    if (SD.exists(sidecarPath.c_str())) SD.remove(sidecarPath.c_str());
+    if (readerFs().exists(sidecarPath.c_str())) readerFs().remove(sidecarPath.c_str());
 }
 
 void closeTxtReader() {
@@ -4913,15 +4920,15 @@ bool isTxtPath(const char *path) {
 void removeLegacyIndexFiles() {
     String legacyIndex = txtPath + ".i1";
     String legacyChapter = txtPath + ".z1";
-    if (legacyIndex != txtIndexPath && SD.exists(legacyIndex.c_str())) SD.remove(legacyIndex.c_str());
-    if (legacyChapter != txtChapterPath && SD.exists(legacyChapter.c_str())) SD.remove(legacyChapter.c_str());
+    if (legacyIndex != txtIndexPath && readerFs().exists(legacyIndex.c_str())) readerFs().remove(legacyIndex.c_str());
+    if (legacyChapter != txtChapterPath && readerFs().exists(legacyChapter.c_str())) readerFs().remove(legacyChapter.c_str());
 }
 
 // 页表二分查找: 记录[1..N-2] 严格递增 (已校验) → 二分找 offset==saved 的页。
 // 替代 14 万条顺序扫描 (1.1MB 顺序读阻塞 2-4s, 旋转/启动恢复时屏幕长时间无变化 = "卡")。
 // 返回页号 (≥2) 或 0 (未找到/索引打不开)。
 uint32_t findPageByOffset(const String &indexPath, uint32_t saved) {
-    File f = SD.open(indexPath.c_str(), FILE_READ);
+    File f = readerFs().open(indexPath.c_str(), "r");
     if (!f || f.size() < 24) {
         if (f) f.close();
         return 0;
@@ -4948,7 +4955,7 @@ uint32_t findPageByOffset(const String &indexPath, uint32_t saved) {
 // ceil 语义: saved 恰在页首 → 该页 (不跳); saved 在页中间 → 下一页 (跳过已读部分, 不重复显示)。
 // 返回页号 (≥2) 或 0 (saved 超过最后页首 → 调用方用最后一页/兜底)。
 uint32_t findPageCeil(const String &indexPath, uint32_t saved) {
-    File f = SD.open(indexPath.c_str(), FILE_READ);
+    File f = readerFs().open(indexPath.c_str(), "r");
     if (!f || f.size() < 24) {
         if (f) f.close();
         return 0;
@@ -4971,11 +4978,13 @@ uint32_t findPageCeil(const String &indexPath, uint32_t saved) {
 }
 
 void startTxtReader(const char *path, bool forceRebuild) {
-    if (gBrowseLocal) {   // 本地 LittleFS 介质仅浏览, 不支持 TXT 阅读
-        showMsg("本地空间", "仅浏览，不支持阅读");
+    // ===== P1 架构边界 (2026-09) =====
+    // 阅读数据源只有 LittleFS(内部介质浏览模式 gBrowseLocal); SD 只做文件管理/导入。
+    // SD 介质下点开 TXT 直接提示, 不做 SD→阅读 的自动 fallback (见 docs/reader-lfs-migration.md §8)。
+    if (!gBrowseLocal) {
+        showMsg("SD 仅文件管理", "请切到内部介质或先导入");
         return;
-    }
-    if (!isTxtPath(path)) {
+    }    if (!isTxtPath(path)) {
         traceFmtLevel('W', "TXT unsupported path=%s", path ? path : "(null)");
         showMsg("不支持打开", "仅支持TXT文件");
         return;
@@ -5000,7 +5009,7 @@ void startTxtReader(const char *path, bool forceRebuild) {
     txtChapterPath = txtPath;
     if (txtDot > 0) txtChapterPath = txtChapterPath.substring(0, txtDot);
     txtChapterPath += readerIsPortrait() ? ".vz1" : ".z1";
-    if (!reinitSdBus("txt_open")) {
+    if (!readerBusReady("txt_open")) {
         debugLine("TXT SD reinit failed");
         showMsg("SD错误", "无法读取TXT");
         return;
@@ -5008,15 +5017,15 @@ void startTxtReader(const char *path, bool forceRebuild) {
     // 兼容改名前已经生成的 `小说.txt.i1/.z1`，避免升级后所有大文件被强制重建。
     String legacyIndexPath = txtPath + (readerIsPortrait() ? ".v1" : ".i1");
     String legacyChapterPath = txtPath + (readerIsPortrait() ? ".vz1" : ".z1");
-    if (!SD.exists(txtIndexPath.c_str()) && SD.exists(legacyIndexPath.c_str())) {
+    if (!readerFs().exists(txtIndexPath.c_str()) && readerFs().exists(legacyIndexPath.c_str())) {
         txtIndexPath = legacyIndexPath;
         debugLine("TXT using legacy index name");
     }
-    if (!SD.exists(txtChapterPath.c_str()) && SD.exists(legacyChapterPath.c_str())) {
+    if (!readerFs().exists(txtChapterPath.c_str()) && readerFs().exists(legacyChapterPath.c_str())) {
         txtChapterPath = legacyChapterPath;
         debugLine("TXT using legacy chapter name");
     }
-    txtFile = SD.open(txtPath.c_str());
+    txtFile = readerFs().open(txtPath.c_str(), "r");
     if (!txtFile) { debugLine("TXT open failed"); showMsg("打开失败", ""); return; }
     saveRecentReadPath(txtPath);
     recentReadPath = txtPath;
@@ -5025,8 +5034,8 @@ void startTxtReader(const char *path, bool forceRebuild) {
     // 先检查索引有效性 (毫秒级, 仅 open+读最后8字节),
     // 有效则直接恢复进度一次全刷; 无效才显示第一页 + 后台建索引。
     // 避免"先闪第一页再全刷到进度页"的两次全刷。
-    File index = SD.open(txtIndexPath.c_str());
-    File chapters = SD.open(txtChapterPath.c_str());
+    File index = readerFs().open(txtIndexPath.c_str(), "r");
+    File chapters = readerFs().open(txtChapterPath.c_str(), "r");
     bool indexValid = index && index.size() >= 16 && (index.size() % 8) == 0;
     bool chaptersValid = chapters && chapters.size() > 0;
     if (indexValid) {
@@ -5083,7 +5092,7 @@ void startTxtReader(const char *path, bool forceRebuild) {
         // → 从部分页表续建, 不从头全量 (官方 A7 同款机制, 无 .i1b 断点文件)。
         uint32_t resumeOffset = 0;
         if (!forceRebuild && !indexValid && !indexFormatCorrupt) {
-            File part = SD.open(txtIndexPath.c_str());
+            File part = readerFs().open(txtIndexPath.c_str(), "r");
             if (part && part.size() >= 16 && (part.size() % 8) == 0) {
                 // 污染检测: 倒数第二条==0 (历史版本断点误写 .i1 的垃圾行) → 不续建
                 part.seek(part.size() - 16);
@@ -5114,8 +5123,8 @@ void startTxtReader(const char *path, bool forceRebuild) {
             // 构建中进度优先: sidecar (txtIndexPath+"p") 是重建/续建期间实时写入的阅读位置;
             // 完成时已合并回记录[0] 并删除, 因此存在即代表上次构建被中断。
             String sidecarPath = txtIndexPath + "p";
-            if (SD.exists(sidecarPath.c_str())) {
-                File sp = SD.open(sidecarPath.c_str());
+            if (readerFs().exists(sidecarPath.c_str())) {
+                File sp = readerFs().open(sidecarPath.c_str(), "r");
                 if (sp && sp.size() >= 8) {
                     char rec[9];
                     for (uint8_t i = 0; i < 8; i++) rec[i] = (char)sp.read();
@@ -5127,7 +5136,7 @@ void startTxtReader(const char *path, bool forceRebuild) {
             }
             if (savedOffset == 0) {
                 // 无 sidecar: 索引存在但续建(如 .z1 缺失/构建中断) → 进度在旧 .i1 记录[0]
-                File ready = SD.open(txtIndexPath.c_str());
+                File ready = readerFs().open(txtIndexPath.c_str(), "r");
                 if (ready && ready.size() >= 8) {
                     char rec[9];
                     for (uint8_t i = 0; i < 8; i++) rec[i] = (char)ready.read();
@@ -5179,7 +5188,7 @@ void startTxtReader(const char *path, bool forceRebuild) {
         }
     } else {
         txtChapterCount = countTxtChapters();   // 修复 "0章": 有效索引时从未加载章节数
-        File ready = SD.open(txtIndexPath.c_str());
+        File ready = readerFs().open(txtIndexPath.c_str(), "r");
         txtTotalPages = (ready.size() / 8) - 1;
         ready.seek(0);
         char progress[9];
@@ -5243,9 +5252,9 @@ void startTxtReader(const char *path, bool forceRebuild) {
 // 一律视为不可信 (实测: 不恢复就跳转 → 索引打不开 findPageCeil=0 → 兜底页1 → 读正文
 // TXT_READ_FAIL 全零行白屏)。恢复方式 = 恢复总线 + 无条件关掉重开正文句柄。
 void markEnsureTxtFile() {
-    reinitSdBus("mark_txt");
+    readerBusReady("mark_txt");
     if (txtFile) txtFile.close();
-    txtFile = SD.open(txtPath.c_str());
+    txtFile = readerFs().open(txtPath.c_str(), "r");
 }
 
 String markPath() {
@@ -5256,8 +5265,8 @@ String markPath() {
 }
 
 uint8_t markCountRead(const String &path) {
-    reinitSdBus("mark_cnt");
-    File f = SD.open(path.c_str(), FILE_READ);
+    readerBusReady("mark_cnt");
+    File f = readerFs().open(path.c_str(), "r");
     if (!f) return 0;
     uint32_t size = f.size();
     f.close();
@@ -5270,15 +5279,15 @@ uint8_t markCountRead(const String &path) {
 bool markAppend(uint32_t off) {
     String path = markPath();
     if (markCountRead(path) >= MARK_MAX) return false;
-    reinitSdBus("mark_append");
+    readerBusReady("mark_append");
     // 损坏自愈: 残缺尾部先重写为完整记录再追加
-    File f = SD.open(path.c_str(), FILE_READ);
+    File f = readerFs().open(path.c_str(), "r");
     uint32_t size = f ? f.size() : 0;
     if (f) f.close();
     if (size % 8 != 0 && size > 0) {
         uint32_t keep[MARK_MAX];
         uint8_t n = 0;
-        f = SD.open(path.c_str(), FILE_READ);
+        f = readerFs().open(path.c_str(), "r");
         if (f) {
             while (n < MARK_MAX) {
                 char rec[9];
@@ -5288,8 +5297,8 @@ bool markAppend(uint32_t off) {
             }
             f.close();
         }
-        SD.remove(path.c_str());
-        File wf = SD.open(path.c_str(), FILE_WRITE);
+        readerFs().remove(path.c_str());
+        File wf = readerFs().open(path.c_str(), "w");
         if (!wf) return false;
         for (uint8_t i = 0; i < n; i++) {
             char rec[9];
@@ -5298,9 +5307,9 @@ bool markAppend(uint32_t off) {
         }
         wf.close();
     }
-    f = SD.open(path.c_str(), FILE_WRITE);
+    f = readerFs().open(path.c_str(), "a");   // 追加: LittleFS 语义必须用 "a"(FILE_WRITE 与 SD 不同, 会截断)
     if (!f) return false;
-    f.seek(f.size());   // 无论 FILE_WRITE 语义如何都定位到尾部追加
+    f.seek(f.size());   // 定位到尾部追加
     char rec[9];
     formatIndexNumber(off, rec);
     size_t w = f.print(rec);
@@ -5311,8 +5320,8 @@ bool markAppend(uint32_t off) {
 void markLoadPage(int page) {
     markCountLoaded = 0;
     String path = markPath();
-    reinitSdBus("mark_load");
-    File f = SD.open(path.c_str(), FILE_READ);
+    readerBusReady("mark_load");
+    File f = readerFs().open(path.c_str(), "r");
     if (!f) return;
     uint32_t total = f.size() / 8;
     uint32_t start = (uint32_t)(page - 1) * CHAPTER_ROWS;
@@ -5334,8 +5343,8 @@ bool markDeleteOne(uint8_t idx) {
     uint32_t buf[MARK_MAX];
     uint8_t n = 0;
     {
-        reinitSdBus("mark_del");
-        File f = SD.open(path.c_str(), FILE_READ);
+        readerBusReady("mark_del");
+        File f = readerFs().open(path.c_str(), "r");
         if (!f) return false;
         while (n < MARK_MAX) {
             char rec[9];
@@ -5350,9 +5359,9 @@ bool markDeleteOne(uint8_t idx) {
     n--;
 
     // 阶段1: .bmt 中转 (rename 前 .bm 完好)
-    reinitSdBus("mark_del");
+    readerBusReady("mark_del");
     String tmp = path + "t";
-    File tf = SD.open(tmp.c_str(), FILE_WRITE);
+    File tf = readerFs().open(tmp.c_str(), "w");
     if (tf) {
         bool ok = true;
         for (uint8_t i = 0; i < n && ok; i++) {
@@ -5361,20 +5370,20 @@ bool markDeleteOne(uint8_t idx) {
             ok = tf.print(rec) == 8;
         }
         tf.close();
-        File vf = SD.open(tmp.c_str(), FILE_READ);
+        File vf = readerFs().open(tmp.c_str(), "r");
         uint32_t vsize = vf ? vf.size() : 0;
         if (vf) vf.close();
         if (ok && vsize == (uint32_t)n * 8) {
-            SD.remove(path.c_str());
-            if (SD.rename(tmp.c_str(), path.c_str())) return true;
+            readerFs().remove(path.c_str());
+            if (readerFs().rename(tmp.c_str(), path.c_str())) return true;
         }
-        SD.remove(tmp.c_str());
+        readerFs().remove(tmp.c_str());
     }
 
     // 阶段2 兜底: 总线恢复后按 RAM 缓冲直写 .bm + 回读校验
-    reinitSdBus("mark_del_retry");
-    SD.remove(path.c_str());
-    File df = SD.open(path.c_str(), FILE_WRITE);
+    readerBusReady("mark_del_retry");
+    readerFs().remove(path.c_str());
+    File df = readerFs().open(path.c_str(), "w");
     if (!df) return false;
     for (uint8_t i = 0; i < n; i++) {
         char rec[9];
@@ -5382,7 +5391,7 @@ bool markDeleteOne(uint8_t idx) {
         df.print(rec);
     }
     df.close();
-    File vf2 = SD.open(path.c_str(), FILE_READ);
+    File vf2 = readerFs().open(path.c_str(), "r");
     uint32_t vs2 = vf2 ? vf2.size() : 0;
     if (vf2) vf2.close();
     return vs2 == (uint32_t)n * 8;
@@ -5622,7 +5631,7 @@ void setup() {
     lastPhysicalKeyMs = millis();
     // 调试: 启动时检查休眠记录文件状态 (断电后是否保留 / 是否被消费)
     {
-        File sf = SD.open(SLEEP_RECORD_PATH, FILE_READ);
+        File sf = readerFs().open(SLEEP_RECORD_PATH, "r");
         uint32_t ssize = sf ? sf.size() : 0;
         uint32_t smagic = 0;
         if (sf && ssize >= 4) {
@@ -5631,7 +5640,7 @@ void setup() {
             smagic = ((uint32_t)m[0]) | ((uint32_t)m[1] << 8) | ((uint32_t)m[2] << 16) | ((uint32_t)m[3] << 24);
         }
         if (sf) sf.close();
-        debugFmt("BOOT_SLEEPFILE exist=%d size=%u magic=%08lX", SD.exists(SLEEP_RECORD_PATH) ? 1 : 0,
+        debugFmt("BOOT_SLEEPFILE exist=%d size=%u magic=%08lX", readerFs().exists(SLEEP_RECORD_PATH) ? 1 : 0,
                  (unsigned)ssize, (unsigned long)smagic);
     }
     // 只读取睡眠记录
@@ -5729,7 +5738,7 @@ void setup() {
             // 休眠前在章节目录 → 先开书, 再恢复目录位置
             gBootHintPage = recentReadPage;   // 优化②: 复用最近阅读页号, 跳过重复二分
             startTxtReader(recentReadPath.c_str(), false);
-            if (txtFile && SD.exists(txtChapterPath.c_str())) {
+            if (txtFile && readerFs().exists(txtChapterPath.c_str())) {
                 txtChapterCount = countTxtChapters();
                 chapterSpeed = bootRec.chapterSpeed ? bootRec.chapterSpeed : 1;
                 chapterSpeedPopup = bootRec.chapterSpeedPopup != 0;
@@ -5857,13 +5866,12 @@ void loop() {
     if (millis() - lastBatteryCheckMs >= BAT_CHECK_MS) {
         lastBatteryCheckMs = millis();
         if (checkLowBattery()) return;
-        // 诊断探针(排查"随机翻页显示第1页"): 60s 电池采样点 + 采样后立刻探测 SD 是否可用。
-        // sd=0 ⇒ 电池采样(GPIO12/GPIO5 与 SD 共用)后 SD 总线处于坏态, 下一次 SD.open 会失败(旧代码=显示第1页)。
-        int sdOk = 1;
+        // 诊断探针: 60s 电池采样点 + 当前阅读索引在 LittleFS 上是否可读 (P1 后阅读不再依赖 SD)
+        int lfsOk = 1;
         if (appMode == APP_READER && txtIndexPath.length()) {
-            sdOk = SD.exists(txtIndexPath.c_str()) ? 1 : 0;
+            lfsOk = readerFs().exists(txtIndexPath.c_str()) ? 1 : 0;
         }
-        traceFmt("BATCHK mv=%d page=%lu mode=%d sd=%d", lastBatteryMV, (unsigned long)txtPage, appMode, sdOk);
+        traceFmt("BATCHK mv=%d page=%lu mode=%d lfs=%d", lastBatteryMV, (unsigned long)txtPage, appMode, lfsOk);
     }
 
     if (millis() - lastPhysicalKeyMs >= AUTO_SLEEP_MS) {

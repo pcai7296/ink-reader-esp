@@ -51,8 +51,8 @@ SD→阅读 的旧路径（每页 `SD.open` 索引、SD 正文、SD 枚举章节
 
 ```
 P0 冻结当前版本 + 基线（本文档 + tag）                    ✅
-P1 阅读数据源统一到 LittleFS（reader 不再直接依赖 SdFat）
-P2 SD 从阅读路径彻底移除（进阅读 SD.end；退出再挂载）
+P1 阅读数据源统一到 LittleFS（reader 不再直接依赖 SdFat）      ✅ 代码完成（编译过；待实机 P3 验收）
+P2 SD 从阅读路径彻底移除（进阅读 SD.end；退出再挂载）           ⏳ SD 已不在阅读链路；显式 end/remount 待做
 P3 最小阅读闭环（开书 → 第1页 → 上/下页 → 退出）
 P4 连续翻页稳定性验收（A）
 P5 WiFi 生命周期修复（时钟/天气/配网/同步/进阅读强制 OFF）—— 独立提交   ✅（代码完成，待实机看 RF_OFF 日志）
@@ -68,6 +68,49 @@ P11 全功能验收（5h / 1000+ 页 / 断电）
 
 暂时不参与最小闭环（迁移完成后再按 P8/P9 恢复）：进度同步、天气、Web 控制、阅读统计、标签、自动翻页、旋转扩展、复杂恢复。
 EPD 的 `powerOff()` 改动**不与存储迁移混提**（留到 P7 单独 A/B）。
+
+## 8. P1 详细方案（阅读数据源统一 LittleFS）
+
+**执行结果（2026-09，代码完成）**：
+- 新增 `readerFs()`（=LittleFS）与占位 `readerBusReady()`（阅读链路不再需要 SD 总线仲裁；原 `reinitSdBus(...)` 调用点全部改为它，恒 true）。
+- 共替换 **126 处** `SD.*`（含首轮 90 + 补充 18 + 单参 open 补 `"r"`），覆盖：最近阅读摘要/进度文件、索引构建与续建（含 sidecar `…p`）、页表读取（`parsePageRecordEx/offsetToPage`）、进度读写、正文读取（`readTxtPageCore/readTxtPage`）、章节（`loadChapterRows/chapterBuildPageTable/countTxtChapters/seekChapterOffset`）、标签（`markEnsureTxtFile/markCountRead/markAppend/markLoadPage/markDeleteOne`）、`buildTxtIndex`/`abortIndexBuild`/`removeLegacyIndexFiles`/`findPageByOffset/findPageCeil`、进度同步宿主钩子（`progressSyncSnapshot/RestoreReaderHeap/ApplyRemote`）。
+- 文件模式按 `fs::FS` 语义逐个校正：读 `"r"`；新建/重写 `"w"`；**追加必用 `"a"`**（`beginResumeIndexBuildFromPartial` 的 `.i1/.z1` 追加、`markAppend` 的 `.bm` 追加）——SD 的 `FILE_WRITE` 是追加语义，直接照搬会截断文件。
+- 阅读状态改址：`RECENT_READ_PATH = "/recentread.dat"`、`SLEEP_RECORD_PATH = "/sleepmode.dat"`、标签 `.bm/.bmt` 均在 LittleFS；不再创建 SD 的 `/.tiemereader`。
+- 入口规则：`startTxtReader` 仅在 `gBrowseLocal`（内部介质浏览）下工作；SD 介质下点开 TXT → 提示 **“SD 仅文件管理 / 请切到内部介质或先导入”**，不做自动 fallback。
+- 仍在 SD（非阅读实时链路，允许）：`debug_trace.log`（DIAG_SD 诊断）、天气缓存 `/.tiemereader/weather.dat`（首页/天气域）、文件管理/介质切换的 `SD.begin`。
+
+### P3 实机验证步骤（用户操作）
+1. 设置页把 **SD 卡设为“未启用”**（或拔卡）→ 重启 → 设备进入 `gBrowseLocal` 内部介质模式；
+2. 进配网页，用 **现有文件管理 Web**（`/fs/edit`）把测试书 **T1（100–300KB .txt）上传到 LittleFS 根目录**（无需上传 .i1/.z1，首次打开由设备构建）；
+3. 设备文件管理器打开该 txt → 应正常进入阅读：首页/下一页/上一页/跳转/退出；
+4. 反例验证：切回 SD 介质后点开 SD 上的 txt → 必须提示“SD 仅文件管理”。
+
+**关键有利条件（已核实）**：本固件已有介质抽象——`ink-reader-esp.ino:2350 static fs::FS &browseFs(){ return gBrowseLocal ? LittleFS : SDFS; }`，文件管理器/列表都走 `browseFs()`，且 `File` 就是 `fs::File`。
+阅读路径是唯一绕开它、直接用 **SdFat 的 `SD.` 对象**（127 处 `SD.*` 调用），这就是 bug/续航问题的边界所在。
+
+实施：
+1. 新增 `static fs::FS &readerFs() { return LittleFS; }`（P1 固定 LittleFS；单点可切，便于将来对比实验）。
+2. 机械替换阅读链路内的 `SD.open/exists/remove/mkdir` → `readerFs().…`（类型不变）：
+   - 页表/进度：`parsePageRecordEx`、`writeProgress`、`readProgressOffset`、`findPageByOffset/Ceil`
+   - 索引构建/续建：`beginTxtIndexBuild`、`beginResumeIndexBuildFromPartial`、`indexTaskStep`、`finishTxtIndexBuild`、`abortIndexBuild`（含 sidecar `…p` 逻辑；LittleFS 稳定后 P6 简化为批量写记录[0]）
+   - 正文读取：`readTxtPageCore/readTxtPage`（重试由 `reinitSdBus` 改为“重新 open 一次”，不再动 SD 总线）
+   - 章节：`countTxtChapters`、`loadChapterRows`、`chapterBuildPageTable`、`.z1` 构建
+   - 阅读状态：`saveRecentReadPath`/`loadRecentReadSummary`、`.bm/.bmt` 标签（阅读状态按架构归 LittleFS）
+3. 阅读链路内**移除** `reinitSdBus(...)` / `SD.begin(...)` 调用（LittleFS 不共享 EPD/电池引脚，不再需要总线仲裁）；`parsePageRecordEx` 保留一次重试但只做 reopen。
+4. `startTxtReader` 入口规则改为：
+   - 当前介质 = 本地（`gBrowseLocal`，LittleFS）→ 正常阅读；
+   - 当前介质 = SD → 提示 **“SD 仅文件管理：请先用导入（P10）或切到内部介质浏览”**，不再从 SD 打开书（**杜绝 SD 参与阅读**、不做自动 fallback）。
+5. 删除/停用 `startTxtReader` 里针对 `gBrowseLocal` 的“仅浏览不支持阅读”旧守卫。
+
+## 9. P2 方案（SD 退出阅读）
+- 进入阅读前：`SDFS.end()`（并确保 `SD.end()`/CS 高），置 `sdPowered=false`；阅读期间任何 `browseFs()` 调用都视为违规（加断言/日志 `READER_SD_TOUCH`）。
+- 退出阅读回文件管理器/首页时：按需重新挂载（`SD.begin(5, SD_SCK_MHZ(20))` / `SDFS.begin()`），并刷新目录缓存。
+- 阅读期间 `gBrowseLocal` 语义统一为“内部介质”，与 SD 状态解耦，避免状态组合。
+
+## 10. 测试书部署（P3/P4 前置）
+- 第一版**不实现导入 UI**（P10 再做）：用 PC 端 `mklittlefs` 把测试书打进 LittleFS 镜像一起烧录（`python esp_dev.py --steps flash --fs 0x200000=build/data.littlefs.bin`）。
+- 测试书建议：先用**PC 合成的小书**（≤1.8MB UTF-8 中文，验证翻页/索引/章节闭环），再用真实小书复测；55MB 级书本版本不可导入（容量边界见 §3）。
+- 设备内浏览路径已有：`gBrowseLocal` 本地介质模式（设置里关闭 SD/无卡时自动进入），可在文件管理器里浏览 LittleFS 并打开 txt（P1 后即可进入阅读）。
 
 ## 7. P5 实现明细（WiFi 生命周期，2026-09）
 
