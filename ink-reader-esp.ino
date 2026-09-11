@@ -1360,6 +1360,7 @@ void webSettingsNotify(const char *line1, const char *line2) {
 
 void exitNetworkPage() {
     gWebNotifyLine[0] = '\0';   // 退出配网清空底行消息(下次进入显示"中键长按退出")
+    wifiManagerRfOff("network_exit");   // P5: 配网退出统一关 RF (官方 WifiShutdown 对齐)
     int ret = gNetworkReturnMode;
     gNetworkReturnMode = APP_HOME;
     if (ret == APP_READER) {
@@ -4980,6 +4981,7 @@ void startTxtReader(const char *path, bool forceRebuild) {
         return;
     }
     freeItemList();   // 大目录 items≈34KB+ 是堆大户, 进阅读器前释放 (浏览模式回退时 listDir 重建)
+    wifiManagerRfOff("reader_enter");   // P5: 进入阅读强制关 RF (官方 DisplayTxt.ino:854 WifiShutdown 对齐)
     debugFmt("TXT open path=%s rebuild=%d", path, forceRebuild ? 1 : 0);
     statsOnSessionStart(path);   // 阅读统计: 会话开始, 记录当前书 + 今日/本周/连续天数检查
     // 旋转续读: 读走即清零 (任何路径都不残留; 失败提前 return 也安全)
@@ -5973,6 +5975,7 @@ void loop() {
     if (appMode == APP_WEATHER) {
         // 中键短按/长按: 退出回主页; 右键长按: 手动刷新（夜间也联网）
         if (r2 == 1 || r2 == 2) {
+            wifiManagerRfOff("weather_exit");   // 退出天气页关 RF (P5: 阅读/待机不再继承 RF)
             appMode = APP_HOME;
             renderHome(true);
         } else if (r3 == 2) {
@@ -6011,6 +6014,8 @@ void loop() {
     }
 
     if (appMode == APP_READER) {
+        // P5 兜底断言: 阅读期间绝不允许 RF 处在非 OFF (任何流程漏关都会在此被纠正并留日志)
+        if (WiFi.getMode() != WIFI_OFF) wifiManagerRfOff("reader_assert");
         if (readerJumpOpen) {
             // 页码跳转弹窗 (数字键盘): 右键下移 1 / 中键上移 2 (与阅读菜单一致的设计),
             // 右长 执行, 中长 取消

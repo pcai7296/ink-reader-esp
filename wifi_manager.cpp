@@ -1557,6 +1557,16 @@ bool wifiManagerStartSta() {
 bool wifiManagerIsStaUp() { return WiFi.status() == WL_CONNECTED; }
 void wifiManagerStopSta() { WiFi.disconnect(); WiFi.mode(WIFI_OFF); }
 
+// ---- 统一 RF 关断出口 (2026-09 P5; 官方 WifiShutdown() 对齐: Clock_8025T.ino:93 / DisplaySetup.ino:194-195 / DisplayTxt.ino:854) ----
+// 任何联网任务(时钟校准/天气/配网/同步)结束、以及进入阅读前必须调用; 只在模式非 OFF 时动作并打日志(便于验收)。
+void wifiManagerRfOff(const char *reason) {
+  int m = (int)WiFi.getMode();
+  if (m == (int)WIFI_OFF) return;
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  Serial.printf_P(PSTR("RF_OFF reason=%s was=%d\n"), reason ? reason : "?", m);
+}
+
 // ---- 配网会话堆预算审计探针（临时, 审计完成后移除）----
 // 轻量: 只读 heap/maxFreeBlock; PSTR 格式串驻 flash, 不分配堆, 不影响被测环境
 void auditHeap(const char *phase) {
@@ -1887,6 +1897,7 @@ void clockManagerBegin(void (*renderCallback)(bool), void (*doneCallback)()) {
   if (!loadConfig()) {
     clockState = CLOCK_FAILED;
     Serial.println(F("CLOCK_NO_WIFI_CONFIG"));
+    wifiManagerRfOff("clock_no_creds");
     if (clockRender) clockRender(true);
     return;
   }
@@ -1940,6 +1951,7 @@ static bool clockManagerTryWeatherTime() {
   clockState = CLOCK_SUCCESS;
   clockSuccessDeadline = millis() + 1800UL;
   Serial.printf_P(PSTR("CLOCK_WEATHER_TIME epoch=%lld\n"), (long long)t);
+  wifiManagerRfOff("clock_weather_ok");   // 校时完成即关 RF (官方 WifiShutdown 对齐)
   if (clockRender) clockRender(false);
   return true;
 }
@@ -1964,6 +1976,7 @@ void clockManagerLoop() {
     } else if (static_cast<int32_t>(millis() - clockDeadline) >= 0) {
       clockState = CLOCK_FAILED;
       Serial.println(F("CLOCK_WIFI_TIMEOUT"));
+      wifiManagerRfOff("clock_wifi_timeout");
       if (clockRender) clockRender(false);
     }
   } else if (clockState == CLOCK_NTP) {
@@ -1978,6 +1991,7 @@ void clockManagerLoop() {
       clockState = CLOCK_SUCCESS;
       clockSuccessDeadline = millis() + 1800UL;
       Serial.printf_P(PSTR("CLOCK_NTP_SUCCESS epoch=%lu\n"), static_cast<unsigned long>(now));
+      wifiManagerRfOff("clock_ntp_ok");   // 校时完成即关 RF (官方 WifiShutdown 对齐)
       if (clockRender) clockRender(false);
     } else if (static_cast<int32_t>(millis() - clockDeadline) >= 0) {
       // 对齐 A7: NTP 失败 → 改用天气时间 (天气接口 last_update 字段)
@@ -1989,6 +2003,7 @@ void clockManagerLoop() {
     if (!clockManagerTryWeatherTime()) {
       clockState = CLOCK_FAILED;
       Serial.println(F("CLOCK_WEATHER_FAILED"));
+      wifiManagerRfOff("clock_weather_fail");
       if (clockRender) clockRender(false);
     }
     ESP.wdtFeed();
@@ -2005,6 +2020,7 @@ void clockManagerHandleKeys(int middleEvent, int rightEvent) {
     clockSkippedSession = true;
     clockState = CLOCK_SKIPPED;
     Serial.println(F("CLOCK_SKIP"));
+    wifiManagerRfOff("clock_skip");   // 跳过校准也关 RF
     // 调试: 打印当前 epoch 与本地时间字符串, 确认时区/显示是否正确
     {
       time_t dbgNow = clockManagerNow();

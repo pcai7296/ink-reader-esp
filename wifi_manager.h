@@ -71,6 +71,8 @@ bool wifiManagerEnsureSta(uint32_t timeoutMs);
 bool wifiManagerStartSta();
 bool wifiManagerIsStaUp();
 void wifiManagerStopSta();
+// 统一 RF 关断出口 (2026-09 P5, 对齐官方 WifiShutdown): 联网任务结束/进入阅读前调用; 仅非 OFF 时动作并打印 RF_OFF
+void wifiManagerRfOff(const char *reason);
 
 // ---- 设备设置（EEPROM 偏移 232, 独立区）----
 // 布局兼容说明：checksum 之前的字段(magic/version/clockFormat/tzOffsetMin)不变，

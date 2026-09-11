@@ -55,7 +55,7 @@ P1 阅读数据源统一到 LittleFS（reader 不再直接依赖 SdFat）
 P2 SD 从阅读路径彻底移除（进阅读 SD.end；退出再挂载）
 P3 最小阅读闭环（开书 → 第1页 → 上/下页 → 退出）
 P4 连续翻页稳定性验收（A）
-P5 WiFi 生命周期修复（时钟/天气/配网/同步/进阅读强制 OFF）—— 独立提交
+P5 WiFi 生命周期修复（时钟/天气/配网/同步/进阅读强制 OFF）—— 独立提交   ✅（代码完成，待实机看 RF_OFF 日志）
 P6 进度批量写入（5min / 50 页 / 退出 / 换书；RAM 实时，落盘节流）
 P7 EPD powerOff A/B（不改存储；A=LittleFS+WiFiOFF，B=再加每页 powerOff）
 P8 恢复阅读功能（字体/自动翻页/刷新间隔/旋转/跳转/标签/休眠）
@@ -68,3 +68,10 @@ P11 全功能验收（5h / 1000+ 页 / 断电）
 
 暂时不参与最小闭环（迁移完成后再按 P8/P9 恢复）：进度同步、天气、Web 控制、阅读统计、标签、自动翻页、旋转扩展、复杂恢复。
 EPD 的 `powerOff()` 改动**不与存储迁移混提**（留到 P7 单独 A/B）。
+
+## 7. P5 实现明细（WiFi 生命周期，2026-09）
+
+- 新增统一出口 `wifiManagerRfOff(reason)`（`wifi_manager.cpp`）：仅当 `WiFi.getMode()!=WIFI_OFF` 时 `WiFi.disconnect(true) + WiFi.mode(WIFI_OFF)`，并打印 `RF_OFF reason=… was=…`。
+- 调用点：时钟校准终态（校时成功 `clock_ntp_ok` / 天气时间成功 `clock_weather_ok` / 无凭据 `clock_no_creds` / WiFi 超时 `clock_wifi_timeout` / 天气失败 `clock_weather_fail` / 跳过 `clock_skip`）；天气页退出 `weather_exit`；配网页退出 `network_exit`；进入阅读 `reader_enter`（`startTxtReader`）；阅读循环兜底断言 `reader_assert`（任何漏关都会在此纠正并留日志）。
+- 依据：官方 `WifiShutdown()`（`Other.ino:25-29`）= `WiFi.mode(WIFI_OFF)`，在 `Clock_8025T.ino:93`、`DisplaySetup.ino:194-195`、`DisplayTxt.ino:854` 处调用（见 `REVERSE_NOTES.md §13`）。
+- 验收：串口日志出现对应 `RF_OFF reason=…`；阅读页不再出现 `reader_assert`（出现即说明仍有流程漏关）。
