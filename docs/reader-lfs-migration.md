@@ -219,3 +219,42 @@ P2 之后阅读期间 SD 处于 `end()` 状态，因此以下**非阅读实时�
 5. 诊断：`KEYLAG gap=…`（相邻两次按键扫描 >80ms 时告警）+ 构建结束打印 `IDX_KEYSTATS maxGapMs=… yields=…`，用于量化验证。
 
 **"跳到未建页"限制**：与 A7 一致，已存在（`nextTxtPage` 超出已建页会失败、`jumpToPage` clamp 到 `txtIndexedPages`）。
+
+---
+
+## 18. 构建期禁休眠规则（2026-09 用户定稿）
+
+**规则**：
+1. **索引构建期间，任何界面都不自动休眠**（不再出现"构建到一半睡着"）；
+2. 若已 idle ≥5 分钟而构建仍在进行 → 记为**待休眠**（日志 `SLEEP_DEFER building=1 idle=… mode=…`），**构建一完成立刻休眠**（`SLEEP_DEFER_EXEC` → `SLEEP_ENTER`）；
+3. **任何按键重置 5 分钟倒计时，并取消待休眠**（用户还在操作就不睡）；
+4. 例外（既有规则不变）：伪装模式 `APP_CLOCK_DISGUISE`、AP 配网 `APP_NETWORK` 本就不自动休眠；远程控制版默认禁用一切自动休眠；低电休眠（`checkLowBattery` → `enterLowBatterySleep`）不受此规则影响。
+
+**实现**：新增 `gSleepDeferForBuild`；`notePhysicalKeyActivity` 在任何按键事件时刷新 `lastPhysicalKeyMs` 并清除该标志；主 loop 先处理"待休眠且构建已完成 → 立即休眠"，再判断 5 分钟 idle → 若构建中则只记待休眠，否则 `SLEEP_AUTO` 正常休眠。
+
+**实机验证**（测试固件 `-DAUTO_SLEEP_MS_OVERRIDE=5000` 把倒计时缩到 5 秒以便量化；种子书 307KB，SD 构建 ≈7s）：
+
+| 场景 | 日志证据 | 结论 |
+|---|---|---|
+| 构建中到点不睡 | `u=5631 SLEEP_DEFER building=1 idle=5631 mode=2`；全程 `SLEEP_AUTO` **0 次** | 规则① ② |
+| 构建完成即睡 | `u=7164 IDX EOF` → `u=9216 SLEEP_DEFER_EXEC idle=9216 mode=2` → `SLEEP_ENTER` → `SLEEP m…` | 规则② |
+| 按键取消待休眠并重置 | 构建中注入右键 `u=5619 REMOTE_INJ key3=1`（`SLEEP_DEFER` **0 次**）→ `u=11325 SLEEP_AUTO idle=5029 building=0`（末次按键后正好 5s 才睡） | 规则③ |
+
+**测试开关（默认关，产品行为不变）**：`-DAUTO_SLEEP_MS_OVERRIDE=5000`（缩短倒计时）、`-DREMOTE_ALLOW_SLEEP=1`（远程版允许自动休眠，供自动化验证）。
+
+### 18.1 补充：用户实测“主页等页面构建期间仍休眠” → 构建任务判定扩展（2026-09）
+
+**根因**：主页/文件管理器显示的“构建中”多来自**未完成的索引**（`<索引>p` sidecar 存在，或 `.i1` 尾记录 ≠ txt 大小）。此时后台**并没有构建在跑**（`txtIndexBuilding=false`），旧逻辑 5 分钟到点就休眠了——用户看到的正是这种情况。
+
+**修复**：
+1. 新增 `indexBuildPendingForRecent()`：判定“最近阅读那本书的索引是否未完成”（sidecar 存在 / 无 `.i1` / `.i1` 尾记录 ≠ txt 大小；书不存在则不算，避免无谓挡休眠）。
+2. 新增 `resumePendingIndexBuild()`：**不切换界面**，按当前方向路径重开 `txtFile` 并调用 `beginResumeIndexBuildFromPartial()` 在后台续建。
+3. 统一入口 `buildTaskActiveOrResumed()` = 正在构建 ‖（有未完成索引且续建成功）→ **自动休眠与 23:30 静默校准的“停机休眠”都改为延后到构建完成**（`SILENT_CAL_DEFER`）。
+4. 无法续建（书不存在/打开失败）时**不无限挡休眠**：记 `SLEEP_PENDING_UNRESUMABLE` 后按原规则休眠。
+
+**实机验证（SD 介质 + 主页 + 未完成索引）**：测试钩子从 SD 上取 200KB 复制为 `/PEND_T1.txt`（非破坏性），启动构建后中途复位制造未完成索引，再以“强制停在主页 + 5 秒倒计时”固件启动：
+- `TEST_FORCE_HOME_END recent=/PEND_T1.txt pending=1` → 未完成索引被识别 ✓
+- `SLEEP_DEFER building=1 idle=5003 mode=0` → **主页**上 5 秒到点**没有休眠** ✓
+- `IDX async done pages=492 chapters=31` → 构建完成 → `SLEEP_DEFER_EXEC idle=7633 mode=0` → `SLEEP_ENTER` → **建完才睡** ✓
+
+**顺带修复的回归**：`SLEEP_SAVE open-fail` —— 早前为“阅读期零 SD 触点”删掉了睡眠快照前的总线恢复，导致 **SD 介质下睡眠记录写不进去**（唤醒无法恢复界面）。现改为在 `saveSleepRecord()` 内部：首次 `open` 失败即 `readerBusReady("sleep_save_retry")` 恢复总线并重试一次（内部介质恒真、零开销），`enterSleepMode` 也在写前显式恢复一次。

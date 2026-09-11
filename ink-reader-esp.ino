@@ -2862,13 +2862,86 @@ void refresh(bool full) {
 }
 
 uint32_t lastPhysicalKeyMs = 0;
-const uint32_t AUTO_SLEEP_MS = 5UL * 60UL * 1000UL;
+// 5 分钟无操作自动休眠; 测试可用 -DAUTO_SLEEP_MS_OVERRIDE=5000 缩短倒计时(默认关, 不改产品行为)
+#ifndef AUTO_SLEEP_MS_OVERRIDE
+#define AUTO_SLEEP_MS_OVERRIDE (5UL * 60UL * 1000UL)
+#endif
+const uint32_t AUTO_SLEEP_MS = AUTO_SLEEP_MS_OVERRIDE;
+// 远程控制版默认禁用自动休眠(深睡无法被串口唤醒); 仅验收测试可 -DREMOTE_ALLOW_SLEEP=1 打开
+#ifndef REMOTE_ALLOW_SLEEP
+#define REMOTE_ALLOW_SLEEP 0
+#endif
+// ===== 构建期禁休眠 (2026-09 用户定稿) =====
+// 规则: ①索引构建期间, 任何界面都不自动休眠; ②若已 idle≥5 分钟而构建仍在进行 → 记为待休眠,
+//       构建一完成立刻休眠; ③任何按键重置 5 分钟倒计时并取消待休眠。
+bool gSleepDeferForBuild = false;
+
+// ===== "构建任务"判定扩展 (2026-09 用户规则) =====
+// 主页/文件管理器显示"构建中"通常来自**未完成的索引**(sidecar 存在 / .i1 半截未合并),
+// 此时后台并没有构建在跑 → txtIndexBuilding=false → 旧逻辑 5 分钟到点就休眠了(用户实测)。
+// 现: "最近阅读这本书的索引未完成" 也算构建任务 → 自动续建, 构建完成后再休眠。
+static bool indexBuildPendingForRecent() {
+    if (recentReadPath.length() == 0) return false;
+    if (!readerBusReady("sleep_pending")) return false;   // SD 介质: 先恢复总线再判索引状态
+    String idx = recentReadPath;
+    int dot = idx.lastIndexOf('.');
+    if (dot > 0) idx = idx.substring(0, dot);
+    idx += readerIsPortrait() ? ".v1" : ".i1";
+    if (readerFs().exists((idx + "p").c_str())) return true;   // sidecar: 上次构建未完成
+    File ix = readerFs().open(idx.c_str(), "r");
+    if (!ix) return true;                                      // 无索引 → 需要构建
+    uint32_t sz = ix.size();
+    if (sz < 16) { ix.close(); return true; }                  // 记录太少 → 未完成
+    ix.seek(sz - 8);
+    char rec[9];
+    for (uint8_t i = 0; i < 8; i++) rec[i] = (char)ix.read();
+    rec[8] = '\0';
+    ix.close();
+    uint32_t tail = strtoul(rec, nullptr, 10);
+    File tx = readerFs().open(recentReadPath.c_str(), "r");
+    uint32_t tsz = tx ? tx.size() : 0;
+    if (tx) tx.close();
+    if (tsz == 0) return false;                                // 书不存在 → 不挡休眠
+    return tail != tsz;                                        // 尾记录≠txt大小 → 未完成
+}
+
+// 后台续建"最近阅读"那本书的索引(不切换界面); 返回是否已进入构建态
+static bool resumePendingIndexBuild() {
+    if (txtIndexBuilding) return true;
+    if (recentReadPath.length() == 0) return false;
+    txtPath = recentReadPath;
+    txtIndexPath = txtPath;
+    int dot = txtIndexPath.lastIndexOf('.');
+    if (dot > 0) txtIndexPath = txtIndexPath.substring(0, dot);
+    txtIndexPath += readerIsPortrait() ? ".v1" : ".i1";
+    txtChapterPath = txtPath;
+    if (dot > 0) txtChapterPath = txtChapterPath.substring(0, dot);
+    txtChapterPath += readerIsPortrait() ? ".vz1" : ".z1";
+    if (txtFile) txtFile.close();
+    txtFile = readerFs().open(txtPath.c_str(), "r");
+    if (!txtFile) { traceFmt("IDX_AUTO_RESUME no-txt path=%s", txtPath.c_str()); return false; }
+    traceFmt("IDX_AUTO_RESUME begin path=%s", txtPath.c_str());
+    beginResumeIndexBuildFromPartial();
+    return txtIndexBuilding;
+}
+
+// 统一判定: 当前是否有"构建任务"(正在构建, 或存在未完成索引并已成功续建)
+static bool buildTaskActiveOrResumed() {
+    if (txtIndexBuilding) return true;
+    if (!indexBuildPendingForRecent()) return false;
+    if (resumePendingIndexBuild()) return true;
+    traceFmt("SLEEP_PENDING_UNRESUMABLE");
+    return false;
+}
 
 void notePhysicalKeyActivity(int r2, int r3) {
     // 只认真实按键事件(短按/长按边沿), 不认持续按压态: 电源噪声(EPD 刷新/SD 写卡的
     // 大电流脉冲经电源耦合到 GPIO3=RX / GPIO0=DC)会误判"一直按住", 永久刷新休眠计时
     // → 构建期间永不自动休眠。真实交互不存在按住超过 5 分钟的操作, 按键事件足以反映活跃。
-    if (r2 || r3) lastPhysicalKeyMs = millis();
+    if (r2 || r3) {
+        lastPhysicalKeyMs = millis();       // ③ 任何按键重置倒计时
+        gSleepDeferForBuild = false;        // ③ 用户还在操作 → 取消"构建完成后休眠"待办
+    }
 }
 
 void drawSleepNotice() {
@@ -4493,12 +4566,15 @@ void saveSleepRecord() {
     rec.fromSleep = gSleepRecordFromSleep ? 1 : 0;
     gSleepRecordFromSleep = false;   // 一次性标志: 读走即清, 防误传
     currentPath.toCharArray(rec.path, sizeof(rec.path));
-    // 快照写入内部 LittleFS(阅读状态归 LittleFS): 不再需要 SD 总线恢复(P4 要求阅读期间零 SD 访问)
-
-    // FILE_WRITE 在当前 SD 库中可能是追加模式；先删除旧快照，避免读取到旧记录。
+    // 介质跟随: SD 介质下刚做过 EPD 局刷/全刷 → SPI 可能停在 EPD 侧, 首次 open 会失败(实测 SLEEP_SAVE open-fail)。
+    // 这里失败就恢复一次总线再重试; 内部介质下 readerBusReady 恒真、零开销。
     bool removed = readerFs().exists(SLEEP_RECORD_PATH) ? readerFs().remove(SLEEP_RECORD_PATH) : true;
-    debugFmt("UI_SAVE_PRE exists=%d removed=%d", readerFs().exists(SLEEP_RECORD_PATH) ? 1 : 0, removed ? 1 : 0);
     File f = readerFs().open(SLEEP_RECORD_PATH, "w");
+    if (!f) {
+        readerBusReady("sleep_save_retry");
+        f = readerFs().open(SLEEP_RECORD_PATH, "w");
+    }
+    debugFmt("UI_SAVE_PRE exists=%d removed=%d", readerFs().exists(SLEEP_RECORD_PATH) ? 1 : 0, removed ? 1 : 0);
     if (!f) {
         debugLine("SLEEP_SAVE open-fail");
         return;
@@ -4566,6 +4642,9 @@ void enterSleepMode() {
     redrawCurrentPage();          // 立即关菜单画面, 重绘纯正文/当前页
     drawSleepNotice();            // 右上角"休眠中" (局刷)
     gSleepRecordFromSleep = true; // 标记本次为深睡: 唤醒后需局刷擦掉"休眠中"残留
+    // 介质跟随: SD 介质下刚做过局刷(SPI 在 EPD 侧) → 写睡眠记录前必须恢复 SD 总线;
+    // 内部介质 = 恒真(实测回归: 漏了这步 → SLEEP_SAVE open-fail, 睡眠记录写不进去)。
+    readerBusReady("sleep_save");
     saveSleepRecord();
     epd.sleep();   // SSD1680 深睡 (面板掉电), 保留 RAM 中的当前页状态
 
@@ -5770,6 +5849,40 @@ void enterMarksList() {
     // 睡眠快照降级: saveSleepRecord 将 APP_MARKS 映射为 APP_READER (唤醒回正文)
 }
 
+#if TEST_CLEANUP
+// ===== 仅验收用: 清理测试产物 (默认 0, 产品固件不编译) =====
+// 删除自动化验收生成的合成测试书/索引, 并清掉指向它们的最近阅读/睡眠记录,
+// 避免设备开机自动恢复进"重复段落内容"的测试书(用户观感 = 卡在固定页)。
+static void testCleanupRun(const char *tag) {
+    const char *victims[] = {
+        "/IMPORT_T2.txt", "/IMPORT_T2.i1", "/IMPORT_T2.z1",
+        "/IMPORT_T6.txt", "/IMPORT_T6.i1", "/IMPORT_T6.z1",
+        "/IMPORT_T7.txt", "/IMPORT_T7.i1", "/IMPORT_T7.z1",
+        "/IMPORT_T8.txt", "/IMPORT_T8.i1", "/IMPORT_T8.z1",
+        "/T1_300k.txt", "/T1_300k.i1", "/T1_300k.z1",
+        "/PEND_T1.txt", "/PEND_T1.i1", "/PEND_T1.z1", "/SEED_A.txt", "/SEED_A.i1", "/SEED_A.z1",
+        "/IMPORT_T2.bm", "/IMPORT_T8.bm", nullptr
+    };
+    digitalWrite(EPD_CS_PIN, HIGH); digitalWrite(5, HIGH); pinMode(5, OUTPUT);
+    bool sdOk = SD.begin(5, SD_SCK_MHZ(20));
+    int n = 0;
+    for (int i = 0; victims[i]; i++) {
+        if (activeFileFs().exists(victims[i])) { activeFileFs().remove(victims[i]); Serial.printf_P(PSTR("CLEANUP_FS %s\n"), victims[i]); n++; }
+    }
+    if (LittleFS.begin()) {
+        for (int i = 0; victims[i]; i++) {
+            if (LittleFS.exists(victims[i])) { LittleFS.remove(victims[i]); Serial.printf_P(PSTR("CLEANUP_LFS %s\n"), victims[i]); n++; }
+        }
+    }
+    const char *state[] = { "/recentread.dat", "/sleepmode.dat", nullptr };
+    for (int i = 0; state[i]; i++) {
+        if (activeFileFs().exists(state[i])) { activeFileFs().remove(state[i]); Serial.printf_P(PSTR("CLEANUP_FS %s\n"), state[i]); n++; }
+        if (LittleFS.exists(state[i])) { LittleFS.remove(state[i]); Serial.printf_P(PSTR("CLEANUP_LFS %s\n"), state[i]); n++; }
+    }
+    Serial.printf_P(PSTR("CLEANUP_DONE tag=%s sd=%d removed=%d\n"), tag, sdOk ? 1 : 0, n);
+}
+#endif
+
 void setup() {
     // 调试日志写 SD，避免 GPIO3/RX 与串口冲突。
     // 注意: 不在此处全局禁用看门狗!
@@ -5783,6 +5896,10 @@ void setup() {
 
     Serial.begin(DEBUG_BAUD);
     delay(20);
+
+#if TEST_CLEANUP
+    testCleanupRun("early");   // 早跑一次(部分机型此处 SD 未挂载, 故 SD 初始化后再跑一次)
+#endif
     Serial.printf("[u=%lu][I][heap=%lu stack=%lu] BOOT reason=%s info=%s\n",
                   (unsigned long)millis(), (unsigned long)ESP.getFreeHeap(),
                   (unsigned long)ESP.getFreeContStack(), ESP.getResetReason().c_str(),
@@ -5823,6 +5940,9 @@ void setup() {
         traceFmt("SD_READY cs=5 speed=20MHz");
     }
     debugFmt("SD begin=%d wantSd=%d local=%d", sdOk ? 1 : 0, wantSd ? 1 : 0, gBrowseLocal ? 1 : 0);
+#if TEST_CLEANUP
+    testCleanupRun("afterSD");   // SD 已挂载: 再跑一次, 确保测试产物被真正删除
+#endif
 
     // ---------- BOOT_AP_MODE: 重启默认进配网界面引导 (AP 热点管理页 192.168.4.1) ----------
     // 条件编译开启时, 跳过 KEY3 窗口/最近阅读分流, 直接启动 AP 配网。
@@ -6072,6 +6192,15 @@ void setup() {
     // 未按: 保持上面重绘的恢复界面, 无提示框需清除, 不做额外画面操作
     gBootHintPage = 0;            // 未消费(未走阅读恢复)则清掉, 防后续 openRecentRead 误用陈旧页号
     gBootPartialRefresh = false;  // 同上: 浏览/首页分支未消费则清掉, 防后续 startTxtReader 误用
+
+#if TEST_FORCE_HOME
+    // 仅测试: 启动流程(含 loadRecentReadSummary)走完后强制停在主页,
+    // 用于验证"主页 + 未完成索引 → 自动续建 + 挡休眠"。
+    appMode = APP_HOME;
+    renderHome(true);
+    Serial.printf_P(PSTR("TEST_FORCE_HOME_END recent=%s pending=%d\n"),
+                    recentReadPath.c_str(), indexBuildPendingForRecent() ? 1 : 0);
+#endif
 }
 
 // ===== P3/P4 自动化验收钩子 (仅测试固件; 默认编译不参与) =====
@@ -6081,8 +6210,80 @@ void setup() {
 #if READER_AUTOTEST
 static void readerAutotestRun() {
     // 可选: 先把内部书复制一份到 SD(仅验收用), 用于验证 "SD→LittleFS 自动导入" 成功路径
-#if IMPORT_TEST_SEED
-    const char *bookPath = "/IMPORT_T2.txt";   // 种子: 从内部复制到 SD 的新名字(强制走导入拷贝路径)
+#if TEST_PEND_CLONE
+    // 仅测试: 从 SD 根目录第一本 .txt 复制前 200KB 成 /PEND_T1.txt (非破坏性, 不碰原书),
+    // 用于人为制造"未完成索引"场景(配合 IMPORT_TEST_OPEN 启动构建, 再中途复位)。
+    static char pendBuf[24];
+    snprintf(pendBuf, sizeof(pendBuf), "/PEND_T1.txt");
+    const char *bookPath = pendBuf;
+    {
+        if (activeFsBusReady("pend_clone")) {
+            if (!activeFileFs().exists(pendBuf)) {
+                String src;
+                Dir d = activeFileFs().openDir("/");
+                while (d.next()) {
+                    if (d.isDirectory()) continue;
+                    String nm = d.fileName();
+                    if (!nm.endsWith(".txt")) continue;
+                    if (nm.startsWith("IMPORT_") || nm.startsWith("PEND_") ||
+                        nm.startsWith("T1_") || nm.startsWith("T2_") || nm.startsWith("T3_")) continue;
+                    src = "/" + nm;
+                    break;
+                }
+                if (src.length()) {
+                    File a = activeFileFs().open(src.c_str(), "r");
+                    File b = a ? activeFileFs().open(pendBuf, "w") : File();
+                    if (a && b) {
+                        static uint8_t cbuf[512];
+                        uint32_t done = 0;
+                        while (a.available() && done < 200UL * 1024UL) {
+                            size_t k = a.read(cbuf, sizeof(cbuf));
+                            if (!k) break;
+                            if (b.write(cbuf, k) != k) break;
+                            done += k;
+                            ESP.wdtFeed();
+                        }
+                        Serial.printf_P(PSTR("PEND_CLONE_OK src=%s bytes=%lu\n"), src.c_str(), (unsigned long)done);
+                    } else {
+                        Serial.println(F("PEND_CLONE_OPEN_FAIL"));
+                    }
+                    if (b) b.close();
+                    if (a) a.close();
+                } else {
+                    Serial.println(F("PEND_CLONE_NO_TXT"));
+                }
+            } else {
+                Serial.println(F("PEND_CLONE_EXISTS"));
+            }
+        } else {
+            Serial.println(F("PEND_CLONE_BUS_FAIL"));
+        }
+    }
+#elif TEST_SEED_LFS
+    // 仅测试: 往内部 LittleFS 写一本小的合成书(段落唯一编号) → 用于制造"未完成索引"场景
+    const char *bookPath = "/SEED_A.txt";
+    if (LittleFS.begin()) {
+        File w = LittleFS.open(bookPath, "w");
+        if (w) {
+            for (int c = 1; c <= 40; c++) {
+                w.printf("第%d章 测试\n\n", c);
+                for (int p = 1; p <= 12; p++) {
+                    w.printf("　　【%05d】内部介质合成测试段落，用于制造未完成索引场景。（第%d段/第%d章）\n\n",
+                             c * 100 + p, p, c);
+                }
+            }
+            w.close();
+            Serial.println(F("SEED_LFS_OK"));
+        }
+    }
+#elif IMPORT_TEST_SEED
+    // 种子文件名用编号宏(避免 -D 传字符串的引号转义问题): -DIMPORT_TEST_SEED_NO=9 → /IMPORT_T9.txt
+#ifndef IMPORT_TEST_SEED_NO
+#define IMPORT_TEST_SEED_NO 2
+#endif
+    static char seedPathBuf[32];
+    snprintf(seedPathBuf, sizeof(seedPathBuf), "/IMPORT_T%u.txt", (unsigned)IMPORT_TEST_SEED_NO);
+    const char *bookPath = seedPathBuf;   // 种子: 从内部复制到 SD 的新名字(强制走导入拷贝路径)
     {
         if (LittleFS.begin()) {
             File a = LittleFS.open("/T1_300k.txt", "r");
@@ -6121,6 +6322,12 @@ static void readerAutotestRun() {
     Serial.printf_P(PSTR("IMPORT_TEST_OPEN book=%s\n"), bookPath);
     startTxtReader(bookPath, false);
     return;
+#endif
+#if TEST_FORCE_HOME
+    // 仅测试: 启动流程走完后强制停在主页(用于验证"主页 + 未完成索引 → 自动续建 + 挡休眠")
+    appMode = APP_HOME;
+    renderHome(true);
+    Serial.println(F("TEST_FORCE_HOME_END"));
 #endif
     Serial.printf_P(PSTR("AUTOTEST_BEGIN book=%s pages=%d rf=%d local=%d\n"),
                     bookPath, READER_AUTOTEST_PAGES,
@@ -6201,9 +6408,15 @@ void loop() {
     if (!txtIndexBuilding && (appMode == APP_HOME || appMode == APP_CLOCK)) {
         int sc = clockManagerSilentCalTick();
         if (sc == 2) {
-            Serial.println(F("SILENT_CAL fail & force -> sleep"));
-            enterSleepMode();
-            return;
+            if (buildTaskActiveOrResumed()) {
+                // 构建任务未完成: 静默校准的"停机休眠"同样延后到构建完成(用户规则: 构建期任何界面都不休眠)
+                gSleepDeferForBuild = true;
+                traceFmt("SILENT_CAL_DEFER building=1 mode=%d", appMode);
+            } else {
+                Serial.println(F("SILENT_CAL fail & force -> sleep"));
+                enterSleepMode();
+                return;
+            }
         }
     }
     if (diagLastLoopMs) {
@@ -6275,8 +6488,25 @@ void loop() {
         traceFmt("BATCHK mv=%d page=%lu mode=%d lfs=%d", lastBatteryMV, (unsigned long)txtPage, appMode, lfsOk);
     }
 
+    // ===== 构建期禁休眠 (用户定稿) =====
+    // ① 构建中: 到 5 分钟也不休眠, 只标记"待休眠" ② 构建一结束立刻执行待休眠 ③ 按键会取消待休眠(见 notePhysicalKeyActivity)
+    if (gSleepDeferForBuild && !txtIndexBuilding) {
+#if SERIAL_REMOTE && !REMOTE_ALLOW_SLEEP
+        gSleepDeferForBuild = false;   // 远程控制版禁用一切自动休眠(深睡无法被串口唤醒)
+#else
+        if (appMode == APP_CLOCK_DISGUISE || appMode == APP_NETWORK) {
+            gSleepDeferForBuild = false;   // 这两类界面本就不自动休眠(伪装闹钟 / AP 配网会话)
+        } else {
+            gSleepDeferForBuild = false;
+            traceFmt("SLEEP_DEFER_EXEC idle=%lu mode=%d", (unsigned long)(millis() - lastPhysicalKeyMs), appMode);
+            enterSleepMode();
+            return;
+        }
+#endif
+    }
+
     if (millis() - lastPhysicalKeyMs >= AUTO_SLEEP_MS) {
-#if SERIAL_REMOTE
+#if SERIAL_REMOTE && !REMOTE_ALLOW_SLEEP
         // 远程控制专用版: 深睡只能靠 KEY1 硬件复位唤醒, 摸不到设备时一旦睡着就再也醒不来,
         // 串口无法唤醒深睡 → 远程模式禁用自动休眠, 保证串口稳定在线。
         (void)0;
@@ -6286,10 +6516,20 @@ void loop() {
         //  - AP 配网(APP_NETWORK): 用户用手机管理页上传/浏览, 不按设备按键, 5 分钟无按键会
         //    误判 idle → 自动休眠重启 → 手机断连 → 上传 POST 到不了设备(实测根因 SLEEP_AUTO mode=4)
         if (appMode != APP_CLOCK_DISGUISE && appMode != APP_NETWORK) {
-            traceFmt("SLEEP_AUTO idle=%lu building=%d mode=%d", (unsigned long)(millis() - lastPhysicalKeyMs),
-                     txtIndexBuilding ? 1 : 0, appMode);
-            enterSleepMode();
-            return;
+            bool buildTask = buildTaskActiveOrResumed();
+            if (buildTask) {
+                // ① 构建任务未完成: 任何界面都不休眠, 记待休眠(构建结束即睡)
+                if (!gSleepDeferForBuild) {
+                    gSleepDeferForBuild = true;
+                    traceFmt("SLEEP_DEFER building=%d idle=%lu mode=%d", txtIndexBuilding ? 1 : 0,
+                             (unsigned long)(millis() - lastPhysicalKeyMs), appMode);
+                }
+            } else {
+                traceFmt("SLEEP_AUTO idle=%lu building=%d mode=%d", (unsigned long)(millis() - lastPhysicalKeyMs),
+                         txtIndexBuilding ? 1 : 0, appMode);
+                enterSleepMode();
+                return;
+            }
         }
 #endif
     }

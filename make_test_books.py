@@ -22,17 +22,21 @@ BODY = ("他沿着长街慢慢走着，风从屋檐下穿过，带起细碎的�
 
 
 def make_book(path, target_bytes):
+    """生成测试书: 每个段落带唯一编号, 保证相邻页文字明显不同。
+    (旧版每段都是同一句 → 相邻页看起来一模一样, 会被误判为"卡在固定页")"""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     written = 0
     chapter = 0
+    para = 0
     with open(path, "w", encoding="utf-8", newline="\n") as fh:
         while written < target_bytes:
             chapter += 1
             head = "第%d章 %s\n\n" % (chapter, CHAPTER_WORDS[(chapter - 1) % len(CHAPTER_WORDS)])
             fh.write(head)
             written += len(head.encode("utf-8"))
-            for para in range(12):
-                line = "　　" + BODY + "\n\n"          # 段首两个全角空格(与固件排版一致)
+            for _ in range(12):
+                para += 1
+                line = "　　【%06d】" % para + BODY[:40] + "（第%d段/第%d章）\n\n" % (para, chapter)
                 fh.write(line)
                 written += len(line.encode("utf-8"))
                 if written >= target_bytes:
