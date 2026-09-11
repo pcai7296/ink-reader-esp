@@ -160,8 +160,23 @@ bool ofsEntryVisible(const char *name, bool isDir) {
   return ofsEntryVisibleEx(name, isDir, true);
 }
 
-// /fs/list 实时路径 scratch(深链实测 stack=0, 大局部一律 static; 单线程顺序安全)
-static char gLsPath[300];
+// ---- P2 内存审计: Web handler 大 scratch 共享竞技场 (2026-09) ----
+// 七组缓冲两两跨请求互斥（单线程 handleClient 顺序分发, handler 不可重入）:
+//   A /fs/list  : lsPath@0(300) + lsBuf@300(640) + lsNameEsc@940(512) = 1452
+//   B /fs/edit  : opPath@0(300) opA@300 opB@600 opC@900 opLab@1200(220) = 1420
+//   C /fs/file  : filePath@0(300)      D 上传: upPath@0(300, 跨回调存活但无并发)
+//   E /fm       : fmBuf@0(512)         F /api/*: apiParent@0(300, file_api.cpp extern)
+// 原各组独立静态数组合计 ~4.6KB → 竞技场 1456B。槽位偏移固定, 不做运行时分配;
+// 绝不放栈 (HTTP 深链剩余栈 0~100B 实测, 见下方各 handler 注释)。
+char gWebArena[1456];   // P2: 外部可见 (file_api.cpp 的 apiParent/fmBuf 槽位也指向这里)
+static char *gLsPath = gWebArena + 0;
+char *gOpPath = gWebArena + 0;      // 主路径
+char *gOpA    = gWebArena + 300;    // src / s2
+char *gOpB    = gWebArena + 600;    // 目标 t / 临时
+char *gOpC    = gWebArena + 900;    // 父目录等
+char *gOpLab  = gWebArena + 1200;   // 通知文案
+static char *gOfsFilePath = gWebArena + 0;
+char *ofsUpPath = gWebArena + 0;
 
 static void ofsReply(int code, const char *msg) { srv().send(code, "text/plain", msg); }
 static void ofsReplyOKWithMsg(const char *msg)  { srv().send(200, "text/plain", msg); }
@@ -220,14 +235,14 @@ static void ofsListItemCb(const SdEntry *e, void *ctx) {
   // 不该显示的不显示: 与缓存同一入口 ofsEntryVisibleEx(hideAuto=请求开关) —— 视图一致
   // 过滤项不发内容, 不翻转 first（保持输出 JSON 连续）
   if (!ofsEntryVisibleEx(e->name, e->isDir, lc->hideAuto)) return;
-  static char buf[640];
-  static char nameEsc[512];
-  ofsJsonEscape(e->name, nameEsc, sizeof(nameEsc));
+  char *buf = gWebArena + 300;       // P2 槽位 lsBuf(640)
+  char *nameEsc = gWebArena + 940;   // P2 槽位 lsNameEsc(512)
+  ofsJsonEscape(e->name, nameEsc, 512);
   if (e->isDir) {
-    snprintf(buf, sizeof(buf), "%s{\"type\":\"dir\",\"name\":\"%s\"}",
+    snprintf(buf, 640, "%s{\"type\":\"dir\",\"name\":\"%s\"}",
              lc->first ? "" : ",", nameEsc);
   } else {
-    snprintf(buf, sizeof(buf), "%s{\"type\":\"file\",\"size\":\"%llu\",\"name\":\"%s\"}",
+    snprintf(buf, 640, "%s{\"type\":\"file\",\"size\":\"%llu\",\"name\":\"%s\"}",
              lc->first ? "" : ",", (unsigned long long)e->size, nameEsc);
   }
   lc->first = false;
@@ -300,12 +315,8 @@ static void handleOfsList() {
 // ---- PUT/DELETE 改路径 handler 的栈瘦身(2026-09) ----
 // 实测: 这些 handler 处于 WiFi/HTTP 深链时剩余连续栈仅 0~100B; 任何 ≥~150B 栈局部(原 path[300]+
 // lab/d/t/s2 等)都会栈溢出 → Exception 2 / Soft WDT / 系统重启(串口多次实锤)。单线程顺序处理、
-// handler 不可重入 → 用文件级 static 暂存(参照 handleOfsFile path 的做法), 零堆分配。
-static char gOpPath[300];   // 主路径
-static char gOpA[300];      // src / s2
-static char gOpB[300];      // 目标 t / 临时
-static char gOpC[300];      // 父目录等
-static char gOpLab[220];    // 通知文案
+// handler 不可重入 → 用共享竞技场槽位(gOp*, 见文件顶部 P2 注释), 零堆分配。
+// (原 5 个独立 static 数组已并入 gWebArena)
 
 // ---- PUT /fs/edit: 建文件/夹（无 src）或 重命名/移动（有 src）----
 static void handleOfsEditPut() {
@@ -371,7 +382,7 @@ static void handleOfsEditPut() {
   if (strcmp(s2, t) == 0) { ofsReplyBadRequest("PATH FILE EXISTS"); return; }
   if (activeFileFs().exists(t)) { ofsReplyBadRequest("PATH FILE EXISTS"); return; }
   char *lab = gOpLab;
-  snprintf(lab, sizeof(gOpLab), "重命名/移动:%s → %s", s2, t);
+  snprintf(lab, 220, "重命名/移动:%s → %s", s2, t);
   ofsOpReport(OFS_OP_PHASE_START, lab);
   ESP.wdtFeed();
   if (!activeFileFs().rename(s2, t)) { ofsOpReport(OFS_OP_PHASE_FAIL, lab); ofsReply(500, "RENAME FAILED"); return; }
@@ -436,7 +447,7 @@ static void handleOfsEditDelete() {
   if (!activeFileFs().exists(path)) { ofsReply(404, "FILE NOT FOUND"); return; }
   // ★ 通用操作墨水屏通知: 动手删除前 START, 成/败 DONE/FAIL（渲染在 loop, 此处只记录）
   char *lab = gOpLab;
-  snprintf(lab, sizeof(gOpLab), "删除:%s", path);
+  snprintf(lab, 220, "删除:%s", path);
   ofsOpReport(OFS_OP_PHASE_START, lab);
   ESP.wdtFeed();
   int count = 0;
@@ -452,7 +463,7 @@ static void handleOfsEditDelete() {
 
 // ---- POST /fs/edit: 官方式简单上传（multipart, 4 参路由, 纯流式对齐官方 handleFileUpload）----
 static File ofsUpFile;
-static char ofsUpPath[300];
+// (P2: ofsUpPath 并入 gWebArena@0, 见文件顶部)
 static uint64_t ofsUpSize = 0;
 static int ofsUpErr = 0;
 static int ofsUpErrCode = 0;
@@ -527,7 +538,7 @@ static void handleOfsEditUploadCb() {
     ofsUpReset();
     String filename = upload.filename;
     if (!filename.startsWith("/")) filename = "/" + filename;
-    if (!normalizeApiPath(filename.c_str(), ofsUpPath, sizeof(ofsUpPath))) { ofsUpFail(400, "BAD PATH"); return; }
+    if (!normalizeApiPath(filename.c_str(), ofsUpPath, 300)) { ofsUpFail(400, "BAD PATH"); return; }
     if (strcmp(ofsUpPath, "/") == 0) { ofsUpFail(400, "BAD PATH"); return; }
     if (isProtectedPath(ofsUpPath)) { ofsUpFail(403, "protected"); return; }
     if (!activeFsBusReady("fs_upopen")) { ofsUpFail(500, "FS INIT ERROR"); return; }
@@ -627,8 +638,8 @@ static void handleOfsFile() {
   //   plain/enc/disp 1,256B 改为请求级 heap、sendHeader 后立即 free(主体传输阶段不存在);
   //   path[300] 需贯穿 handler(含 START/DONE 上报), 保留 static——单线程顺序处理、
   //   handler 不可重入/不递归, static 安全; ③绝不把这 1.5K 放回栈(实测 Ex29)。
-  static char path[300];
-  if (!normalizeApiPath(pathArg.c_str(), path, sizeof(path))) { ofsReplyBadRequest("BAD PATH"); return; }
+  char *path = gOfsFilePath;   // P2 槽位 filePath(300), 贯穿下载传输(禁栈, 见上)
+  if (!normalizeApiPath(pathArg.c_str(), path, 300)) { ofsReplyBadRequest("BAD PATH"); return; }
   if (isUploadingTemp(path)) { ofsReply(403, "upload_in_progress"); return; }
   if (!activeFsBusReady("fs_file")) { ofsReply(500, "FS INIT ERROR"); return; }
   File f = activeFileFs().open(path, "r");
