@@ -52,12 +52,12 @@ SD→阅读 的旧路径（每页 `SD.open` 索引、SD 正文、SD 枚举章节
 ```
 P0 冻结当前版本 + 基线（本文档 + tag）                    ✅
 P1 阅读数据源统一到 LittleFS（reader 不再直接依赖 SdFat）      ✅ 代码完成（编译过；待实机 P3 验收）
-P2 SD 从阅读路径彻底移除（进阅读 SD.end；退出再挂载）           ⏳ SD 已不在阅读链路；显式 end/remount 待做
-P3 最小阅读闭环（开书 → 第1页 → 上/下页 → 退出）
-P4 连续翻页稳定性验收（A）
-P5 WiFi 生命周期修复（时钟/天气/配网/同步/进阅读强制 OFF）—— 独立提交   ✅（代码完成，待实机看 RF_OFF 日志）
-P6 进度批量写入（5min / 50 页 / 退出 / 换书；RAM 实时，落盘节流）
-P7 EPD powerOff A/B（不改存储；A=LittleFS+WiFiOFF，B=再加每页 powerOff）
+P2 SD 从阅读路径彻底移除（进阅读 SD.end；退出再挂载）           ✅ 代码完成（进阅读 `SD.end()`+CS 高+日志 `SD_OFF`; 文件管理器按需 `SD.begin`）
+P3 最小阅读闭环（开书 → 第1页 → 上/下页 → 退出）              ⏳ 待用户上传 T1 到 LittleFS 后实机验证
+P4 连续翻页稳定性验收（A）                                    ⏳ 待 P3
+P5 WiFi 生命周期修复（时钟/天气/配网/同步/进阅读强制 OFF）—— 独立提交   ✅（代码 + 已烧录，待看 RF_OFF 日志）
+P6 进度批量写入（5min / 50 页 / 退出 / 换书；RAM 实时，落盘节流）  ✅ 代码完成（写盘含构建期 sidecar）
+P7 EPD powerOff A/B（不改存储；A=LittleFS+WiFiOFF，B=再加每页 powerOff）  ⏳ 已预置编译开关 `-DREADER_EPD_PAGEOFF=1`（默认 0=保持上电），待 A 版稳定后 A/B 测试
 P8 恢复阅读功能（字体/自动翻页/刷新间隔/旋转/跳转/标签/休眠）
 P9 恢复网络功能（续读进度的网络同步/天气/Web 配置/配网）—— 不改阅读数据源
 P10 SD → LittleFS 导入系统（容量与 100MB 前置校验 + 校验回读）
@@ -107,13 +107,22 @@ EPD 的 `powerOff()` 改动**不与存储迁移混提**（留到 P7 单独 A/B�
 - 退出阅读回文件管理器/首页时：按需重新挂载（`SD.begin(5, SD_SCK_MHZ(20))` / `SDFS.begin()`），并刷新目录缓存。
 - 阅读期间 `gBrowseLocal` 语义统一为“内部介质”，与 SD 状态解耦，避免状态组合。
 
-## 10. 测试书部署（P3/P4 前置）
-- 第一版**不实现导入 UI**（P10 再做）：用 PC 端 `mklittlefs` 把测试书打进 LittleFS 镜像一起烧录（`python esp_dev.py --steps flash --fs 0x200000=build/data.littlefs.bin`）。
-- 测试书建议：先用**PC 合成的小书**（≤1.8MB UTF-8 中文，验证翻页/索引/章节闭环），再用真实小书复测；55MB 级书本版本不可导入（容量边界见 §3）。
-- 设备内浏览路径已有：`gBrowseLocal` 本地介质模式（设置里关闭 SD/无卡时自动进入），可在文件管理器里浏览 LittleFS 并打开 txt（P1 后即可进入阅读）。
+## 10. 测试书部署（P3/P4 前置；用户定稿）
+- **用现有 Web 文件管理直接上传进 LittleFS**：设备切内部介质模式（设置里关闭 SD / 无卡）→ 配网页 `/fs/edit` 上传 `T1`(100–300KB) / `T2`(1–1.5MB) / `T3`(贴近容量上限) 到 LittleFS 根目录。
+- **不做导入功能、不经 SD 中转**（P10 再实现 SD→LittleFS 正式导入 + 容量/100MB 前置校验）。
+- `.i1/.z1` 不必上传：首次打开由设备在 LittleFS 上构建（顺带验证构建器）。
+- 设备内浏览路径已有：`gBrowseLocal` 本地介质模式，可在文件管理器里浏览 LittleFS 并打开 txt（P1 后即可进入阅读）。
+
+## 11. P6b / P7 明细（2026-09）
+**P6b 统计节流**（`stats.cpp`）：原 `statsOnPageTurn()` 每翻一页写 `/stats/global.dat` + `/stats/books.dat`（各含 `.tmp`→rename，≈4+ 次 flash 操作/页）。现改为 RAM 累计，**每 50 页 / 5 分钟 / 会话结束 / 显式 `statsSave()`** 才落盘；`statsTick()` 由主 loop 每圈调用兜底。硬复位最多丢 ≤50 页计数（与验收 D 同口径）；会话计数仍在 `statsOnSessionEnd` 写入。
+
+**P7 EPD powerOff A/B**：
+- 预置编译开关 `READER_EPD_PAGEOFF`（默认 0）：`refresh(false)` 末尾，若 `appMode==APP_READER` 则 `epd.powerOff()`（对齐官方 `DisplayTxt.ino:433/847/1076` 每页断电）。
+- 编译 B 版：`arduino-cli compile --fqbn esp8266:esp8266:d1_mini --libraries libraries --build-property "compiler.cpp.extra_flags=-DREADER_EPD_PAGEOFF=1" --build-path build_p7_ab ink-reader-esp.ino`
+- A/B 对比项：平均电流（由 `BATCHK mv=` 每分钟日志换算）、翻页时间、连续翻页 1000 次、黑屏/残影、刷新失败、电池下降速度。
+- **判定原则**：若 B 版明显增加刷新异常，则保留 A（不改）。
 
 ## 7. P5 实现明细（WiFi 生命周期，2026-09）
-
 - 新增统一出口 `wifiManagerRfOff(reason)`（`wifi_manager.cpp`）：仅当 `WiFi.getMode()!=WIFI_OFF` 时 `WiFi.disconnect(true) + WiFi.mode(WIFI_OFF)`，并打印 `RF_OFF reason=… was=…`。
 - 调用点：时钟校准终态（校时成功 `clock_ntp_ok` / 天气时间成功 `clock_weather_ok` / 无凭据 `clock_no_creds` / WiFi 超时 `clock_wifi_timeout` / 天气失败 `clock_weather_fail` / 跳过 `clock_skip`）；天气页退出 `weather_exit`；配网页退出 `network_exit`；进入阅读 `reader_enter`（`startTxtReader`）；阅读循环兜底断言 `reader_assert`（任何漏关都会在此纠正并留日志）。
 - 依据：官方 `WifiShutdown()`（`Other.ino:25-29`）= `WiFi.mode(WIFI_OFF)`，在 `Clock_8025T.ino:93`、`DisplaySetup.ino:194-195`、`DisplayTxt.ino:854` 处调用（见 `REVERSE_NOTES.md §13`）。

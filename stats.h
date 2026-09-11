@@ -42,7 +42,10 @@ void statsInit();
 // 进入阅读: 记当前书 path, 检查今日/本周/连续天数重置
 void statsOnSessionStart(const char *path);
 // 翻页一次 (next/prev): 当前书 pageTurns + 全局 day/week/total 翻页
+// (P6b 节流: RAM 累计, 每 50 页或 5 分钟才落盘; 会话结束/显式 statsSave() 立即落盘)
 void statsOnPageTurn();
+// 主 loop 每圈调用: 5 分钟兜底落盘
+void statsTick();
 // 退出阅读: sessions +1, 写 books.dat + global.dat
 void statsOnSessionEnd();
 

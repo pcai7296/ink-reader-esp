@@ -34,6 +34,13 @@
 #include "nav_icons.h"   // 首页导航 13x13 图标: 文件/时钟/天气/配网/设置/返回
 #include "hitokoto.h"
 #include "bili_fans.h"
+
+// ===== P7 A/B 编译开关 (2026-09) =====
+// 0 = 阅读页局刷后保持面板上电 (现状; 连续局刷最稳)
+// 1 = 阅读页局刷后 powerOff (官方 DisplayTxt 每页断电行为; 省电但每次翻页多一次 powerOn)
+#ifndef READER_EPD_PAGEOFF
+#define READER_EPD_PAGEOFF 0
+#endif
 #include "bmp_show.h"
 #include "progress_sync.h"
 #include "file_api_fs.h"   // 上传状态接口 ofsUpSetPhaseCallback（"上传中/上传完毕"墨水屏状态）
@@ -650,6 +657,12 @@ uint32_t txtChapterCount = 0;
 bool txtIndexBuilding = false;
 uint32_t txtPendingProgress = 0;
 uint32_t txtIndexLastFlush = 0;
+// ---- P6 (2026-09) 进度节流状态: RAM 待写, 50 页/5 分钟/退出/换书 才落盘 LittleFS ----
+static uint32_t gProgPending = 0;
+static bool     gProgDirty = false;
+static bool     gProgPendingBuilding = false;
+static uint16_t gProgPagesSince = 0;
+static uint32_t gProgLastFlushMs = 0;
 uint16_t readerRot = 90;   // 阅读方向: 0/90/180/270 (内容相对物理面板顺时针角, 规范见 rot_map.h)
 bool readerIsPortrait() { return readerRot == 0 || readerRot == 180; }   // 竖类: 逻辑 128x296
 uint16_t storedToRot(uint8_t v) {   // EEPROM 兼容编码 → 角度 (0/1 旧值含义不变)
@@ -843,7 +856,9 @@ void renderChapterSpeedPopup();
 // UTF-8/章节辅助
 bool isChapterTitle(const char *line, char *title, size_t titleSize);
 uint32_t parsePageRecord(uint32_t page);
-bool writeProgress(uint32_t offset);   // 写 .i1[0] / sidecar; 失败重试并返回是否成功
+bool writeProgress(uint32_t offset);   // 登记待写进度(RAM 节流; 50页/5分钟自动落盘)
+bool progressFlushForce(const char *reason);   // 立即落盘待写进度(退出/换书/休眠)
+void progressTick();                            // 主 loop 每圈调用
 void drawReaderLine(int y, const String &line);
 
 void loadRecentReadSummary() {
@@ -2801,8 +2816,17 @@ int scanKey(struct KState &k, bool nowDown) {
 void refresh(bool full) {
     uint32_t started = millis();
     traceFmt("RENDER_START kind=%s fb=%u", full ? "FULL" : "PART", (unsigned)sizeof(fb));
-    if (full) epd.display(fb);
-    else epd.displayPartial(fb);
+    if (full) {
+        epd.display(fb);          // 全刷末尾内部已 powerOff (对齐官方)
+    } else {
+        epd.displayPartial(fb);
+#if READER_EPD_PAGEOFF
+        // ===== P7 A/B (2026-09): 阅读页局刷后也断电 =====
+        // 官方每页画完 display.powerOff() (DisplayTxt.ino:433/847/1076); 本机原为"局刷后保持上电"。
+        // 仅阅读模式生效(菜单/弹窗不受影响); 下次局刷 displayPartial 内部会先 powerOn。
+        if (appMode == APP_READER) epd.powerOff();
+#endif
+    }
     uint32_t elapsed = millis() - started;
     traceFmtLevel(elapsed > 3000 ? 'E' : elapsed > 1500 ? 'W' : 'I',
                   "RENDER_END kind=%s elapsed=%lu", full ? "FULL" : "PART", (unsigned long)elapsed);
@@ -3102,7 +3126,9 @@ void finishTxtIndexBuild() {
         zeroRec.print(rec);
         zeroRec.close();
     }
-    // 进度已合并进记录[0], 删除构建期 sidecar
+    // 进度已合并进记录[0], 删除构建期 sidecar (P6: 同时清待写标记, 避免重复落盘)
+    gProgDirty = false;
+    gProgPagesSince = 0;
     if (readerFs().exists((txtIndexPath + "p").c_str())) {
         readerFs().remove((txtIndexPath + "p").c_str());
         debugLine("IDX sidecar removed after merge");
@@ -3417,7 +3443,11 @@ uint32_t parsePageRecord(uint32_t page) {
     return parsePageRecordEx(page, &v) ? v : 0;
 }
 
-bool writeProgress(uint32_t offset) {
+// ---- P6 (2026-09): 进度节流 ----
+// 目标: 不再"每翻一页写 Flash"。RAM 保存实时 offset, 满足任一条件才落盘:
+//   ① 每 50 页  ② 每 5 分钟  ③ 退出阅读  ④ 换书/休眠
+// 断电最多丢 ≤50 页或 ≤5 分钟进度 (验收 D 允许)。构建中同样节流(sidecar)。
+static bool progressWriteToDisk(uint32_t offset) {
     // 防御: 页 >1 的进度偏移不可能为 0 (0=第 1 页)。写入 0 会把"当前阅读位置"打回开头
     // (原 parsePageRecord 失败返回 0 时曾把进度写成 0)。
     if (offset == 0 && txtPage > 1) {
@@ -3466,6 +3496,48 @@ bool writeProgress(uint32_t offset) {
     f.print(record);
     f.close();
     return true;
+}
+
+// 立即落盘待写进度 (退出/换书/休眠调用); 无待写内容则直接成功
+bool progressFlushForce(const char *reason) {
+    if (!gProgDirty) return true;
+    uint32_t off = gProgPending;
+    bool ok = progressWriteToDisk(off);
+    if (ok) {
+        gProgDirty = false;
+        gProgPagesSince = 0;
+        gProgLastFlushMs = millis();
+        traceFmt("PROG_FLUSH reason=%s off=%lu", reason ? reason : "?", (unsigned long)off);
+    } else {
+        traceFmtLevel('E', "PROG_FLUSH_FAIL reason=%s off=%lu", reason ? reason : "?", (unsigned long)off);
+    }
+    return ok;
+}
+
+// 每圈调用: 满足"50 页 / 5 分钟"任一条件即落盘
+void progressTick() {
+    if (!gProgDirty) return;
+    if (gProgPagesSince >= 50 || (millis() - gProgLastFlushMs) >= 300000UL) {
+        progressFlushForce("auto");
+    }
+}
+
+// 对外 API: 只登记待写(RAM), 到达阈值才真正写 Flash
+bool writeProgress(uint32_t offset) {
+    // 防御: 页 >1 的进度偏移不可能为 0 (0=第 1 页)。写入 0 会把"当前阅读位置"打回开头
+    if (offset == 0 && txtPage > 1) {
+        traceFmtLevel('E', "PROGRESS_ZERO_SKIP page=%lu", (unsigned long)txtPage);
+        return false;
+    }
+    gProgPending = offset;
+    gProgDirty = true;
+    gProgPendingBuilding = txtIndexBuilding;
+    gProgPagesSince++;
+    if (gProgLastFlushMs == 0) gProgLastFlushMs = millis();
+    if (gProgPagesSince >= 50 || (millis() - gProgLastFlushMs) >= 300000UL) {
+        return progressFlushForce("threshold");
+    }
+    return true;   // 已登记待写
 }
 
 // 读取当前阅读字节偏移 (.i1 记录[0]); 构建中/构建中断优先读 sidecar (txtIndexPath+"p")。
@@ -4440,6 +4512,7 @@ bool readSleepRecord(SleepRecord &rec) {
 }
 
 void enterSleepMode() {
+    progressFlushForce("sleep");   // P6: 休眠前落盘待写进度
     traceLine("SLEEP_ENTER");
     debugFmt("SLEEP mode=%d page=%lu chPage=%d chSel=%d speed=%u popup=%d",
              appMode, (unsigned long)txtPage, chapterPage, chapterSel, chapterSpeed,
@@ -4880,6 +4953,7 @@ static void abortIndexBuild() {
 }
 
 void closeTxtReader() {
+    progressFlushForce("close");   // P6: 退出阅读落盘待写进度
     if (txtIndexBuilding) {
         // 构建中退出: 保留构建句柄后台继续 (loop 公共 indexTaskStep 继续喂),
         // 只关 txtFile; finishTxtIndexBuild 用扫描句柄取 size, 不受影响。
@@ -4984,7 +5058,16 @@ void startTxtReader(const char *path, bool forceRebuild) {
     if (!gBrowseLocal) {
         showMsg("SD 仅文件管理", "请切到内部介质或先导入");
         return;
-    }    if (!isTxtPath(path)) {
+    }
+    progressFlushForce("book_change");   // P6: 换书前把上一本的待写进度落盘
+    // ===== P2: 阅读期间关闭 SD/SDFS =====
+    // 阅读数据全在 LittleFS; 关掉 SD 既省电(卡待机/寻道电流) 又彻底移除 GPIO5/GPIO12 争抢。
+    // 退出阅读后文件管理器按需重新挂载(listDir 内 SD.begin)。
+    SD.end();
+    digitalWrite(5, HIGH);
+    pinMode(5, OUTPUT);
+    traceFmt("SD_OFF reader_enter");
+    if (!isTxtPath(path)) {
         traceFmtLevel('W', "TXT unsupported path=%s", path ? path : "(null)");
         showMsg("不支持打开", "仅支持TXT文件");
         return;
@@ -5807,6 +5890,8 @@ void setup() {
 void loop() {
     uint32_t loopStarted = millis();
     clockManagerCompTick();   // 时钟手动补偿结算 (内部按分钟闸门, 芯片在场改写芯片秒)
+    progressTick();           // P6: 阅读进度节流落盘 (50 页 / 5 分钟)
+    statsTick();              // P6b: 阅读统计节流落盘 (50 页 / 5 分钟)
     // 每天 23:30 静默联网校准 (仅空闲界面且非构建/非配网; 官方: 开=失败停机休眠 / 关=不睡次日再试)
     if (!txtIndexBuilding && (appMode == APP_HOME || appMode == APP_CLOCK)) {
         int sc = clockManagerSilentCalTick();

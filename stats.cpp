@@ -179,6 +179,14 @@ void statsOnSessionStart(const char *path) {
     gBooks[gSessionBook].lastReadDay = curDayKey;
 }
 
+// ---- P6b (2026-09): 统计落盘节流 ----
+// 原实现每翻一页写 /stats/global.dat + /stats/books.dat(各含 .tmp→rename) → 每页 4+ 次 flash 操作。
+// 现改为 RAM 累计, 满足 ①每 50 页 ②每 5 分钟 ③会话结束 ④显式 statsSave() 才落盘。
+// 硬复位(KEY1)最多丢 ≤50 页计数(验收 D 同口径); 会话计数仍在 statsOnSessionEnd 时写入。
+static bool gStatsDirty = false;
+static uint16_t gStatsTurnsSince = 0;
+static uint32_t gStatsLastSaveMs = 0;
+
 void statsOnPageTurn() {
     if (!gInSession) return;
     if (gSessionBook >= 0) gBooks[gSessionBook].pageTurns++;
@@ -187,8 +195,15 @@ void statsOnPageTurn() {
         gGlobal.dayPageTurns++;
         gGlobal.weekPageTurns++;
     }
-    // 翻页即落盘: 用户可能随时复位键(掉电), closeTxtReader 不会执行, 不能只靠 sessionEnd 保存
-    statsSave();
+    gStatsDirty = true;
+    gStatsTurnsSince++;
+    if (gStatsTurnsSince >= 50 || (millis() - gStatsLastSaveMs) >= 300000UL) statsSave();
+}
+
+// 主 loop 每圈调用: 5 分钟兜底落盘
+void statsTick() {
+    if (!gStatsDirty) return;
+    if ((millis() - gStatsLastSaveMs) >= 300000UL) statsSave();
 }
 
 void statsOnSessionEnd() {
@@ -208,6 +223,9 @@ void statsSave() {
     if (!LittleFS.exists(STATS_DIR)) LittleFS.mkdir(STATS_DIR);
     writePayload(STATS_GLOBAL, &gGlobal, sizeof(gGlobal));
     writePayload(STATS_BOOKS, &gBooks, sizeof(gBooks));
+    gStatsDirty = false;
+    gStatsTurnsSince = 0;
+    gStatsLastSaveMs = millis();
 }
 
 const StatsGlobal& statsGetGlobal() { return gGlobal; }
