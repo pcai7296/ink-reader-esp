@@ -604,12 +604,10 @@ char wErrCode[16] = {0};
 char wFetchStep[24] = {0};   // 当前获取步骤提示（对齐 A7: 实况/未来/生活指数）
 char wCachedSummary[20] = {0};   // 主页天气摘要缓存（SD 持久化, 重启保留; "天气名|温度"）
 
-// 主页天气摘要: 读 SD 缓存 (对齐 A7 主页简洁天气信息, 本次开机只读一次)
-// 读前恢复 SD 总线: 主页渲染时 SPI 可能仍在 EPD 侧 (EPD 刷新后未恢复)
+// 主页天气摘要: 读 LittleFS 缓存 (P1/P2: 阅读期间 SD 已卸载; 天气摘要属设备状态 → LittleFS)
 void loadWeatherCache() {
-    if (wCachedSummary[0] || !sdAvailable) return;
-    if (!reinitSdBus("weather_load")) return;
-    File f = SD.open("/.tiemereader/weather.dat", "r");
+    if (wCachedSummary[0]) return;
+    File f = readerFs().open("/weather.dat", "r");
     if (!f) {
         traceFmt("WEATHER_CACHE_READ_OPEN_FAIL");
         return;
@@ -621,12 +619,10 @@ void loadWeatherCache() {
     traceFmt("WEATHER_CACHE_READ_OK n=%d sum=%s", n, wCachedSummary);
 }
 
-// 天气获取成功后写 SD 缓存（主页摘要持久化）; 写前恢复 SD 总线（天气页全刷后 SPI 在 EPD 侧）
+// 天气获取成功后写 LittleFS 缓存（主页摘要持久化）
 void saveWeatherCache() {
-    if (!sdAvailable || !wDataValid) return;
-    if (!reinitSdBus("weather_cache")) return;
-    if (!SD.exists("/.tiemereader")) SD.mkdir("/.tiemereader");
-    File f = SD.open("/.tiemereader/weather.dat", "w");
+    if (!wDataValid) return;
+    File f = readerFs().open("/weather.dat", "w");
     if (!f) {
         traceFmt("WEATHER_CACHE_WRITE_OPEN_FAIL");
         return;

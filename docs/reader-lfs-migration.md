@@ -122,6 +122,21 @@ EPD 的 `powerOff()` 改动**不与存储迁移混提**（留到 P7 单独 A/B�
 - A/B 对比项：平均电流（由 `BATCHK mv=` 每分钟日志换算）、翻页时间、连续翻页 1000 次、黑屏/残影、刷新失败、电池下降速度。
 - **判定原则**：若 B 版明显增加刷新异常，则保留 A（不改）。
 
+## 12. P3/P4 工具（2026-09 已就绪）
+- **测试书生成**：`python make_test_books.py --out build/test_books` → `T1_300k.txt`(307KB) / `T2_1m2.txt`(1.20MB) / `T3_1m8.txt`(1.84MB，贴近 LittleFS 上限，用于验证容量拒绝)。内容为 UTF-8 中文正文 + `第N章 …` 标准章节标题（同时验证 .i1 页表与 .z1 章节识别）。
+- **T3 容量校验**：1.84MB 正文 + 索引(≈2.07%) ≈ **1.88MB**，接近 LittleFS 可用上限(~1.9MB) → 上传/阅读可能因空间不足失败，这是**预期边界**而非 bug。
+- **P4 千次翻页验收**：`python p4_flip_test.py --port COM20 --count 1000 --interval 0.35`
+  - 前置固件：`-DSERIAL_REMOTE=1` 编译（`build_remote/`，已验证可编译）；该版把 GPIO3/RX 让给串口，按键由脚本注入 `K3S`（协议见 `ink-reader-esp.ino` §serialRemoteInject：`K2S/K2L/K3S/K3L/B/?`）。
+  - 判定：`PAGE_NEXT` 递增无跳变；**零** `SD_REINIT`（阅读期间无 SD 访问）；**零** `PAGE_REC_*`/`PAGE_NEXT_RECFAIL`/`PAGE_READ_FAIL`/`PROGRESS_ZERO_SKIP`；**零** `Fatal exception`/`Soft WDT`/中途 `BOOT reason`；日志出现 `RF_OFF reason=reader_enter` 且**不出现** `reader_assert`。
+  - 结果与日志：`serial_logs/p4_flip_*.log`。
+
+## 13. P9 预置：消除“阅读期间 SD 已卸载”带来的连带读 SD（2026-09）
+P2 之后阅读期间 SD 处于 `end()` 状态，因此以下**非阅读实时链路**的 SD 依赖一并改为 **LittleFS 优先 + SD 兼容回退**（回退时按需 `SD.begin`，都发生在显式联网/UI 动作中，不属翻页实时路径）：
+- `/sync.cfg`（进度同步凭据/目标，`progress_sync.cpp::loadSyncCfg`）：LittleFS `/sync.cfg` 优先，日志 `SYNC_CFG from=LittleFS|SD`；SD 旧文件仍可用。
+- 天气壁纸 BMP（`bmp_show.cpp::bmpShowFromSd`）：LittleFS 优先，SD 回退（壁纸可由 Web 直接上传到 LittleFS）。
+- 主页天气摘要缓存：`/.tiemereader/weather.dat`(SD) → **LittleFS `/weather.dat`**（设备状态归 LittleFS；同时修掉“阅读后回首页读不到缓存”的回归）。
+- 仍在 SD 的仅剩：`debug_trace.log`（DIAG_SD 诊断，默认不写）、介质切换/文件管理器的 `SD.begin`、`startTxtReader` 的 `SD.end()`（P2 本体）。
+
 ## 7. P5 实现明细（WiFi 生命周期，2026-09）
 - 新增统一出口 `wifiManagerRfOff(reason)`（`wifi_manager.cpp`）：仅当 `WiFi.getMode()!=WIFI_OFF` 时 `WiFi.disconnect(true) + WiFi.mode(WIFI_OFF)`，并打印 `RF_OFF reason=… was=…`。
 - 调用点：时钟校准终态（校时成功 `clock_ntp_ok` / 天气时间成功 `clock_weather_ok` / 无凭据 `clock_no_creds` / WiFi 超时 `clock_wifi_timeout` / 天气失败 `clock_weather_fail` / 跳过 `clock_skip`）；天气页退出 `weather_exit`；配网页退出 `network_exit`；进入阅读 `reader_enter`（`startTxtReader`）；阅读循环兜底断言 `reader_assert`（任何漏关都会在此纠正并留日志）。

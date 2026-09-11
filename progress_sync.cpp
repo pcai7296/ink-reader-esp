@@ -14,6 +14,7 @@
 #include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
 #include <SD.h>
+#include <LittleFS.h>   // /sync.cfg LittleFS 优先(P1/P2: 阅读期间 SD 已卸载)
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
@@ -259,12 +260,23 @@ static String basenameOf(const String& p) {
   return p;
 }
 
-// ---------- /sync.cfg 读取 (SD 根, 纯文本 key=value) ----------
+// ---------- /sync.cfg 读取 (LittleFS 优先, SD 兼容回退; 纯文本 key=value) ----------
+// 架构: 阅读期间 SD 已卸载(P2), 而同步是从阅读菜单发起的网络动作 → 配置改放 LittleFS。
+// SD 上旧的 /sync.cfg 仍兼容(同步前会重新挂载 SD); 两者都不属"阅读实时链路"。
 static void loadSyncCfg() {
   gCfgSsid[0] = gCfgPass[0] = gCfgIp[0] = '\0';
   gTargetPort = 8384;   // 默认端口; 有 port= 行则覆盖
-  File f = SD.open("/sync.cfg", "r");
+  File f;
+  bool fromSd = false;
+  if (LittleFS.begin()) f = LittleFS.open("/sync.cfg", "r");
+  if (!f) {
+    // 兼容回退: SD 根 /sync.cfg (阅读期间 SD 已 end(), 这里按需重挂载)
+    SD.begin(5, SD_SCK_MHZ(20));
+    f = SD.open("/sync.cfg", "r");
+    fromSd = (bool)f;
+  }
   if (!f) { syncDbg(PSTR("SYNC_CFG none")); return; }
+  syncDbg(fromSd ? PSTR("SYNC_CFG from=SD") : PSTR("SYNC_CFG from=LittleFS"));
   char line[70];
   uint8_t li = 0;
   while (f.available()) {

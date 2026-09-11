@@ -2,6 +2,7 @@
 // 帧缓冲 fb 由 ink-reader-esp.ino 定义（物理 128×296），setPix(x,y,black) 逻辑坐标写入
 #include "bmp_show.h"
 #include <SD.h>   // 提供 SD 对象（SDFS 实例，File API 与 LittleFS 兼容）
+#include <LittleFS.h>   // 壁纸 LittleFS 优先(P1/P2: 阅读期间 SD 已卸载)
 
 #define BMP_W 296
 #define BMP_H 128
@@ -43,7 +44,13 @@ static uint32_t read32(File &f) {
 }
 
 bool bmpShowFromSd(const char *path) {
-  File file = SD.open(path, "r");
+  // 架构(P1/P2): 阅读期间 SD 已卸载; 壁纸属天气/UI 域 → LittleFS 优先, SD 兼容回退(按需重挂载)。
+  File file;
+  if (LittleFS.begin()) file = LittleFS.open(path, "r");
+  if (!file) {
+    SD.begin(5, SD_SCK_MHZ(20));
+    file = SD.open(path, "r");
+  }
   if (!file) return false;
 
   bool ok = false;
