@@ -80,7 +80,8 @@ static bool       gErrWifiStopped = false;// ERROR 进入后已停 Wi-Fi (省电
 static bool       gStaAttempted = false; // SYNC_WIFI 是否已发起过 STA 连接尝试 (限时 20s 后切热点)
 static uint32_t   gDeadline = 0;          // WAIT_CLIENT 15s 超时截止
 static uint32_t   gLastPollMs = 0;        // WAIT_CLIENT 500ms 轮询
-static uint8_t    gBuf[256];
+// P3 内存审计: 响应 body 缓冲原常驻 BSS(256B) → SYNC_GET 内 malloc、PARSE 消费完即 free
+static uint8_t    *gBodyBuf = NULL;
 static uint16_t   gBufLen = 0;
 static int        gRespCL = -1;        // 最近一次响应头的 Content-Length, -1=未提供
 static int        gConnectAttempt = 0; // SYNC_CONNECT 当前尝试号 0..2 (失败重试 2 次)
@@ -106,7 +107,7 @@ enum FingerprintState { FINGERPRINT_UNKNOWN = 0, FINGERPRINT_MATCH = 1, FINGERPR
 static bool     gFpValid = false;
 static uint64_t gFpSize = 0;
 static char     gFpH0[41], gFpH1[41], gFpH2[41];
-static uint8_t  gFpBuf[1024];
+// (P3 内存审计: 原 gFpBuf[1024] 常驻 BSS 已改 computeFileFingerprint 内即用即还)
 static int      gFileFpState = FINGERPRINT_UNKNOWN;   // 最近一次 PARSE 三态
 static uint8_t  gFileMismatch = 0;                    // bit0=size bit1=head bit2=middle bit3=tail
 
@@ -223,9 +224,9 @@ static bool phoneSkipHeaders() {
   return false;
 }
 
-// 读响应 body 到 gBuf (限 max)。前提: 头部已由 phoneReadStatus 消费完毕。
+// 读响应 body 到 body (限 max)。前提: 头部已由 phoneReadStatus 消费完毕。
 // 有 Content-Length → 精确读满; 无 CL → 读到连接关闭 (或 3s 超时)。
-static bool phoneReadBody(uint16_t max) {
+static bool phoneReadBody(uint8_t *body, uint16_t max) {
   gBufLen = 0;
   int want = (gRespCL >= 0) ? gRespCL : (int)max;
   if (want > (int)max) want = max;
@@ -234,7 +235,7 @@ static bool phoneReadBody(uint16_t max) {
     while (gWiFi.available() && gBufLen < (uint16_t)want) {
       int c = gWiFi.read();
       if (c < 0) break;
-      gBuf[gBufLen++] = (uint8_t)c;
+      body[gBufLen++] = (uint8_t)c;
     }
     if (!gWiFi.available()) {
       if (!gWiFi.connected()) break;   // 读到 close (无 CL 时按此结束)
@@ -348,15 +349,15 @@ static void discoveryStop() { gDiscUdp.stop(); }
 // ---------- v3 指纹快照生成 (复用已打开的 txtFile; 任一步失败 → 整组无效) ----------
 extern File txtFile;   // ink-reader-esp.ino 的全局 (当前打开 TXT 句柄; PREPARE 后已打开)
 
-static void fpRegion(uint64_t start, uint64_t end, char* out) {
+static void fpRegion(uint8_t *fpBuf, size_t fpCap, uint64_t start, uint64_t end, char* out) {
   uint8_t d[20];
-  if (end <= start) { lumiSha1(gFpBuf, 0, d); lumiHexEncode(d, 20, out); gFpValid = true; return; }
+  if (end <= start) { lumiSha1(fpBuf, 0, d); lumiHexEncode(d, 20, out); gFpValid = true; return; }
   uint32_t len = (uint32_t)(end - start);
-  if (len > sizeof(gFpBuf)) len = sizeof(gFpBuf);
+  if (len > fpCap) len = fpCap;
   bool sok = txtFile.seek(start);
   uint32_t got = 0;
   while (got < len) {                 // 循环读满: SdFat 块读可能短读, 循环兜底
-    int r = txtFile.read(gFpBuf + got, len - got);
+    int r = txtFile.read(fpBuf + got, len - got);
     if (r <= 0) break;
     got += (uint32_t)r;
   }
@@ -368,7 +369,7 @@ static void fpRegion(uint64_t start, uint64_t end, char* out) {
     return;
   }
   gFpValid = true;   // 成功必须置 true —— 原代码漏置, 导致 computeFileFingerprint 恒失败(指纹从未生成)
-  lumiSha1(gFpBuf, len, d);
+  lumiSha1(fpBuf, len, d);
   lumiHexEncode(d, 20, out);
 }
 
@@ -378,18 +379,23 @@ static void computeFileFingerprint() {
   if (!txtFile) { syncDbg(PSTR("FP FAIL no-txtfile")); return; }
   gFpSize = txtFile.size();
   if (gFpSize == 0) { syncDbg(PSTR("FP FAIL size=0")); return; }
+  // P3 内存审计: 1KB 读块只在指纹计算瞬间存活, 算完即还堆 (原常驻 BSS)
+  static const size_t kFpBufCap = 1024;
+  uint8_t *fpBuf = (uint8_t *)malloc(kFpBufCap);
+  if (!fpBuf) { syncDbg(PSTR("FP FAIL alloc")); return; }
   uint64_t size = gFpSize;
   uint64_t h0e = (size < 1024) ? size : 1024;
   uint64_t cen = size / 2;
   uint64_t h1s = (cen > 512) ? (cen - 512) : 0;
   uint64_t h1e = (size < cen + 512) ? size : (cen + 512);
   uint64_t h2s = (size > 1024) ? (size - 1024) : 0;
-  fpRegion(0, h0e, gFpH0);
-  if (!gFpValid) { syncDbg(PSTR("FP FAIL region0 start=0 len=%lu"), (unsigned long)h0e); return; }
-  fpRegion(h1s, h1e, gFpH1);
-  if (!gFpValid) { syncDbg(PSTR("FP FAIL region1 start=%llu len=%lu"), (unsigned long long)h1s, (unsigned long)(h1e - h1s)); return; }
-  fpRegion(h2s, size, gFpH2);
-  if (!gFpValid) { syncDbg(PSTR("FP FAIL region2 start=%llu len=%lu"), (unsigned long long)h2s, (unsigned long)(size - h2s)); return; }
+  fpRegion(fpBuf, kFpBufCap, 0, h0e, gFpH0);
+  if (!gFpValid) { free(fpBuf); syncDbg(PSTR("FP FAIL region0 start=0 len=%lu"), (unsigned long)h0e); return; }
+  fpRegion(fpBuf, kFpBufCap, h1s, h1e, gFpH1);
+  if (!gFpValid) { free(fpBuf); syncDbg(PSTR("FP FAIL region1 start=%llu len=%lu"), (unsigned long long)h1s, (unsigned long)(h1e - h1s)); return; }
+  fpRegion(fpBuf, kFpBufCap, h2s, size, gFpH2);
+  if (!gFpValid) { free(fpBuf); syncDbg(PSTR("FP FAIL region2 start=%llu len=%lu"), (unsigned long long)h2s, (unsigned long)(size - h2s)); return; }
+  free(fpBuf);
   gFpValid = true;
   syncDbg(PSTR("FP size=%llu h0=[%s] h1=[%s] h2=[%s]"),
           (unsigned long long)gFpSize, gFpH0, gFpH1, gFpH2);
@@ -578,10 +584,12 @@ void progressSyncLoop() {
       int code = phoneReadStatus();       // 读状态行 + 头部, 3s 超时
       syncDbg(PSTR("GET code=%d heap=%lu"), code, (unsigned long)ESP.getFreeHeap());
       if (code == 200) {
-        if (phoneReadBody(sizeof(gBuf))) {
+        gBodyBuf = (uint8_t *)malloc(256);   // P3: 只在 GET→PARSE 两态间存活
+        if (gBodyBuf && phoneReadBody(gBodyBuf, 256)) {
           syncDbg(PSTR("GET body bytes=%u"), (unsigned)gBufLen);
           setState(SYNC_PARSE);
         } else {
+          free(gBodyBuf); gBodyBuf = NULL;
           syncDisconnect(); gStatus = F("手机数据异常"); setState(SYNC_ERROR);
         }
       } else if (code == 404) {
@@ -593,9 +601,11 @@ void progressSyncLoop() {
     }
     case SYNC_PARSE: {
       // lumiParse 按长度解析，不要求 null 结尾（规范 docs/progress-lumi1.md）
+      uint8_t *body = gBodyBuf; gBodyBuf = NULL;   // 取走所有权, 解析后立即归还堆
       syncDbg(PSTR("PARSE raw bytes=%u"), (unsigned)gBufLen);
       LumiProgress cp;
-      bool parsed = (gBufLen > 0) && lumiParse((const char*)gBuf, gBufLen, cp);
+      bool parsed = (gBufLen > 0 && body) && lumiParse((const char*)body, gBufLen, cp);
+      free(body);
       if (!parsed) { syncDisconnect(); gStatus = F("手机进度无效"); setState(SYNC_ERROR); break; }
       if (cp.offset > gLocalSize) { syncDisconnect(); gStatus = F("手机进度无效"); setState(SYNC_ERROR); break; }
       gCloudExists = true;
@@ -715,6 +725,7 @@ bool progressSyncConfirmUploadPending() { return gConfirmUpload; }
 
 void progressSyncCancel() {
   syncDisconnect();   // 归还连接
+  free(gBodyBuf); gBodyBuf = NULL;   // P3: 防御释放 (取消可能发生在 GET/PARSE 态)
   gStatus = F("已取消");
   progressSyncDone(false);
   gState = SYNC_IDLE;
