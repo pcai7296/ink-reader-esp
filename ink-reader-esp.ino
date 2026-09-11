@@ -5849,8 +5849,13 @@ void loop() {
     if (millis() - lastBatteryCheckMs >= BAT_CHECK_MS) {
         lastBatteryCheckMs = millis();
         if (checkLowBattery()) return;
-        // 诊断探针(排查"随机翻页显示第1页"): 60s 电池采样点与当前页号, 便于日志对齐时间线
-        traceFmt("BATCHK mv=%d page=%lu mode=%d", lastBatteryMV, (unsigned long)txtPage, appMode);
+        // 诊断探针(排查"随机翻页显示第1页"): 60s 电池采样点 + 采样后立刻探测 SD 是否可用。
+        // sd=0 ⇒ 电池采样(GPIO12/GPIO5 与 SD 共用)后 SD 总线处于坏态, 下一次 SD.open 会失败(旧代码=显示第1页)。
+        int sdOk = 1;
+        if (appMode == APP_READER && txtIndexPath.length()) {
+            sdOk = SD.exists(txtIndexPath.c_str()) ? 1 : 0;
+        }
+        traceFmt("BATCHK mv=%d page=%lu mode=%d sd=%d", lastBatteryMV, (unsigned long)txtPage, appMode, sdOk);
     }
 
     if (millis() - lastPhysicalKeyMs >= AUTO_SLEEP_MS) {
