@@ -3349,19 +3349,67 @@ void indexTaskStep() {
         finishTxtIndexBuild();
     }
 }
+// 页首偏移读取 (带总线恢复重试 + 严格校验)。返回 false 表示**读失败**, 调用方不得把 0 当第 1 页翻页。
+// 修复: 原实现 SD.open 偶发失败即返回 0 → nextTxtPage 页码+1 却渲染第 1 页, 并把进度写成 0
+// (实测: 1024 页按右键显示第 1 页, 再按恢复 1026)。
+static bool parsePageRecordEx(uint32_t page, uint32_t *out) {
+    if (!out) return false;
+    if (page <= 1) { *out = 0; return true; }
+    String path = txtIndexPath;
+    if (!SD.exists(path.c_str())) {
+        String legacy = txtPath + ".i1";
+        if (SD.exists(legacy.c_str())) path = legacy;
+    }
+    for (uint8_t attempt = 0; attempt < 2; attempt++) {
+        File f = SD.open(path.c_str());
+        if (!f) {
+            if (attempt == 0) { reinitSdBus("page_rec_retry"); continue; }
+            traceFmtLevel('E', "PAGE_REC_OPEN_FAIL page=%lu path=%s", (unsigned long)page, path.c_str());
+            return false;
+        }
+        if (!f.seek((page - 1) * 8)) {
+            f.close();
+            traceFmtLevel('E', "PAGE_REC_SEEK_FAIL page=%lu", (unsigned long)page);
+            return false;
+        }
+        char rec[9];
+        int got = (int)f.read((uint8_t *)rec, 8);
+        f.close();
+        if (got != 8) {
+            traceFmtLevel('E', "PAGE_REC_SHORT page=%lu got=%d", (unsigned long)page, got);
+            return false;
+        }
+        rec[8] = '\0';
+        for (uint8_t i = 0; i < 8; i++) {
+            if (rec[i] < '0' || rec[i] > '9') {
+                traceFmtLevel('E', "PAGE_REC_BAD page=%lu rec=%s", (unsigned long)page, rec);
+                return false;
+            }
+        }
+        uint32_t v = strtoul(rec, nullptr, 10);
+        if (v == 0) {   // 页 >1 的页首偏移不可能为 0 (0 只属第 1 页)
+            traceFmtLevel('E', "PAGE_REC_ZERO page=%lu", (unsigned long)page);
+            return false;
+        }
+        *out = v;
+        if (attempt > 0) traceFmt("PAGE_REC_RETRY_OK page=%lu off=%lu", (unsigned long)page, (unsigned long)v);
+        return true;
+    }
+    return false;
+}
+
 uint32_t parsePageRecord(uint32_t page) {
-    if (page <= 1) return 0;
-    File f = SD.open(txtIndexPath.c_str());
-    if (!f) return 0;
-    f.seek((page - 1) * 8);
-    char record[9];
-    for (uint8_t i = 0; i < 8; i++) record[i] = (char)f.read();
-    record[8] = '\0';
-    f.close();
-    return strtoul(record, nullptr, 10);
+    uint32_t v = 0;
+    return parsePageRecordEx(page, &v) ? v : 0;
 }
 
 bool writeProgress(uint32_t offset) {
+    // 防御: 页 >1 的进度偏移不可能为 0 (0=第 1 页)。写入 0 会把"当前阅读位置"打回开头
+    // (原 parsePageRecord 失败返回 0 时曾把进度写成 0)。
+    if (offset == 0 && txtPage > 1) {
+        traceFmtLevel('E', "PROGRESS_ZERO_SKIP page=%lu", (unsigned long)txtPage);
+        return false;
+    }
     if (txtIndexBuilding) {
         // 构建中进度 → 独立 sidecar (txtIndexPath+"p", 如 小说.i1p): 不与 .i1 追加句柄
         // 形成同文件双句柄 (实测双句柄写 .i1 有概率破坏 FAT 引发 SD 卸载)。
@@ -3738,9 +3786,17 @@ void jumpToPage() {
     if (jumpPage > txtTotalPages) jumpPage = txtTotalPages;
     readerJumpOpen = false;
     if (txtIndexBuilding && jumpPage > txtIndexedPages) jumpPage = txtIndexedPages;
+    uint32_t off = 0;
+    if (!parsePageRecordEx(jumpPage, &off)) {   // 页首偏移读失败: 不静默当第 1 页
+        showMsg("跳转失败", "读取失败");
+        return;
+    }
+    if (!readTxtPage(off)) {
+        showMsg("读取失败", "请重试");
+        return;
+    }
     txtPage = jumpPage;
-    txtPageStart = parsePageRecord(txtPage);
-    readTxtPage(txtPageStart);
+    txtPageStart = off;
     writeProgress(txtPageStart);
     renderTxtPage(true);
 }
@@ -4154,7 +4210,14 @@ bool progressSyncApplyRemote(uint32_t offset) {
         // 分页制度: 手机 offset 若落在两页之间 → 向下取整到所在页页首。
         // 页表单调递增: offsetToPage 二分找"最大页首 ≤ offset"的页码, parsePageRecord 取该页页首偏移。
         page = offsetToPage(offset);
-        uint32_t ps = (page > 1) ? parsePageRecord(page) : 0;
+        uint32_t ps = 0;
+        if (page > 1) {
+            if (!parsePageRecordEx(page, &ps)) {
+                // 索引记录读失败: 保留手机 offset 直读(不静默当第 1 页)
+                traceFmtLevel('W', "SYNC_RECFAIL page=%lu off=%lu", (unsigned long)page, (unsigned long)offset);
+                ps = offset;
+            }
+        }
         if (ps <= offset) pageStart = ps;   // 页首 ≤ offset 才采用 (向下取整, 保留所在页完整内容)
     }
     if (!writeProgress(pageStart)) return false;   // 持久化 .i1[0] 失败 → 如实报错, 不假装成功
@@ -4466,12 +4529,20 @@ void nextTxtPage() {
         return;
     }
     if (txtPage >= txtTotalPages) return;
-    txtPage++;
-    txtPageStart = parsePageRecord(txtPage);
+    uint32_t prevPage = txtPage, prevStart = txtPageStart;
+    uint32_t off = 0;
+    // 关键: 先取下一页页首偏移, 失败就**不递增页码**(原实现把 0 当第 1 页渲染并写坏进度)
+    if (!parsePageRecordEx(txtPage + 1, &off)) {
+        showMsg("读取失败", "请重试");
+        traceFmtLevel('E', "PAGE_NEXT_RECFAIL page=%lu", (unsigned long)(txtPage + 1));
+        return;
+    }
+    txtPage = txtPage + 1;
+    txtPageStart = off;
     if (!readTxtPage(txtPageStart)) {
         // 读失败(偶发 SD 总线坏): 回退页码保持原显示, 不渲染空页(白屏)。下一翻页自愈后继续。
-        txtPage--;
-        txtPageStart = parsePageRecord(txtPage);
+        txtPage = prevPage;
+        txtPageStart = prevStart;
         showMsg("读取失败", "请重试");
         traceFmtLevel('E', "PAGE_NEXT_FAIL page=%lu", (unsigned long)txtPage);
         return;
@@ -4487,12 +4558,19 @@ void previousTxtPage() {
         showMsg("已是第一页", "");
         return;
     }
-    txtPage--;
-    txtPageStart = parsePageRecord(txtPage);
+    uint32_t prevPage = txtPage, prevStart = txtPageStart;
+    uint32_t off = 0;
+    if (!parsePageRecordEx(txtPage - 1, &off)) {
+        showMsg("读取失败", "请重试");
+        traceFmtLevel('E', "PAGE_PREV_RECFAIL page=%lu", (unsigned long)(txtPage - 1));
+        return;
+    }
+    txtPage = txtPage - 1;
+    txtPageStart = off;
     if (!readTxtPage(txtPageStart)) {
         // 读失败: 回退页码保持原显示, 不渲染空页(白屏)。
-        txtPage++;
-        txtPageStart = parsePageRecord(txtPage);
+        txtPage = prevPage;
+        txtPageStart = prevStart;
         showMsg("读取失败", "请重试");
         traceFmtLevel('E', "PAGE_PREV_FAIL page=%lu", (unsigned long)txtPage);
         return;
@@ -5055,8 +5133,9 @@ void startTxtReader(const char *path, bool forceRebuild) {
                     // 旋转进度转换 (向上取整); 目标方向索引可能不完整 → ceil 找不到则兜底显示当前 offset 内容
                     uint32_t found = findPageCeil(txtIndexPath, savedOffset);
                     if (found > 0) {
-                        txtPage = found;
-                        txtPageStart = parsePageRecord(found);
+                        uint32_t ps = 0;
+                        if (parsePageRecordEx(found, &ps)) { txtPage = found; txtPageStart = ps; }
+                        else { txtPage = 1; txtPageStart = savedOffset; traceFmtLevel('W', "RESTORE_RECFAIL found=%lu", (unsigned long)found); }
                     }
                 } else if (bootHintPage >= 2 && parsePageRecord(bootHintPage) == savedOffset) {
                     // 启动路径页号复用 (优化②): 索引完整但章节缺失触发的续建同样生效
@@ -5109,8 +5188,9 @@ void startTxtReader(const char *path, bool forceRebuild) {
                 // 不重复显示已读部分); 目标页页首由 parsePageRecord 取, 显示完整目标页
                 uint32_t found = findPageCeil(txtIndexPath, saved);
                 if (found > 0) {
-                    txtPage = found;
-                    txtPageStart = parsePageRecord(found);
+                    uint32_t ps = 0;
+                    if (parsePageRecordEx(found, &ps)) { txtPage = found; txtPageStart = ps; }
+                    else { txtPage = 1; txtPageStart = saved; traceFmtLevel('W', "RESTORE_RECFAIL2 found=%lu", (unsigned long)found); }
                 } else {
                     txtPage = txtTotalPages;   // saved 超最后页首 → 最后一页
                     txtPageStart = saved;
@@ -5385,9 +5465,17 @@ void jumpToMark(uint32_t off) {
         return;
     }
     if (txtIndexBuilding && page > txtIndexedPages) page = txtIndexedPages;
+    uint32_t pageOff = 0;
+    if (!parsePageRecordEx(page, &pageOff)) {   // 标记页首偏移读失败: 不静默当第 1 页
+        showMsg("跳转失败", "读取失败");
+        return;
+    }
+    if (!readTxtPage(pageOff)) {
+        showMsg("读取失败", "请重试");
+        return;
+    }
     txtPage = page;
-    txtPageStart = parsePageRecord(txtPage);
-    readTxtPage(txtPageStart);
+    txtPageStart = pageOff;
     writeProgress(txtPageStart);
     appMode = APP_READER;
     renderTxtPage(true);
@@ -5761,6 +5849,8 @@ void loop() {
     if (millis() - lastBatteryCheckMs >= BAT_CHECK_MS) {
         lastBatteryCheckMs = millis();
         if (checkLowBattery()) return;
+        // 诊断探针(排查"随机翻页显示第1页"): 60s 电池采样点与当前页号, 便于日志对齐时间线
+        traceFmt("BATCHK mv=%d page=%lu mode=%d", lastBatteryMV, (unsigned long)txtPage, appMode);
     }
 
     if (millis() - lastPhysicalKeyMs >= AUTO_SLEEP_MS) {
@@ -6054,13 +6144,20 @@ void loop() {
                 closeTxtReader();
             } else if (r3 == 2) {
                 if (chapterSel < CHAPTER_ROWS && chapterSel < chapterCountLoaded) {
-                    // 跳转到章节
-                    txtPage = chapterRows[chapterSel].page;
-                    txtPageStart = parsePageRecord(txtPage);
-                    readTxtPage(txtPageStart);
-                    writeProgress(txtPageStart);
-                    appMode = APP_READER;
-                    renderTxtPage(true);
+                    // 跳转到章节 (页首偏移读失败不静默当第 1 页)
+                    uint32_t off = 0;
+                    uint32_t wantPage = chapterRows[chapterSel].page;
+                    if (!parsePageRecordEx(wantPage, &off)) {
+                        showMsg("跳转失败", "读取失败");
+                    } else if (!readTxtPage(off)) {
+                        showMsg("读取失败", "请重试");
+                    } else {
+                        txtPage = wantPage;
+                        txtPageStart = off;
+                        writeProgress(txtPageStart);
+                        appMode = APP_READER;
+                        renderTxtPage(true);
+                    }
                 } else if (chapterSel == 6) {
                     chapterPrevPage();
                 } else if (chapterSel == 7) {
