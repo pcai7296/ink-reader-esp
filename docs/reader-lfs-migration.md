@@ -162,3 +162,38 @@ P2 之后阅读期间 SD 处于 `end()` 状态，因此以下**非阅读实时�
 **判定**：P3（开书/首页/上下翻/末页停止）✅；P4（连续翻页零 SD 访问）✅。
 
 **验收用编译开关（默认全关，仅测试固件）**：`-DREADER_AUTOTEST=1 -DREADER_AUTOTEST_PAGES=N -DFORCE_LOCAL_MEDIUM_TEST=1`；需要配网页部署时再加 `-DBOOT_AP_MODE=1 -DWIFI_TEST_FORCE_AP=1`（强制热点、不连已保存 STA，便于 PC 上传）。
+
+---
+
+## 15. P10 最小版：SD → LittleFS 自动导入（2026-09，修复"SD 介质下点 TXT 进不去"）
+
+**背景**：P1 的入口守卫在 SD 介质下直接显示"SD 仅文件管理"，导致用户实际设备（SD 启用、卡在位）**无论如何都进不去书**。用户定稿的产品形态是"书在 SD，当前阅读的书部署到内部"，因此补齐最小导入：**点 SD 上的 TXT = 自动导入 LittleFS 后阅读**。
+
+**实现**（`ink-reader-esp.ino::readerImportFromSd`，由 `startTxtReader` 在 `!gBrowseLocal` 时调用）：
+- 同名内部文件已存在且**大小一致** → `IMPORT_SKIP` 秒开，不重复拷贝。
+- **前置拒绝**：空文件；`>100MB`（官方规则）→ "文件过大 / 超过100MB"。
+- **容量校验**：`需要 = 正文 + 正文×2.07%(索引估算) + 16KB 余量`，超 `LittleFS.info()` 可用 → 提示 "需XKB / 可用YKB"（`IMPORT_NOSPACE`），**绝不在拷贝到一半才失败**。
+- **拷贝**：1KB 块 + 每 20% 局刷进度（"导入中 nn%"）+ `ESP.wdtFeed()`；写失败即删除半成品并报"空间不足"。
+- **校验**：写完回读 size 必须等于源 size，否则删除并报"校验不一致"。
+- 旁带 `.i1/.v1/.i1p/.z1/.vz1/.bm`（≤256KB 且空间足够）一并复制 ⇒ 大书免整本重建索引；失败则回退由阅读器重建。
+
+**仍存在的硬边界（需用户决策）**：LittleFS ≈1.98MiB ⇒ 单本正文上限 ≈1.8–1.9MB。用户的主力书（如《武炼巅峰》55MB）**无法导入**，会提示 "需约56MB / 可用1.9MB"。可选方向见对话中给出的 A/B/C/D 方案（分区扩容到 3MB / 大书分段导入 / 双轨（小书 LittleFS+大书 SD 直读）/ 放弃 LittleFS-only 回 SD）。
+
+---
+
+## 16. ⭐ 架构修正（2026-09，用户拍板"抄官方"）：媒体跟随，不是 LittleFS-only
+
+**用户决策**：遇到"MSP-50BB 设备点 TXT 提示 SD 仅文件管理、无论如何进不去"后，用户选择 **"抄官方"**。
+
+**官方真实做法（A7 反编译 + 源码交叉）**：`fsSetBySdState()`（A7 `0x4020BBA0`，见 `REVERSE_NOTES.md §6.5`）把全局 `fileSystem` 指针在 **LittleFS `0x3FFF3850` ↔ SDFS `0x3FFF3860`** 间切换：
+- SD 启用（默认）→ `fileSystem = &SDFS`，**书/`.i1`/`.z1` 全在 SD，阅读直读 SD**（大书无容量问题，索引与正文同介质）；
+- 内部模式 → `fileSystem = &LittleFS`，全部走内部 flash。
+
+**因此本轮实现修正为**：
+- `readerFs()` = **`browseFs()`（当前介质）**，不再硬编码 LittleFS；`readerBusReady(reason)` 在 SD 介质下恢复 SD 总线（`reinitSdBus`），内部介质恒真。
+- `startTxtReader`：SD 介质 → 直读 SD（不再强制导入）；内部介质 → 确保 LittleFS 挂载后直读。**两种介质都可用**。
+- `SD.end()` 仅在内部介质阅读时执行（SD 介质阅读时 SD 就是数据源，必须在线）。
+- 保留 `readerImportFromSd()`（>100MB/容量前置校验 + 回读校验 + 旁带复制）作为**可选**"拷到内部"能力，不再进入打开书的必经路径。
+- 本轮全部稳定性/续航修复（页表读取失败重试且不翻页、进度 50 页/5 分钟节流、统计节流、RF 关断、EPD 生命周期）对**两种介质同时生效**。
+
+**SD 直读实测（2026-09）**：SD 来源书 `IDX async done pages=681 chapters=53`（索引建在 SD，**6.8s**；对比内部 LittleFS 90s），连续翻页 `AUTOTEST_PROGRESS sent=100 ok=100 fail=0`（从 1→101 页）无异常。
