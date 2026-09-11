@@ -104,7 +104,8 @@ def release_port(port, verbose=True):
             continue
         name = (p.get("Name") or "").lower()
         cl = p.get("CommandLine") or ""
-        if name in KILL_NAMES and token in cl.upper():
+        # 占用者特征: ①命令行含端口号; ②本工具的历史实例(esp_dev.py monitor 未带 --port 也会占串口)
+        if name in KILL_NAMES and (token in cl.upper() or "esp_dev.py" in cl):
             targets.append((pid, p.get("Name") or "?", cl[:160]))
     killed = []
     for pid, name, cl in targets:
