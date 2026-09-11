@@ -665,6 +665,8 @@ uint32_t txtPage = 1;
 uint32_t txtTotalPages = 1;
 uint32_t txtPageStart = 0;
 uint32_t txtIndexedPages = 1;
+uint32_t gIndexStepKeyYield = 0;   // 构建步进因按键让步次数 (诊断: 构建期按键灵敏度)
+uint32_t gIndexStepMaxGapMs = 0;   // 构建中两次按键扫描的最大间隔 (诊断)
 uint32_t txtChapterCount = 0;
 bool txtIndexBuilding = false;
 uint32_t txtPendingProgress = 0;
@@ -3176,6 +3178,7 @@ void finishTxtIndexBuild() {
     debugFmt("IDX async done pages=%lu chapters=%lu indexSize=%lu z1Size=%lu", (unsigned long)txtTotalPages,
              (unsigned long)txtChapterCount, (unsigned long)doneIndexSize,
              (unsigned long)doneChapterSize);
+    traceFmt("IDX_KEYSTATS maxGapMs=%lu yields=%lu", (unsigned long)gIndexStepMaxGapMs, (unsigned long)gIndexStepKeyYield);
     // 主页正显示该书且构建刚在后台完成: 刷新最近阅读(页码回归真实总页数、去掉"构建中"标注), 局刷主卡
     if (appMode == APP_HOME && recentReadPath == txtPath) {
         loadRecentReadSummary();
@@ -3343,14 +3346,25 @@ void indexTaskStep() {
     if (!txtIndexBuilding || !txtIndexScanFile) return;
     static uint32_t lastDebugPos = 0;
     uint32_t stepStart = txtIndexScanFile.position();
-    uint32_t deadline = millis() + 100;   // 每 loop 至多 100ms 构建; 过大则按键短按丢失(loop 周期>短按时长)
+    // ===== 构建期间保持可交互 (对齐官方 A7: 构建中翻页/菜单/导航都能用, 只有"跳到未建页"被阻止) =====
+    // 原实现每 loop 构建至多 100ms → 这 100ms 内不扫键, 短按可能整段落在两次扫描之间被丢掉
+    // ("构建索引期间按键灵敏度降低")。现: 每 loop 至多 10ms, 且每 2ms 让步检测按键, 按下立即返回。
+    uint32_t deadline = millis() + 10;
+    uint32_t lastKeyChk = millis();
     while ((int32_t)(deadline - millis()) > 0) {
         ESP.wdtFeed();
+        if (millis() - lastKeyChk >= 2) {
+            lastKeyChk = millis();
+            if (readKey2() == 0 || readKey3() == 0) {   // 按键按下 → 立刻把控制权交回主循环
+                gIndexStepKeyYield++;
+                break;
+            }
+        }
         if (indexLineOld != indexLine) { indexLineOld = indexLine; indexHskgState = true; }
         if (indexPageStartPending && indexLine == 0) {
             indexPageStartPending = false;
             appendIndexRecord(txtIndexBuildFile, indexScanPos);   // 真实字节偏移 (勿用 position(): 块读时是 2048 对齐)
-            txtIndexBuildFile.flush();
+            if ((txtIndexedPages & 7) == 0) txtIndexBuildFile.flush();   // 每 8 页落盘(掉电最多丢 8 页重建), 避免每页 flush 拖慢构建
             txtIndexedPages++;
             txtTotalPages = txtIndexedPages;
         }
@@ -5212,7 +5226,9 @@ void startTxtReader(const char *path, bool forceRebuild) {
         }
         traceFmt("READER_SRC sd path=%s", localPath.c_str());
     }
+    traceFmt("TXT open step=flush_begin");
     progressFlushForce("book_change");   // P6: 换书前把上一本的待写进度落盘
+    traceFmt("TXT open step=flush_done");
     // 仅"内部介质阅读"时关闭 SD(省电 + 免 GPIO5/GPIO12 争抢); SD 介质阅读时 SD 就是数据源, 必须在线。
     if (gBrowseLocal) {
         SD.end();
@@ -5220,13 +5236,17 @@ void startTxtReader(const char *path, bool forceRebuild) {
         pinMode(5, OUTPUT);
         traceFmt("SD_OFF reader_enter");
     }
+    traceFmt("TXT open step=path_check");
     if (!isTxtPath(path)) {
         traceFmtLevel('W', "TXT unsupported path=%s", path ? path : "(null)");
         showMsg("不支持打开", "仅支持TXT文件");
         return;
     }
+    traceFmt("TXT open step=list_free_begin");
     freeItemList();   // 大目录 items≈34KB+ 是堆大户, 进阅读器前释放 (浏览模式回退时 listDir 重建)
+    traceFmt("TXT open step=list_free_done");
     wifiManagerRfOff("reader_enter");   // P5: 进入阅读强制关 RF (官方 DisplayTxt.ino:854 WifiShutdown 对齐)
+    traceFmt("TXT open step=rf_off_done");
     debugFmt("TXT open path=%s rebuild=%d", localPath.c_str(), forceRebuild ? 1 : 0);
     statsOnSessionStart(localPath.c_str());   // 阅读统计: 会话开始, 记录当前书 + 今日/本周/连续天数检查
     // 旋转续读: 读走即清零 (任何路径都不残留; 失败提前 return 也安全)
@@ -6095,6 +6115,13 @@ static void readerAutotestRun() {
 #else
     const char *bookPath = READER_AUTOTEST_BOOK;
 #endif
+#if IMPORT_TEST_OPEN
+    // 仅测试: 种完即打开书并交回主循环 → 索引在真实 loop 中后台构建,
+    // 用于测量"构建期按键采样间隔"(KEYLAG / IDX_KEYSTATS)。
+    Serial.printf_P(PSTR("IMPORT_TEST_OPEN book=%s\n"), bookPath);
+    startTxtReader(bookPath, false);
+    return;
+#endif
     Serial.printf_P(PSTR("AUTOTEST_BEGIN book=%s pages=%d rf=%d local=%d\n"),
                     bookPath, READER_AUTOTEST_PAGES,
                     (int)WiFi.getMode(), gBrowseLocal ? 1 : 0);
@@ -6184,6 +6211,17 @@ void loop() {
         if (gap > diagMaxLoopGap) diagMaxLoopGap = gap;
     }
     diagFlushSd(false);
+    // 按键采样间隔探针 (构建期灵敏度诊断): 记录两次扫描最大间隔, >80ms 打点
+    {
+        static uint32_t lastKeyScanMs = 0;
+        uint32_t nowMs = millis();
+        if (lastKeyScanMs && txtIndexBuilding) {
+            uint32_t gap = nowMs - lastKeyScanMs;
+            if (gap > gIndexStepMaxGapMs) gIndexStepMaxGapMs = gap;
+            if (gap > 80) traceFmtLevel('W', "KEYLAG gap=%lu", (unsigned long)gap);
+        }
+        lastKeyScanMs = nowMs;
+    }
     int raw2 = readKey2();
     int raw3 = readKey3();
     int r2 = scanKey(k2, raw2 == 0);
@@ -6293,7 +6331,7 @@ void loop() {
         }
         // 后台索引构建在主页也要喂步进: 否则退出阅读器停在主页时构建停摆,"构建中"永不结束
         if (txtIndexBuilding) indexTaskStep();
-        delay(txtIndexBuilding ? 5 : 30);
+        delay(txtIndexBuilding ? 2 : 30);   // 构建期缩短延时: 提高按键采样率(A7 语义: 构建中一切可操作)
         return;
     }
 
@@ -6500,7 +6538,7 @@ void loop() {
             }
         }
         indexTaskStep();
-        delay(txtIndexBuilding ? 5 : 30);
+        delay(txtIndexBuilding ? 2 : 30);
         return;
     }
     if (appMode == APP_CHAPTERS) {
@@ -6560,7 +6598,7 @@ void loop() {
                 }
             }
         }
-        delay(txtIndexBuilding ? 5 : 30);
+        delay(txtIndexBuilding ? 2 : 30);
         indexTaskStep();
         return;
     }
@@ -6623,7 +6661,7 @@ void loop() {
                 }
             }
         }
-        delay(txtIndexBuilding ? 5 : 30);
+        delay(txtIndexBuilding ? 2 : 30);
         indexTaskStep();
         return;
     }
@@ -6718,5 +6756,5 @@ void loop() {
         }
     }
     indexTaskStep();
-    delay(txtIndexBuilding ? 5 : 30);
+    delay(txtIndexBuilding ? 2 : 30);
 }
