@@ -108,7 +108,7 @@ void EPD_290A::sendCommand(uint8_t cmd) {
     SPI.endTransaction();
     digitalWrite(EPD_CS_PIN, HIGH);
 #if EPD_DEBUG
-    Serial.printf("C:%02X ", cmd);
+    Serial.printf(PSTR("C:%02X "), cmd);
 #endif
 }
 
@@ -138,7 +138,7 @@ void EPD_290A::waitBusy(int timeout) {
     while (digitalRead(EPD_BUSY_PIN) == HIGH) {
         if (millis() - start > timeout) {
 #if EPD_DEBUG
-            Serial.println("EPD busy timeout!");
+            Serial.println(PSTR("EPD busy timeout!"));
 #endif
             break;
         }
@@ -176,7 +176,7 @@ void EPD_290A::setPointer(int x, int y) {
 // init display - aligned with GxEPD2_290::_InitDisplay + _Init_Full
 void EPD_290A::initDisplay() {
 #if EPD_DEBUG
-    Serial.printf("\nBUSY after reset = %d (0=idle, 1=busy)\n", digitalRead(EPD_BUSY_PIN));
+    Serial.printf(PSTR("\nBUSY after reset = %d (0=idle, 1=busy)\n"), digitalRead(EPD_BUSY_PIN));
 #endif
     // driver output control
     sendCommand(0x01);
@@ -213,7 +213,7 @@ void EPD_290A::initDisplay() {
     // power on (0x22 0xC0 -> 0x20), waitBusy 含在 powerOn() 内
     powerOn();
 #if EPD_DEBUG
-    Serial.printf("BUSY after power-on = %d (power-on took %lu ms)\n", digitalRead(EPD_BUSY_PIN), _busyMs);
+    Serial.printf(PSTR("BUSY after power-on = %d (power-on took %lu ms)\n"), digitalRead(EPD_BUSY_PIN), _busyMs);
 #endif
 }
 
@@ -235,7 +235,7 @@ void EPD_290A::display(const uint8_t *image) {
     }
     endTransfer();
 #if EPD_DEBUG
-    Serial.printf("IMG sent %d bytes, BUSY=%d\n", (EPD_WIDTH * EPD_HEIGHT) / 8, digitalRead(EPD_BUSY_PIN));
+    Serial.printf(PSTR("IMG sent %d bytes, BUSY=%d\n"), (EPD_WIDTH * EPD_HEIGHT) / 8, digitalRead(EPD_BUSY_PIN));
 #endif
 
     // refresh (full)
@@ -246,7 +246,7 @@ void EPD_290A::display(const uint8_t *image) {
 
     waitBusy(3000);
 #if EPD_DEBUG
-    Serial.printf("Refresh done, BUSY=%d (refresh took %lu ms)\n", digitalRead(EPD_BUSY_PIN), _busyMs);
+    Serial.printf(PSTR("Refresh done, BUSY=%d (refresh took %lu ms)\n"), digitalRead(EPD_BUSY_PIN), _busyMs);
 #endif
     powerOff();   // 画完断电 (对齐官方 display.powerOff())
 }

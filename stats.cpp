@@ -75,7 +75,7 @@ static bool readPayload(const char *path, void *payload, size_t payloadSize) {
 // 写 payload: .tmp → 替换, 防掉电损坏
 static bool writePayload(const char *path, const void *payload, size_t payloadSize) {
     char tmp[64];
-    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    snprintf(tmp, sizeof(tmp), PSTR("%s.tmp"), path);
     File f = LittleFS.open(tmp, "w");
     if (!f) return false;
     StatsHeader h;
@@ -99,7 +99,7 @@ static bool statsEnsureBooks() {
     if (gBooks) return true;
     if (!ensureMounted()) return false;
     gBooks = (BookStat *)malloc(sizeof(BookStat) * MAX_BOOK_STATS);
-    if (!gBooks) { traceFmt("STATS books alloc fail"); return false; }
+    if (!gBooks) { traceFmt(PSTR("STATS books alloc fail")); return false; }
     if (!readPayload(STATS_BOOKS, gBooks, sizeof(BookStat) * MAX_BOOK_STATS)) {
         memset(gBooks, 0, sizeof(BookStat) * MAX_BOOK_STATS);
     }
@@ -123,7 +123,7 @@ static void statsReset() {
 void statsInit() {
     if (!ensureMounted()) { statsReset(); return; }
     bool okG = readPayload(STATS_GLOBAL, &gGlobal, sizeof(gGlobal));
-    if (!okG) { memset(&gGlobal, 0, sizeof(gGlobal)); traceFmt("STATS read global fail, reset"); }
+    if (!okG) { memset(&gGlobal, 0, sizeof(gGlobal)); traceFmt(PSTR("STATS read global fail, reset")); }
     // books.dat 懒加载 (statsEnsureBooks): 会话开始/统计页时才读
     gStatsInited = true;
 }

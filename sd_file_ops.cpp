@@ -23,11 +23,11 @@ static const char *baseNameOf(const char *full) {
 static void fillEntry(const char *fullPath, bool isDir, uint64_t size, SdEntry *e) {
   // File::fullName() 返回根相对路径（无前导 /）; 规范化补上, 否则 isProtectedPath 判不了
   if (fullPath[0] == '/') {
-    snprintf(e->path, sizeof(e->path), "%s", fullPath);
+    snprintf(e->path, sizeof(e->path), PSTR("%s"), fullPath);
   } else {
-    snprintf(e->path, sizeof(e->path), "/%s", fullPath);
+    snprintf(e->path, sizeof(e->path), PSTR("/%s"), fullPath);
   }
-  snprintf(e->name, sizeof(e->name), "%s", baseNameOf(e->path));
+  snprintf(e->name, sizeof(e->name), PSTR("%s"), baseNameOf(e->path));
   e->isDir = isDir;
   e->size = size;
   e->isProtected = isProtectedPath(e->path);
@@ -64,11 +64,11 @@ static bool dirProbe(const char *path) {
 // Dir 无 fullName(): 由目录路径 + basename 拼完整路径（同官方 SDFSDirImpl::openFile 的拼法）
 static void joinFull(const char *dir, const String &name, char *out, size_t outSize) {
   if (name.length() && name[0] == '/') {
-    snprintf(out, outSize, "%s%s", dir, name.c_str());
+    snprintf(out, outSize, PSTR("%s%s"), dir, name.c_str());
   } else if (strcmp(dir, "/") == 0) {
-    snprintf(out, outSize, "/%s", name.c_str());
+    snprintf(out, outSize, PSTR("/%s"), name.c_str());
   } else {
-    snprintf(out, outSize, "%s/%s", dir, name.c_str());
+    snprintf(out, outSize, PSTR("%s/%s"), dir, name.c_str());
   }
 }
 
@@ -224,14 +224,14 @@ SdErr sdRename(const char *oldPath, const char *newName) {
   // ⚠️ 缓冲须容得下「目录部分(≤300) + '/' + newName(≤240)」: 原 dir[300] 会 snprintf 静默截断
   //   → SD.exists/rename 作用于被截断路径, FAT 上生成错名文件（不可逆）
   char dir[560];
-  snprintf(dir, sizeof(dir), "%s", oldPath);
+  snprintf(dir, sizeof(dir), PSTR("%s"), oldPath);
   char *slash = strrchr(dir, '/');
   if (!slash || slash == dir) {
-    snprintf(dir, sizeof(dir), "/%s", newName);   // 根目录下文件
+    snprintf(dir, sizeof(dir), PSTR("/%s"), newName);   // 根目录下文件
   } else {
     slash[1] = '\0';
     size_t dlen = strlen(dir);
-    snprintf(dir + dlen, sizeof(dir) - dlen, "%s", newName);
+    snprintf(dir + dlen, sizeof(dir) - dlen, PSTR("%s"), newName);
   }
   if (!SD.exists(oldPath)) return SD_NOT_FOUND;
   if (SD.exists(dir)) return SD_EXISTS;
@@ -250,7 +250,7 @@ SdErr sdMove(const char *path, const char *destDir) {
   // ⚠️ 缓冲须容下 destDir(≤300) + '/' + basename(≤256): 原 target[320] 静默截断 → 错名 rename（不可逆）
   char target[560];
   const char *base = baseNameOf(path);
-  snprintf(target, sizeof(target), "%s/%s", destDir, base);
+  snprintf(target, sizeof(target), PSTR("%s/%s"), destDir, base);
   if (SD.exists(target)) return SD_EXISTS;
   return SD.rename(path, target) ? SD_OK : SD_IO_FAIL;
 }
@@ -351,7 +351,7 @@ static int cleanupWalk(const char *dir, int *scanned, int depth) {
       if (!full) break;
       joinFull(dir, nm, full, 420);
       if (SD.remove(full)) removed++;
-      else Serial.printf("CLN_FAIL %s\n", full);
+      else Serial.printf(PSTR("CLN_FAIL %s\n"), full);
       free(full);
       continue;
     }
@@ -362,6 +362,6 @@ static int cleanupWalk(const char *dir, int *scanned, int depth) {
 int sdCleanupUploading() {
   int scanned = 0;
   int removed = cleanupWalk("/", &scanned, 0);
-  Serial.printf("CLN_UPLOADING removed=%d scanned=%d\n", removed, scanned);
+  Serial.printf(PSTR("CLN_UPLOADING removed=%d scanned=%d\n"), removed, scanned);
   return removed;
 }

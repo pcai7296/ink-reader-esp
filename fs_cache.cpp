@@ -37,7 +37,7 @@ static void fsJsonEscape(const char *s, char *out, size_t outSize) {
 void fsCacheNameFor(const char *dir, char *out, size_t outSize) {
   unsigned long h = 5381;
   for (const char *p = dir; *p; p++) h = ((h << 5) + h) + (unsigned char)*p;
-  snprintf(out, outSize, "%08lx.txt", h & 0xFFFFFFFFul);
+  snprintf(out, outSize, PSTR("%08lx.txt"), h & 0xFFFFFFFFul);
 }
 
 // 递归扫描一个目录, 写缓存文件（返回写缓存目录数; 递归累计; 超上限停止）
@@ -53,16 +53,16 @@ static int fsCacheScanOne(const char *dir, int depth, int *dirCount,
   if (depth > FS_CACHE_MAX_DEPTH) return 0;
   {
     File probe = SD.open(dir, FILE_READ);
-    if (!probe || !probe.isDirectory()) { if (probe) probe.close(); Serial.printf("FS_OPEN dir=%s FAIL\n", dir); return 0; }
+    if (!probe || !probe.isDirectory()) { if (probe) probe.close(); Serial.printf(PSTR("FS_OPEN dir=%s FAIL\n"), dir); return 0; }
     probe.close();
   }
   Dir root = SDFS.openDir(dir);
-  Serial.printf("FS_OPEN dir=%s isDir=1 raw(待枚举)\n", dir);
+  Serial.printf(PSTR("FS_OPEN dir=%s isDir=1 raw(待枚举)\n"), dir);
 
   // 1) 生成缓存文件路径 + 打开
   fsCacheNameFor(dir, cachePath, cachePathSize);
   char full[120];
-  snprintf(full, sizeof(full), "%s/%s", FS_CACHE_DIR, cachePath);
+  snprintf(full, sizeof(full), PSTR("%s/%s"), FS_CACHE_DIR, cachePath);
   File cache = LittleFS.open(full, "w");
   if (!cache) return 0;
   // 首行 = 原始路径（校验碰撞）
@@ -92,8 +92,8 @@ static int fsCacheScanOne(const char *dir, int depth, int *dirCount,
     if (isDir) {
       // 递归子目录（构造子路径; 栈上短缓冲, 每层 <180B）
       char child[180];
-      if (strcmp(dir, "/") == 0) snprintf(child, sizeof(child), "/%s", nm.c_str());
-      else                       snprintf(child, sizeof(child), "%s/%s", dir, nm.c_str());
+      if (strcmp(dir, "/") == 0) snprintf(child, sizeof(child), PSTR("/%s"), nm.c_str());
+      else                       snprintf(child, sizeof(child), PSTR("%s/%s"), dir, nm.c_str());
       fsCacheScanOne(child, depth + 1, dirCount, fileCount, cachePath, cachePathSize);
     }
   }
@@ -101,8 +101,8 @@ static int fsCacheScanOne(const char *dir, int depth, int *dirCount,
   if (first) cache.printf("[]");
   else       cache.printf("]");
   cache.close();
-  if (raw > 0 && n == 0) Serial.printf("FS_SCAN dir=%s raw=%d kept=0(filtered)\n", dir, raw);
-  if (n == 0 && raw == 0) Serial.printf("FS_SCAN dir=%s raw=0(empty)\n", dir);
+  if (raw > 0 && n == 0) Serial.printf(PSTR("FS_SCAN dir=%s raw=%d kept=0(filtered)\n"), dir, raw);
+  if (n == 0 && raw == 0) Serial.printf(PSTR("FS_SCAN dir=%s raw=0(empty)\n"), dir);
   (*dirCount)++;
   return 1;
 }
@@ -129,28 +129,28 @@ int fsCacheBuild() {
   // ★ 截断标记: 扫描触及上限时部分目录无缓存（fsCacheServeList 读不到 → /fs/list 回退实时 SD）。
   //   不因此禁用缓存（全量回退实时 SD 更危险——低堆 AP 会话 SD×AP 竞争崩溃）, 落标记文件供诊断。
   if (dirCount >= FS_CACHE_MAX_DIRS || fileCount >= FS_CACHE_MAX_FILES) {
-    Serial.printf("FS_CACHE_TRUNCATED dirs=%d(>=%d) items=%d(>=%d)\n",
+    Serial.printf(PSTR("FS_CACHE_TRUNCATED dirs=%d(>=%d) items=%d(>=%d)\n"),
                   dirCount, FS_CACHE_MAX_DIRS, fileCount, FS_CACHE_MAX_FILES);
     String mark = String(FS_CACHE_DIR) + "/_TRUNCATED";
     LittleFS.remove(mark);
     File t = LittleFS.open(mark, "w");
     if (t) t.close();
   }
-  Serial.printf("FS_CACHE_DONE dirs=%d items=%d\n", dirCount, fileCount);
+  Serial.printf(PSTR("FS_CACHE_DONE dirs=%d items=%d\n"), dirCount, fileCount);
   // 诊断: dump 根目录缓存文件前 120 字节（确认缓存格式/内容; 若空/畸形即写缓存或解析 bug）
   fsCacheNameFor("/", cachePath, sizeof(cachePath));
   char diag[140];
-  snprintf(diag, sizeof(diag), "%s/%s", FS_CACHE_DIR, cachePath);
+  snprintf(diag, sizeof(diag), PSTR("%s/%s"), FS_CACHE_DIR, cachePath);
   File dc = LittleFS.open(diag, "r");
   if (dc) {
-    Serial.printf("FS_CACHE_ROOT len=%u data=", (unsigned)dc.size());
+    Serial.printf(PSTR("FS_CACHE_ROOT len=%u data="), (unsigned)dc.size());
     uint8_t db[120];
     int dn = dc.read(db, sizeof(db));
     for (int i = 0; i < dn; i++) Serial.write(db[i]);
     dc.close();
     Serial.println();
   } else {
-    Serial.printf("FS_CACHE_ROOT OPEN_FAIL\n");
+    Serial.printf(PSTR("FS_CACHE_ROOT OPEN_FAIL\n"));
   }
   return dirCount;
 }
@@ -161,10 +161,10 @@ int fsCacheBuild() {
 bool fsCacheServeList(const char *dir, size_t start, size_t count, bool hideAuto) {
   char name[32], full[300];
   fsCacheNameFor(dir, name, sizeof(name));
-  snprintf(full, sizeof(full), "%s/%s", FS_CACHE_DIR, name);
+  snprintf(full, sizeof(full), PSTR("%s/%s"), FS_CACHE_DIR, name);
   File c = LittleFS.open(full, "r");
-  if (!c) { Serial.printf("FSLIST dir=%s OPEN_FAIL\n", dir); return false; }
-  Serial.printf("FSLIST dir=%s len=%u\n", dir, (unsigned)c.size());   // 只打 size, 不位移文件指针
+  if (!c) { Serial.printf(PSTR("FSLIST dir=%s OPEN_FAIL\n"), dir); return false; }
+  Serial.printf(PSTR("FSLIST dir=%s len=%u\n"), dir, (unsigned)c.size());   // 只打 size, 不位移文件指针
 
   // ★ 首行 = 原始路径, 读回比对（落地头文件"防碰撞失真"承诺; 原先只跳过不比对, 纯属虚设）:
   //   djb2 32 位 hash 碰撞或 /fslist 残留旧缓存时, 会把 A 目录内容当 B 目录返回——比对失败
@@ -180,7 +180,7 @@ bool fsCacheServeList(const char *dir, size_t start, size_t count, bool hideAuto
     }
     full[plen] = '\0';
     if (!lineOk || strcmp(full, dir) != 0) {
-      Serial.printf("FSLIST dir=%s CACHE_PATH_MISMATCH got=%s\n", dir, full);
+      Serial.printf(PSTR("FSLIST dir=%s CACHE_PATH_MISMATCH got=%s\n"), dir, full);
       c.close();
       return false;
     }
@@ -251,11 +251,11 @@ bool fsCacheServeList(const char *dir, size_t start, size_t count, bool hideAuto
     }
   }
   c.close();
-  Serial.printf("FSLIST emitted=%u more=%d\n", (unsigned)emitted, hasMore ? 1 : 0);
+  Serial.printf(PSTR("FSLIST emitted=%u more=%d\n"), (unsigned)emitted, hasMore ? 1 : 0);
   bool more = hasMore;   // 仅窗口外确有可见项才 true（原 `|| emitted>=count` 在目录恰好 count 项时过报 → 前端多发一次空请求）
   s.sendContent_P(PSTR("],\"nextStart\":"));
   char num[16];
-  snprintf(num, sizeof(num), "%u", (unsigned)(start + emitted));
+  snprintf(num, sizeof(num), PSTR("%u"), (unsigned)(start + emitted));
   s.sendContent(num);
   s.sendContent_P(PSTR(",\"hasMore\":"));
   s.sendContent_P(more ? PSTR("true") : PSTR("false"));
@@ -270,7 +270,7 @@ void fsCacheInvalidateDir(const char *dir) {
   if (!dir || !dir[0]) dir = "/";   // 空 → 根目录（ofsParent 对根一级文件返回空）
   char name[32], full[300];
   fsCacheNameFor(dir, name, sizeof(name));
-  snprintf(full, sizeof(full), "%s/%s", FS_CACHE_DIR, name);
+  snprintf(full, sizeof(full), PSTR("%s/%s"), FS_CACHE_DIR, name);
   if (LittleFS.exists(full)) LittleFS.remove(full);
-  Serial.printf("FSL_CACHE_INVAL dir=%s\n", dir);
+  Serial.printf(PSTR("FSL_CACHE_INVAL dir=%s\n"), dir);
 }

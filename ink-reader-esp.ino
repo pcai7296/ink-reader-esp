@@ -138,7 +138,7 @@ void diagLog(char level, const char *msg) {
     uint32_t gap = diagLastLoopMs ? now - diagLastLoopMs : 0;
     if (gap > diagMaxLoopGap) diagMaxLoopGap = gap;
     char line[DIAG_LINE_MAX];
-    snprintf(line, sizeof(line), "[u=%lu][%s][heap=%lu stack=%lu gap=%lu maxgap=%lu] %s\\n",
+    snprintf(line, sizeof(line), PSTR("[u=%lu][%s][heap=%lu stack=%lu gap=%lu maxgap=%lu] %s\\n"),
              (unsigned long)now, diagLevelName(level), (unsigned long)ESP.getFreeHeap(),
              (unsigned long)ESP.getFreeContStack(), (unsigned long)gap,
              (unsigned long)diagMaxLoopGap, msg ? msg : "");
@@ -460,10 +460,10 @@ void serialRemoteInject(char c) {
         else if (strcmp(gInjLine, "K3L") == 0) { gInjR3 = 2; }
         else if (strcmp(gInjLine, "B") == 0) { gInjR2 = 1; gInjR3 = 1; }
         else if (strcmp(gInjLine, "?") == 0) {
-            Serial.println("REMOTE_CMDS: K2S|K2L|K3S|K3L|B|?  (换行结尾)");
+            Serial.println(PSTR("REMOTE_CMDS: K2S|K2L|K3S|K3L|B|?  (换行结尾)"));
         }
         else {
-            traceFmt("REMOTE_UNKNOWN cmd=%s", gInjLine);
+            traceFmt(PSTR("REMOTE_UNKNOWN cmd=%s"), gInjLine);
         }
         // 置脏后 loop() 消费
     } else if (gInjLineLen < sizeof(gInjLine) - 1) {
@@ -508,14 +508,14 @@ int readBatteryMV() {
             lastBatteryMV = (int)((sum * 5607UL) / (20UL * 1024UL));
             // 诊断: 异常读数 (0mV 或 >4.3V) 打日志, 定位"电量显示0"是电池耗尽还是采样链路问题
             if (lastBatteryMV == 0 || lastBatteryMV > 4300) {
-                traceFmt("BAT_DIAG sum=%lu mv=%d attempt=%u", (unsigned long)sum, lastBatteryMV, attempt);
+                traceFmt(PSTR("BAT_DIAG sum=%lu mv=%d attempt=%u"), (unsigned long)sum, lastBatteryMV, attempt);
             }
             return lastBatteryMV;
         }
         delay(5);   // 重试间隔: 让 GPIO12/SD 状态稳定
     }
     lastBatteryMV = 0;
-    traceFmt("BAT_DIAG sum=0 mv=0 all-fail");
+    traceFmt(PSTR("BAT_DIAG sum=0 mv=0 all-fail"));
     return 0;
 }
 uint8_t batPercent(int v_mV) {
@@ -619,14 +619,14 @@ void loadWeatherCache() {
     if (wCachedSummary[0]) return;
     File f = readerFs().open("/weather.dat", "r");
     if (!f) {
-        traceFmt("WEATHER_CACHE_READ_OPEN_FAIL");
+        traceFmt(PSTR("WEATHER_CACHE_READ_OPEN_FAIL"));
         return;
     }
     int n = f.read((uint8_t *)wCachedSummary, sizeof(wCachedSummary) - 1);
     if (n > 0) wCachedSummary[n] = '\0';
     f.close();
     if (!strchr(wCachedSummary, '|')) wCachedSummary[0] = '\0';   // 格式校验
-    traceFmt("WEATHER_CACHE_READ_OK n=%d sum=%s", n, wCachedSummary);
+    traceFmt(PSTR("WEATHER_CACHE_READ_OK n=%d sum=%s"), n, wCachedSummary);
 }
 
 // 天气获取成功后写 LittleFS 缓存（主页摘要持久化）
@@ -634,12 +634,12 @@ void saveWeatherCache() {
     if (!wDataValid) return;
     File f = readerFs().open("/weather.dat", "w");
     if (!f) {
-        traceFmt("WEATHER_CACHE_WRITE_OPEN_FAIL");
+        traceFmt(PSTR("WEATHER_CACHE_WRITE_OPEN_FAIL"));
         return;
     }
     f.printf("%s|%s", wActual.weatherName, wActual.temp);
     f.close();
-    traceFmt("WEATHER_CACHE_WRITE_OK %s|%s", wActual.weatherName, wActual.temp);
+    traceFmt(PSTR("WEATHER_CACHE_WRITE_OK %s|%s"), wActual.weatherName, wActual.temp);
 }
 String recentReadPath;
 uint32_t recentReadPage = 0;
@@ -757,7 +757,7 @@ static const size_t kChapterBufSize = kChapterPageTabOff + sizeof(uint32_t) * CH
 static bool chapterEnsureBuffers() {
     if (chapterBuf) return true;
     chapterBuf = (uint8_t *)malloc(kChapterBufSize);
-    if (!chapterBuf) { traceFmtLevel('W', "CH_BUF_ALLOC_FAIL need=%lu", (unsigned long)kChapterBufSize); return false; }
+    if (!chapterBuf) { traceFmtLevel('W', PSTR("CH_BUF_ALLOC_FAIL need=%lu"), (unsigned long)kChapterBufSize); return false; }
     chapterRows = (ChapterRow *)chapterBuf;
     chapterPageOffsets = (uint32_t *)(chapterBuf + kChapterPageTabOff);
     return true;
@@ -899,7 +899,7 @@ void loadRecentReadSummary() {
     recentReadValid = false;
     recentReadBuilding = false;
     if (!readerFs().exists(RECENT_READ_PATH)) {
-        traceFmt("RECENT_ABORT file=%d", readerFs().exists(RECENT_READ_PATH) ? 1 : 0);
+        traceFmt(PSTR("RECENT_ABORT file=%d"), readerFs().exists(RECENT_READ_PATH) ? 1 : 0);
         return;
     }
     File f = readerFs().open(RECENT_READ_PATH, "r");
@@ -914,12 +914,12 @@ void loadRecentReadSummary() {
     if (recentReadPath.length() == 0 || !readerFs().exists(recentReadPath)) {
         readerBusReady("recent_txt_retry");   // 同上: 大书构建期 SD 忙, 存在性判定失败会误隐藏主卡
         if (recentReadPath.length() == 0 || !readerFs().exists(recentReadPath)) {
-            traceFmt("RECENT_TXT_MISS len=%u exists=%d", (unsigned)recentReadPath.length(), readerFs().exists(recentReadPath) ? 1 : 0);
+            traceFmt(PSTR("RECENT_TXT_MISS len=%u exists=%d"), (unsigned)recentReadPath.length(), readerFs().exists(recentReadPath) ? 1 : 0);
             recentReadPath = "";
             return;
         }
     }
-    traceFmt("RECENT_TXT path=%s", recentReadPath.c_str());
+    traceFmt(PSTR("RECENT_TXT path=%s"), recentReadPath.c_str());
     String indexPath = recentReadPath;
     int dot = indexPath.lastIndexOf('.');
     if (dot > 0) indexPath = indexPath.substring(0, dot);
@@ -928,7 +928,7 @@ void loadRecentReadSummary() {
         String legacyPath = recentReadPath + ".i1";
         if (readerFs().exists(legacyPath.c_str())) indexPath = legacyPath;
     }
-    traceFmt("RECENT_INDEX path=%s", indexPath.c_str());
+    traceFmt(PSTR("RECENT_INDEX path=%s"), indexPath.c_str());
     // 构建中/构建中断进度在 sidecar (indexPath+"p", 如 小说.i1p), 优先于 .i1 记录[0]:
     // 后台构建或中断续建时主页才能与阅读器显示一致 (阅读器 startTxtReader 同优先级)。
     uint32_t savedOffset = 0;
@@ -974,7 +974,7 @@ void loadRecentReadSummary() {
         recentReadTotalPages = 0;
         recentReadBuilding = true;   // 索引太小/损坏: 属构建中/待重建, 主卡显示"构建中"
         recentReadValid = true;   // 文件存在即视为有上次阅读记录 (页码可为 0)
-        traceFmt("RECENT_INCOMPLETE valid=1 page=0 total=0 off=%lu", (unsigned long)savedOffset);
+        traceFmt(PSTR("RECENT_INCOMPLETE valid=1 page=0 total=0 off=%lu"), (unsigned long)savedOffset);
         return;
     }
     recentReadTotalPages = (index.size() / 8) - 1;
@@ -1009,7 +1009,7 @@ void loadRecentReadSummary() {
     if (!recScanBuf) {
         index.close();
         recentReadValid = true;
-        traceFmt("RECENT_NOBUF valid=1 page=1 total=%lu off=%lu", (unsigned long)recentReadTotalPages,
+        traceFmt(PSTR("RECENT_NOBUF valid=1 page=1 total=%lu off=%lu"), (unsigned long)recentReadTotalPages,
                  (unsigned long)savedOffset);
         return;
     }
@@ -1045,7 +1045,7 @@ void loadRecentReadSummary() {
     index.close();
     free(recScanBuf);
     recentReadValid = true;
-    traceFmt("RECENT_OK valid=1 page=%lu total=%lu off=%lu", (unsigned long)recentReadPage,
+    traceFmt(PSTR("RECENT_OK valid=1 page=%lu total=%lu off=%lu"), (unsigned long)recentReadPage,
              (unsigned long)recentReadTotalPages, (unsigned long)savedOffset);
 }
 
@@ -1069,10 +1069,10 @@ void clearRecentReadPathIfMatches(const String &path) {
 void openRecentRead() {
     // 首页已经显示过有效记录时，直接使用缓存路径，避免再次读取 SD 覆盖有效状态。
     if (!recentReadValid || recentReadPath.length() == 0) loadRecentReadSummary();
-    traceFmt("RECENT_OPEN valid=%d path=%s page=%lu", recentReadValid ? 1 : 0,
+    traceFmt(PSTR("RECENT_OPEN valid=%d path=%s page=%lu"), recentReadValid ? 1 : 0,
              recentReadPath.c_str(), (unsigned long)recentReadPage);
     if (!recentReadValid || recentReadPath.length() == 0) {
-        showMsg("暂无阅读记录", "请先打开TXT");
+        showMsg(PSTR("暂无阅读记录"), "请先打开TXT");
         return;
     }
     startTxtReader(recentReadPath.c_str(), false);
@@ -1086,11 +1086,11 @@ void renderHome(bool full) {
     struct tm *tmv = nowT > 1600000000UL ? localtime(&nowT) : nullptr;
     char tbuf[12], dbuf[24];
     if (tmv) {
-        snprintf(tbuf, sizeof(tbuf), "%02d:%02d", tmv->tm_hour, tmv->tm_min);
-        snprintf(dbuf, sizeof(dbuf), "%02d-%02d %s", tmv->tm_mon + 1, tmv->tm_mday, weekdayCn(tmv->tm_wday));
+        snprintf(tbuf, sizeof(tbuf), PSTR("%02d:%02d"), tmv->tm_hour, tmv->tm_min);
+        snprintf(dbuf, sizeof(dbuf), PSTR("%02d-%02d %s"), tmv->tm_mon + 1, tmv->tm_mday, weekdayCn(tmv->tm_wday));
     } else {
-        snprintf(tbuf, sizeof(tbuf), "--:--");
-        snprintf(dbuf, sizeof(dbuf), "-- -- ---");
+        snprintf(tbuf, sizeof(tbuf), PSTR("--:--"));
+        snprintf(dbuf, sizeof(dbuf), PSTR("-- -- ---"));
     }
     drawTextUTF8(4, 0, tbuf, 60, true);
     drawTextUTF8(70, 0, dbuf, 90, true);
@@ -1100,21 +1100,21 @@ void renderHome(bool full) {
         loadWeatherConfig(wc);
         char wbuf[40];
         if (wDataValid && wActual.temp[0]) {
-            snprintf(wbuf, sizeof(wbuf), "%s %s℃", wc.city[0] ? wc.city : "--", wActual.temp);
+            snprintf(wbuf, sizeof(wbuf), PSTR("%s %s℃"), wc.city[0] ? wc.city : "--", wActual.temp);
         } else {
             loadWeatherCache();
             char *sep = strchr(wCachedSummary, '|');
             if (sep && sep != wCachedSummary) {
-                snprintf(wbuf, sizeof(wbuf), "%s %s℃", wc.city[0] ? wc.city : "--", sep + 1);
+                snprintf(wbuf, sizeof(wbuf), PSTR("%s %s℃"), wc.city[0] ? wc.city : "--", sep + 1);
             } else {
-                snprintf(wbuf, sizeof(wbuf), "%s --℃", wc.city[0] ? wc.city : "--");
+                snprintf(wbuf, sizeof(wbuf), PSTR("%s --℃"), wc.city[0] ? wc.city : "--");
             }
         }
         drawTextUTF8(162, 0, wbuf, 88, true);
     }
     int mv = readBatteryMV();
     char bbuf[12];
-    snprintf(bbuf, sizeof(bbuf), "电量%d%%", batPercent(mv));
+    snprintf(bbuf, sizeof(bbuf), PSTR("电量%d%%"), batPercent(mv));
     drawTextUTF8(228, 0, bbuf, 66, true);
     if (isCharging()) drawLightningIcon(276, 1, true);  // 充电: 画闪电图标
     fillRect(0, 15, SCR_W, 1, true);
@@ -1124,15 +1124,15 @@ void renderHome(bool full) {
     char recentTitle[96];
     char recentDetail[56];
     if (!sdAvailable) {
-        snprintf(recentTitle, sizeof(recentTitle), "请插入SD卡");
-        snprintf(recentDetail, sizeof(recentDetail), "上次阅读");
+        snprintf(recentTitle, sizeof(recentTitle), PSTR("请插入SD卡"));
+        snprintf(recentDetail, sizeof(recentDetail), PSTR("上次阅读"));
     } else if (!recentReadValid) {
-        snprintf(recentTitle, sizeof(recentTitle), "暂无阅读记录");
-        snprintf(recentDetail, sizeof(recentDetail), "上次阅读");
+        snprintf(recentTitle, sizeof(recentTitle), PSTR("暂无阅读记录"));
+        snprintf(recentDetail, sizeof(recentDetail), PSTR("上次阅读"));
     } else {
         const char *name = strrchr(recentReadPath.c_str(), '/');
         name = name ? name + 1 : recentReadPath.c_str();
-        snprintf(recentTitle, sizeof(recentTitle), "%s", name);
+        snprintf(recentTitle, sizeof(recentTitle), PSTR("%s"), name);
     }
     fillRect(2, mY, 292, mH, false);
     drawTextUTF8(6, mY + 3, recentTitle, 250, true);   // 书名 (去掉"继续阅读"标题行, 避免与进度条重叠)
@@ -1149,14 +1149,14 @@ void renderHome(bool full) {
         formatProgressPercent((uint64_t)recentReadPage, (uint64_t)recentReadTotalPages, pr);
         drawTextUTF8(pbX + pbW + 6, pbY - 5, pr, 60, true);
         char pg[20];
-        snprintf(pg, sizeof(pg), "%lu/%lu页", (unsigned long)recentReadPage, (unsigned long)recentReadTotalPages);
+        snprintf(pg, sizeof(pg), PSTR("%lu/%lu页"), (unsigned long)recentReadPage, (unsigned long)recentReadTotalPages);
         drawTextUTF8(228, pbY - 5, pg, 68, true);
     } else if (recentReadValid && recentReadBuilding) {
         char pg[32];
         if (recentReadPage >= 1)
-            snprintf(pg, sizeof(pg), "第%lu页 构建中", (unsigned long)recentReadPage);
+            snprintf(pg, sizeof(pg), PSTR("第%lu页 构建中"), (unsigned long)recentReadPage);
         else
-            snprintf(pg, sizeof(pg), "构建中…");
+            snprintf(pg, sizeof(pg), PSTR("构建中…"));
         drawTextUTF8(6, mY + 25, pg, 230, true);
     } else {
         drawTextUTF8(6, mY + 25, recentDetail, 200, true);
@@ -1238,7 +1238,7 @@ void enterHomeCard() {
             renderSettingsPage(true);
             saveSleepRecord();   // 界面快照: 已进入设置页
             break;
-        default: showMsg("功能暂未实现", "稍后开放"); break;
+        default: showMsg(PSTR("功能暂未实现"), "稍后开放"); break;
     }
 }
 
@@ -1442,41 +1442,41 @@ void exitNetworkPage() {
 // 未保存 WiFi 配置: 校准页骨架 + "未配网" 提示（全刷 ≈1.5s 停留）, 不启动网络校准, 随后直接进时钟页
 void renderClockNoWifi() {
     fillRect(0, 0, SCR_W, SCR_H, false);
-    drawTextUTF8(4, 2, "时间校准", 100, true);
+    drawTextUTF8(4, 2, PSTR("时间校准"), 100, true);
     const int y = 42;
-    drawTextUTF8(25, y, "设备", 42, true);
-    drawTextUTF8(126, y, "路由器", 56, false);
-    drawTextUTF8(238, y, "互联网", 56, false);
-    drawTextUTF8(66, y + 1, "···", 52, true);
-    drawTextUTF8(178, y + 1, "···", 52, true);
-    drawTextUTF8(4, 76, "未配网", 288, true);
-    drawTextUTF8(4, 96, "未保存 WiFi 配置，跳过校准", 288, true);
-    drawTextUTF8(4, 112, "进入时钟", 288, true);
+    drawTextUTF8(25, y, PSTR("设备"), 42, true);
+    drawTextUTF8(126, y, PSTR("路由器"), 56, false);
+    drawTextUTF8(238, y, PSTR("互联网"), 56, false);
+    drawTextUTF8(66, y + 1, PSTR("···"), 52, true);
+    drawTextUTF8(178, y + 1, PSTR("···"), 52, true);
+    drawTextUTF8(4, 76, PSTR("未配网"), 288, true);
+    drawTextUTF8(4, 96, PSTR("未保存 WiFi 配置，跳过校准"), 288, true);
+    drawTextUTF8(4, 112, PSTR("进入时钟"), 288, true);
     refresh(true);   // 全刷呈现提示(约1.5s)后由调用方进入时钟页
 }
 
 void renderClockConnect(bool full) {
     fillRect(0, 0, SCR_W, SCR_H, false);
-    drawTextUTF8(4, 2, "时间校准", 100, true);
+    drawTextUTF8(4, 2, PSTR("时间校准"), 100, true);
     const int y = 42;
     const bool routerOk = clockManagerStage() >= 2;
     const bool internetOk = clockManagerStage() >= 3;
-    drawTextUTF8(25, y, "设备", 42, true);
-    drawTextUTF8(126, y, "路由器", 56, routerOk);
-    drawTextUTF8(238, y, "互联网", 56, internetOk);
+    drawTextUTF8(25, y, PSTR("设备"), 42, true);
+    drawTextUTF8(126, y, PSTR("路由器"), 56, routerOk);
+    drawTextUTF8(238, y, PSTR("互联网"), 56, internetOk);
     drawTextUTF8(66, y + 1, routerOk ? "━━▶" : "···", 52, true);
     drawTextUTF8(178, y + 1, internetOk ? "━━▶" : "···", 52, true);
     drawTextUTF8(4, 76, clockManagerStageText(), 288, true);
     if (clockManagerIsActive()) {
         // 对齐 A7 校准页文案（交互保持右键长按跳过）
-        drawTextUTF8(4, 96, "手动跳过校准", 288, true);
-        drawTextUTF8(4, 112, "此时 按下按键3 可跳过校准", 288, true);
+        drawTextUTF8(4, 96, PSTR("手动跳过校准"), 288, true);
+        drawTextUTF8(4, 112, PSTR("此时 按下按键3 可跳过校准"), 288, true);
     } else if (clockManagerSyncSucceeded()) {
         // A7 对齐: 同步时间(校时)后显示时钟芯片写入结果
         // (成功=读取数据正常; 失败=数据出错或不存在，使用软件时钟)
         drawTextUTF8(4, 100, clockManagerClockChipText(), 288, true);
     } else {
-        drawTextUTF8(4, 100, "右键长按：进入时钟", 288, true);
+        drawTextUTF8(4, 100, PSTR("右键长按：进入时钟"), 288, true);
     }
     refresh(full);
 }
@@ -1517,9 +1517,9 @@ void fetchHitokotoFlow() {
     char err[16];
     if (!fetchHitokoto(yiyanText, sizeof(yiyanText), err, sizeof(err))) {
         yiyanText[0] = '\0';
-        debugFmt("HITOKOTO_FAIL %s", err);
+        debugFmt(PSTR("HITOKOTO_FAIL %s"), err);
     } else {
-        debugFmt("HITOKOTO_OK len=%u", (unsigned)strlen(yiyanText));
+        debugFmt(PSTR("HITOKOTO_OK len=%u"), (unsigned)strlen(yiyanText));
     }
 }
 
@@ -1534,12 +1534,12 @@ void enterClockPage() {
         struct tm *dbgTm = dbgNow > 1600000000UL ? localtime(&dbgNow) : nullptr;
         char dbgBuf[40];
         if (dbgTm) {
-            snprintf(dbgBuf, sizeof(dbgBuf), "%04d-%02d-%02d %02d:%02d:%02d", dbgTm->tm_year + 1900,
+            snprintf(dbgBuf, sizeof(dbgBuf), PSTR("%04d-%02d-%02d %02d:%02d:%02d"), dbgTm->tm_year + 1900,
                      dbgTm->tm_mon + 1, dbgTm->tm_mday, dbgTm->tm_hour, dbgTm->tm_min, dbgTm->tm_sec);
         } else {
-            snprintf(dbgBuf, sizeof(dbgBuf), "(invalid)");
+            snprintf(dbgBuf, sizeof(dbgBuf), PSTR("(invalid)"));
         }
-        debugFmt("CLOCK_PAGE_ENTER epoch=%lu local=%s mod=%u", (unsigned long)dbgNow, dbgBuf,
+        debugFmt(PSTR("CLOCK_PAGE_ENTER epoch=%lu local=%s mod=%u"), (unsigned long)dbgNow, dbgBuf,
                  (unsigned)settingsGetClockMod());
     }
     // 联网数据: 一言(仅精美拉取) + B粉(倒计时不需网络); 失败静默, 屏幕仍显示上一页
@@ -1560,7 +1560,7 @@ void enterClockDisguise() {
     yiyanText[0] = '\0';         // 伪装不联网: 不显示一言 (避免暴露联网能力)
     renderClockPage(false);      // 局刷显示时钟页 (校准状态), 与翻页同效: 只清空文字局刷, 不闪屏
     saveSleepRecord();           // 界面快照: 伪装模式 (复位后按记录恢复)
-    debugLine("DISGUISE_ENTER");
+    debugLine(PSTR("DISGUISE_ENTER"));
 }
 
 // 温湿度参考文本: 无有效数据返回 false 且 out 置空; 有则 "26℃ 62%"
@@ -1570,7 +1570,7 @@ static bool clockThText(char *out, size_t cap) {
     const char *tp = wActual.temp[0] ? wActual.temp : "--";
     const char *hum = wActual.humidity[0] ? wActual.humidity
                       : (wFuture.humidity[0] ? wFuture.humidity : "--");
-    snprintf(out, cap, "%s℃ %s%%", tp, hum);
+    snprintf(out, cap, PSTR("%s℃ %s%%"), tp, hum);
     return true;
 }
 
@@ -1639,19 +1639,19 @@ static char gFansErr[16] = "";
 static void clockFansRequest() {
     const char *t = settingsGetInAWord();
     if (classifyInAWord(t) != IAM_FANS) return;
-    if (WiFi.status() != WL_CONNECTED) { gFansOk = false; snprintf(gFansErr, sizeof(gFansErr), "无网络"); return; }
+    if (WiFi.status() != WL_CONNECTED) { gFansOk = false; snprintf(gFansErr, sizeof(gFansErr), PSTR("无网络")); return; }
     const char *p = t + 1 + 3;   // 跳过 'B'+粉
     char uid[33];
     size_t w = 0;
     while (p[0] >= '0' && p[0] <= '9' && w + 1 < sizeof(uid)) uid[w++] = *p++;
     uid[w] = '\0';
-    if (w == 0) { gFansOk = false; snprintf(gFansErr, sizeof(gFansErr), "无UID"); return; }
+    if (w == 0) { gFansOk = false; snprintf(gFansErr, sizeof(gFansErr), PSTR("无UID")); return; }
     uint32_t v = 0;
     char err[16];
     gFansOk = fetchBiliFollower(uid, &v, err, sizeof(err));
     if (gFansOk) { gFansVal = v; gFansErr[0] = '\0'; }
-    else snprintf(gFansErr, sizeof(gFansErr), "%s", err);
-    debugFmt("BILI_FANS ok=%d val=%lu err=%s", gFansOk ? 1 : 0, (unsigned long)gFansVal, gFansErr);
+    else snprintf(gFansErr, sizeof(gFansErr), PSTR("%s"), err);
+    debugFmt(PSTR("BILI_FANS ok=%d val=%lu err=%s"), gFansOk ? 1 : 0, (unsigned long)gFansVal, gFansErr);
 }
 
 // 文本"重置系统" → 全设置恢复 + 重启 (每次开机只处理一次; 恢复后文本清空)
@@ -1688,7 +1688,7 @@ static void resetAllSettingsToDefault() {
     wc.magic = 0x57544852UL;
     strncpy(wc.city, "深圳", sizeof(wc.city) - 1);
     saveWeatherConfig(wc);
-    debugLine("INWORD_RESET all defaults");
+    debugLine(PSTR("INWORD_RESET all defaults"));
     ESP.restart();
     delay(3000);   // 重启前防御
 }
@@ -1710,11 +1710,11 @@ static void clockBuildSubText(char *out, size_t cap, bool pretty) {
     const char *t = settingsGetInAWord();
     int mode = classifyInAWord(t);
     if (mode == IAM_YIYAN) {
-        if (pretty && yiyanText[0]) snprintf(out, cap, "%s", yiyanText);
+        if (pretty && yiyanText[0]) snprintf(out, cap, PSTR("%s"), yiyanText);
         return;
     }
     if (mode == IAM_CUSTOM) {
-        if (pretty) { snprintf(out, cap, "%s", t); while (utf8Width(out) > 286 && strlen(out) > 1) utf8ChopOne(out); }
+        if (pretty) { snprintf(out, cap, PSTR("%s"), t); while (utf8Width(out) > 286 && strlen(out) > 1) utf8ChopOne(out); }
         return;
     }
     if (mode == IAM_COUNTDOWN) {
@@ -1722,22 +1722,22 @@ static void clockBuildSubText(char *out, size_t cap, bool pretty) {
         if (parseCountdown(t, &y, &m, &d, ev, sizeof(ev))) {
             time_t nowT = clockManagerNow();
             struct tm *nw = nowT > 1600000000UL ? localtime(&nowT) : nullptr;
-            if (!nw) { snprintf(out, cap, "倒计时 %d-%02u-%02u", y, m, d); return; }
+            if (!nw) { snprintf(out, cap, PSTR("倒计时 %d-%02u-%02u"), y, m, d); return; }
             long diff = (long)(inaDaysFromCivil(y, m, d) -
                                inaDaysFromCivil(nw->tm_year + 1900, (unsigned)(nw->tm_mon + 1), (unsigned)nw->tm_mday));
             const char *evn = ev[0] ? ev : "目标";
-            if (diff > 0) snprintf(out, cap, "距%s还有%ld天", evn, diff);
-            else if (diff == 0) snprintf(out, cap, "今天是%s", evn);
-            else snprintf(out, cap, "%s已过%ld天", evn, -diff);
-        } else snprintf(out, cap, "倒计时格式错误");
+            if (diff > 0) snprintf(out, cap, PSTR("距%s还有%ld天"), evn, diff);
+            else if (diff == 0) snprintf(out, cap, PSTR("今天是%s"), evn);
+            else snprintf(out, cap, PSTR("%s已过%ld天"), evn, -diff);
+        } else snprintf(out, cap, PSTR("倒计时格式错误"));
         return;
     }
     if (mode == IAM_FANS) {
         if (gFansOk) {
-            if (gFansVal < 10000) snprintf(out, cap, "BiliBili: %lu", (unsigned long)gFansVal);
-            else snprintf(out, cap, "BiliBili: %lu.%luW",
+            if (gFansVal < 10000) snprintf(out, cap, PSTR("BiliBili: %lu"), (unsigned long)gFansVal);
+            else snprintf(out, cap, PSTR("BiliBili: %lu.%luW"),
                           (unsigned long)(gFansVal / 10000), (unsigned long)((gFansVal % 10000) / 1000));
-        } else snprintf(out, cap, "B粉获取错误：%s", gFansErr[0] ? gFansErr : "未获取");
+        } else snprintf(out, cap, PSTR("B粉获取错误：%s"), gFansErr[0] ? gFansErr : "未获取");
         return;
     }
     // RESET 不显示
@@ -1752,7 +1752,7 @@ void renderClockPage(bool full) {
     struct tm *tmNow = now > 1600000000UL ? localtime(&now) : nullptr;
     char line[40];
     if (!tmNow) {
-        drawTextUTF8(78, 25, "时间未知", 140, true);
+        drawTextUTF8(78, 25, PSTR("时间未知"), 140, true);
         refresh(full);
         return;
     }
@@ -1770,17 +1770,17 @@ void renderClockPage(bool full) {
         const int dw = 46, dh = 78, dt = 7, gap = 6, colonW = 16;
         const int totalW = dw * 4 + gap * 3 + colonW;
         int x = (SCR_W - totalW) / 2, y = 2;
-        snprintf(line, sizeof(line), "%02d:%02d", dispH, tmNow->tm_min);
+        snprintf(line, sizeof(line), PSTR("%02d:%02d"), dispH, tmNow->tm_min);
         drawClockTimeDigits(x, y, dw, dh, dt, gap, colonW, line);
         if (settingsGetClockFormat() == 1) drawTextUTF8(256, 4, isAm ? "上午" : "下午", 36, true);
         fillRect(0, 94, SCR_W, 1, true);
         // 底部 A 行: 左 校准 + 小温湿度 (紧凑), 右 日期
-        snprintf(line, sizeof(line), "%04d年%02d月%02d日", tmNow->tm_year + 1900, tmNow->tm_mon + 1, tmNow->tm_mday);
+        snprintf(line, sizeof(line), PSTR("%04d年%02d月%02d日"), tmNow->tm_year + 1900, tmNow->tm_mon + 1, tmNow->tm_mday);
         char left[72];
         char th[32];
         th[0] = '\0';
-        if (clockThText(th, sizeof(th))) snprintf(left, sizeof(left), "%s %s", clockCalibText(), th);
-        else snprintf(left, sizeof(left), "%s", clockCalibText());
+        if (clockThText(th, sizeof(th))) snprintf(left, sizeof(left), PSTR("%s %s"), clockCalibText(), th);
+        else snprintf(left, sizeof(left), PSTR("%s"), clockCalibText());
         while (utf8Width(left) > 168 && strlen(left) > 1) utf8ChopOne(left);   // 不压右侧日期
         drawTextUTF8(4, 96, left, 168, true);
         drawTextUTF8(180, 96, line, 112, true);
@@ -1796,7 +1796,7 @@ void renderClockPage(bool full) {
     } else {
         // ---------- 精美 (重新设计布局; 7 段数码管风格不变) ----------
         // 顶行: 日期 | 校准 | (12h 上午/下午)
-        snprintf(line, sizeof(line), "%04d年%02d月%02d日", tmNow->tm_year + 1900, tmNow->tm_mon + 1, tmNow->tm_mday);
+        snprintf(line, sizeof(line), PSTR("%04d年%02d月%02d日"), tmNow->tm_year + 1900, tmNow->tm_mon + 1, tmNow->tm_mday);
         drawTextUTF8(4, 2, line, 132, true);
         drawTextUTF8(150, 2, clockCalibText(), 60, true);
         if (settingsGetClockFormat() == 1) drawTextUTF8(258, 2, isAm ? "上午" : "下午", 36, true);
@@ -1804,7 +1804,7 @@ void renderClockPage(bool full) {
         const int dw = 46, dh = 60, dt = 6, gap = 6, colonW = 16;
         const int totalW = dw * 4 + gap * 3 + colonW;
         int x = (SCR_W - totalW) / 2, y = 16;
-        snprintf(line, sizeof(line), "%02d:%02d", dispH, tmNow->tm_min);
+        snprintf(line, sizeof(line), PSTR("%02d:%02d"), dispH, tmNow->tm_min);
         drawClockTimeDigits(x, y, dw, dh, dt, gap, colonW, line);
         // 温湿度: 7 段小号数字大字感 (标签+温度+℃ / 标签+湿度+%), 顺序排布不重叠; 缺失则留空
         if (wDataValid) {
@@ -1814,15 +1814,15 @@ void renderClockPage(bool full) {
             const char *hum = wActual.humidity[0] ? wActual.humidity
                               : (wFuture.humidity[0] ? wFuture.humidity : "--");
             int gx = 42;
-            drawTextUTF8(gx, gy + 6, "温", 20, true);
+            drawTextUTF8(gx, gy + 6, PSTR("温"), 20, true);
             gx += 16 + 8;
             gx += drawMini7Seq(gx, gy, mdw, mdh, mdt, mgap, tp, true);
-            drawTextUTF8(gx + 4, gy + 6, "℃", 20, true);
+            drawTextUTF8(gx + 4, gy + 6, PSTR("℃"), 20, true);
             gx += 24 + 18;
-            drawTextUTF8(gx, gy + 6, "湿", 20, true);
+            drawTextUTF8(gx, gy + 6, PSTR("湿"), 20, true);
             gx += 16 + 8;
             gx += drawMini7Seq(gx, gy, mdw, mdh, mdt, mgap, hum, true);
-            drawTextUTF8(gx + 4, gy + 6, "%", 20, true);
+            drawTextUTF8(gx + 4, gy + 6, PSTR("%"), 20, true);
         }
         // 副文本行: 一言/自定义句(仅精美) 与 倒计时/B粉(两风格共用入口); 无分割线避免与温湿度区交错
         char sub[96];
@@ -1840,9 +1840,9 @@ void formatTzOffset(int16_t min, char *buf, size_t size) {
     int h = (min < 0 ? -min : min) / 60;
     int m = (min < 0 ? -min : min) % 60;
     if (m == 0) {
-        snprintf(buf, size, "UTC%c%d", sign > 0 ? '+' : '-', h);
+        snprintf(buf, size, PSTR("UTC%c%d"), sign > 0 ? '+' : '-', h);
     } else {
-        snprintf(buf, size, "UTC%c%d:%02d", sign > 0 ? '+' : '-', h, m);
+        snprintf(buf, size, PSTR("UTC%c%d:%02d"), sign > 0 ? '+' : '-', h, m);
     }
 }
 
@@ -1877,43 +1877,43 @@ void renderSettingsPage(bool full) {
         bool dev = false;   // 未开发
         switch (settingsTab) {
             case SETTINGS_TAB_WIFI:
-                if (i == 0) { snprintf(name, sizeof(name), "输出功率"); snprintf(lastDetail, sizeof(lastDetail), "%udB", settingsGetOutputPower()); }
-                else if (i == 1) { snprintf(name, sizeof(name), "NTP服务器"); snprintf(lastDetail, sizeof(lastDetail), "%s", settingsGetNtpServer()); }
-                else { snprintf(name, sizeof(name), "SD频率"); snprintf(lastDetail, sizeof(lastDetail), "%uMHz", settingsGetSdFrequency()); }
+                if (i == 0) { snprintf(name, sizeof(name), PSTR("输出功率")); snprintf(lastDetail, sizeof(lastDetail), PSTR("%udB"), settingsGetOutputPower()); }
+                else if (i == 1) { snprintf(name, sizeof(name), PSTR("NTP服务器")); snprintf(lastDetail, sizeof(lastDetail), PSTR("%s"), settingsGetNtpServer()); }
+                else { snprintf(name, sizeof(name), PSTR("SD频率")); snprintf(lastDetail, sizeof(lastDetail), PSTR("%uMHz"), settingsGetSdFrequency()); }
                 break;
             case SETTINGS_TAB_SD:
-                if (i == 0) { snprintf(name, sizeof(name), "SD卡启用"); snprintf(lastDetail, sizeof(lastDetail), "%s", settingsGetSdEnabled() ? "启用" : "未启用"); }
-                else { snprintf(name, sizeof(name), "相册自动播放"); dev = true; }
+                if (i == 0) { snprintf(name, sizeof(name), PSTR("SD卡启用")); snprintf(lastDetail, sizeof(lastDetail), PSTR("%s"), settingsGetSdEnabled() ? "启用" : "未启用"); }
+                else { snprintf(name, sizeof(name), PSTR("相册自动播放")); dev = true; }
                 break;
             case SETTINGS_TAB_CLOCK:
-                if (i == 0) { snprintf(name, sizeof(name), "时钟格式"); snprintf(lastDetail, sizeof(lastDetail), "%s", s.clockFormat ? "12小时制" : "24小时制"); }
-                else if (i == 1) { snprintf(name, sizeof(name), "时区"); formatTzOffset(s.tzOffsetMin, lastDetail, sizeof(lastDetail)); }
-                else if (i == 2) { snprintf(name, sizeof(name), "全刷间隔"); snprintf(lastDetail, sizeof(lastDetail), "%u分钟", settingsGetFullRefreshMin()); }
-                else if (i == 3) { snprintf(name, sizeof(name), "校准间隔"); snprintf(lastDetail, sizeof(lastDetail), "%u分钟", settingsGetCalibIntervalMin()); }
-                else { snprintf(name, sizeof(name), "误差补偿"); dev = true; }
+                if (i == 0) { snprintf(name, sizeof(name), PSTR("时钟格式")); snprintf(lastDetail, sizeof(lastDetail), PSTR("%s"), s.clockFormat ? "12小时制" : "24小时制"); }
+                else if (i == 1) { snprintf(name, sizeof(name), PSTR("时区")); formatTzOffset(s.tzOffsetMin, lastDetail, sizeof(lastDetail)); }
+                else if (i == 2) { snprintf(name, sizeof(name), PSTR("全刷间隔")); snprintf(lastDetail, sizeof(lastDetail), PSTR("%u分钟"), settingsGetFullRefreshMin()); }
+                else if (i == 3) { snprintf(name, sizeof(name), PSTR("校准间隔")); snprintf(lastDetail, sizeof(lastDetail), PSTR("%u分钟"), settingsGetCalibIntervalMin()); }
+                else { snprintf(name, sizeof(name), PSTR("误差补偿")); dev = true; }
                 break;
             case SETTINGS_TAB_WEATHER:
                 if (i == 0) {
-                    snprintf(name, sizeof(name), "天气城市");
+                    snprintf(name, sizeof(name), PSTR("天气城市"));
                     WeatherConfig wc; loadWeatherConfig(wc);
-                    snprintf(lastDetail, sizeof(lastDetail), "%s", wc.city[0] ? wc.city : "深圳");
-                } else if (i == 1) { snprintf(name, sizeof(name), "夜间更新"); snprintf(lastDetail, sizeof(lastDetail), "%s", settingsGetNightUpdate() ? "更新" : "不更新"); }
-                else if (i == 2) { snprintf(name, sizeof(name), "长按触发"); snprintf(lastDetail, sizeof(lastDetail), "%ums", settingsGetLongPressMs()); }
-                else if (i == 3) { snprintf(name, sizeof(name), "屏幕旋转"); snprintf(lastDetail, sizeof(lastDetail), "方向%u", settingsGetSetRotation()); }
-                else { snprintf(name, sizeof(name), "快速翻页"); snprintf(lastDetail, sizeof(lastDetail), "%s", settingsGetFastFlip() ? "开" : "关"); }
+                    snprintf(lastDetail, sizeof(lastDetail), PSTR("%s"), wc.city[0] ? wc.city : "深圳");
+                } else if (i == 1) { snprintf(name, sizeof(name), PSTR("夜间更新")); snprintf(lastDetail, sizeof(lastDetail), PSTR("%s"), settingsGetNightUpdate() ? "更新" : "不更新"); }
+                else if (i == 2) { snprintf(name, sizeof(name), PSTR("长按触发")); snprintf(lastDetail, sizeof(lastDetail), PSTR("%ums"), settingsGetLongPressMs()); }
+                else if (i == 3) { snprintf(name, sizeof(name), PSTR("屏幕旋转")); snprintf(lastDetail, sizeof(lastDetail), PSTR("方向%u"), settingsGetSetRotation()); }
+                else { snprintf(name, sizeof(name), PSTR("快速翻页")); snprintf(lastDetail, sizeof(lastDetail), PSTR("%s"), settingsGetFastFlip() ? "开" : "关"); }
                 break;
             case SETTINGS_TAB_BAT:
-                if (i == 0) { snprintf(name, sizeof(name), "电池显示"); snprintf(lastDetail, sizeof(lastDetail), "%s", settingsGetBatDisplayType() ? "百分比" : "电压"); }
-                else { snprintf(name, sizeof(name), "电压校准"); dev = true; }
+                if (i == 0) { snprintf(name, sizeof(name), PSTR("电池显示")); snprintf(lastDetail, sizeof(lastDetail), PSTR("%s"), settingsGetBatDisplayType() ? "百分比" : "电压"); }
+                else { snprintf(name, sizeof(name), PSTR("电压校准")); dev = true; }
                 break;
-            default: snprintf(name, sizeof(name), "?"); break;
+            default: snprintf(name, sizeof(name), PSTR("?")); break;
         }
         int nw = utf8Width(name);
         drawTextUTF8(itemX0, y + 4, name, SCR_W - itemX0 - 8, true);
         int vx = itemX0 + nw + 12;
         int vmax = SCR_W - 2 - vx;
         if (vmax < 24) vmax = 24;
-        if (dev)      drawTextUTF8(vx, y + 4, "未开发", vmax, true);
+        if (dev)      drawTextUTF8(vx, y + 4, PSTR("未开发"), vmax, true);
         else          drawTextUTF8(vx, y + 4, lastDetail, vmax, true);
         if (sel) drawRect(itemX0 - 4, y + 1, SCR_W - itemX0 + 2, rowH - 2, true);  // 选择框(不压分割线)
         if (i < cnt - 1) fillRect(70, y + rowH - 1, SCR_W - 70, 1, true);          // 同级分割线
@@ -1928,7 +1928,7 @@ void settingsExecItem() {
     // 未开发项: 统一提示
     if ((tab == SETTINGS_TAB_SD && i == 1) || (tab == SETTINGS_TAB_CLOCK && i == 4) ||
         (tab == SETTINGS_TAB_BAT && i == 1)) {
-        showMsg("未开发", "此项后续版本开放");
+        showMsg(PSTR("未开发"), "此项后续版本开放");
         return;
     }
     switch (tab) {
@@ -1937,7 +1937,7 @@ void settingsExecItem() {
                 uint8_t v = settingsGetOutputPower();
                 settingsSetOutputPower(v >= 20 ? 10 : v + 1);
             } else if (i == 1) { // NTP 编辑(简化提示, 真编辑走 Web)
-                showMsg("NTP服务器", "请在配网页修改");
+                showMsg(PSTR("NTP服务器"), "请在配网页修改");
             } else { // SD频率 5-40 循环
                 uint8_t v = settingsGetSdFrequency();
                 settingsSetSdFrequency(v >= 40 ? 5 : v + 5);
@@ -1958,7 +1958,7 @@ void settingsExecItem() {
             }
             break;
         case SETTINGS_TAB_WEATHER:
-            if (i == 0) showMsg("天气城市", "请在配网页修改");
+            if (i == 0) showMsg(PSTR("天气城市"), "请在配网页修改");
             else if (i == 1) settingsSetNightUpdate(settingsGetNightUpdate() ? 0 : 1);
             else if (i == 2) { // 长按触发 100-5000 循环
                 uint16_t v = settingsGetLongPressMs();
@@ -2042,7 +2042,7 @@ void settingsHandleKeys(int r2, int r3) {
 // ---------- 阅读统计页 (V1: 翻页/会话/连续/排行) ----------
 void renderStatsPage(bool full) {
     fillRect(0, 0, SCR_W, SCR_H, false);
-    drawTextUTF8(4, 2, "阅读统计", 100, true);
+    drawTextUTF8(4, 2, PSTR("阅读统计"), 100, true);
     fillRect(0, 14, SCR_W, 1, true);
     const StatsGlobal &g = statsGetGlobal();
     const BookStat *books = statsGetBooks();
@@ -2050,21 +2050,21 @@ void renderStatsPage(bool full) {
     char line[48];
     int y = 20;
     // 今日 / 本周 / 累计 翻页+会话
-    snprintf(line, sizeof(line), "今日   %lu页  %lu次", (unsigned long)g.dayPageTurns, (unsigned long)g.daySessions);
+    snprintf(line, sizeof(line), PSTR("今日   %lu页  %lu次"), (unsigned long)g.dayPageTurns, (unsigned long)g.daySessions);
     drawTextUTF8(6, y, line, 280, true); y += 16;
-    snprintf(line, sizeof(line), "本周   %lu页  %lu次", (unsigned long)g.weekPageTurns, (unsigned long)g.weekSessions);
+    snprintf(line, sizeof(line), PSTR("本周   %lu页  %lu次"), (unsigned long)g.weekPageTurns, (unsigned long)g.weekSessions);
     drawTextUTF8(6, y, line, 280, true); y += 16;
-    snprintf(line, sizeof(line), "累计   %lu页  %lu次", (unsigned long)g.totalPageTurns, (unsigned long)g.totalSessions);
+    snprintf(line, sizeof(line), PSTR("累计   %lu页  %lu次"), (unsigned long)g.totalPageTurns, (unsigned long)g.totalSessions);
     drawTextUTF8(6, y, line, 280, true); y += 16;
-    snprintf(line, sizeof(line), "连续阅读  %lu天", (unsigned long)g.streak);
+    snprintf(line, sizeof(line), PSTR("连续阅读  %lu天"), (unsigned long)g.streak);
     drawTextUTF8(6, y, line, 280, true); y += 18;
 
     fillRect(0, y, SCR_W, 1, true); y += 4;
-    drawTextUTF8(6, y, "阅读最多", 100, true); y += 16;
+    drawTextUTF8(6, y, PSTR("阅读最多"), 100, true); y += 16;
 
     // TOP8 按 pageTurns 降序, 同页数 lastReadTime 新优先 (简单插入排序)
     // P4: books 懒加载, 极端低堆 NULL → 只显示全局区
-    if (!books) { drawTextUTF8(6, y, "暂无阅读数据", 200, true); refresh(full); return; }
+    if (!books) { drawTextUTF8(6, y, PSTR("暂无阅读数据"), 200, true); refresh(full); return; }
     int idx[MAX_BOOK_STATS];
     for (int i = 0; i < MAX_BOOK_STATS; i++) idx[i] = i;
     for (int i = 0; i < MAX_BOOK_STATS; i++)
@@ -2081,10 +2081,10 @@ void renderStatsPage(bool full) {
         if (!books[bi].path[0] || books[bi].pageTurns == 0) continue;
         const char *nm = strrchr(books[bi].path, '/');
         nm = nm ? nm + 1 : books[bi].path;
-        snprintf(line, sizeof(line), "%d. %s  %lu页", shown + 1, nm, (unsigned long)books[bi].pageTurns);
+        snprintf(line, sizeof(line), PSTR("%d. %s  %lu页"), shown + 1, nm, (unsigned long)books[bi].pageTurns);
         drawTextUTF8(6, y, line, 280, true); y += 16; shown++;
     }
-    if (shown == 0) drawTextUTF8(6, y, "暂无阅读数据", 200, true);
+    if (shown == 0) drawTextUTF8(6, y, PSTR("暂无阅读数据"), 200, true);
     refresh(full);
 }
 
@@ -2105,7 +2105,7 @@ void renderWeatherPage(bool full) {
     if (wDataValid && wActual.weatherCode[0]) {
         char wp[32];
         // weatherIconIndex: 0=晴 1=多云 2=阴 3=雨 4=雪 5=雾 → 壁纸 2..6
-        snprintf(wp, sizeof(wp), "/天气壁纸%d.bmp", 2 + weatherIconIndex(wActual.weatherCode));
+        snprintf(wp, sizeof(wp), PSTR("/天气壁纸%d.bmp"), 2 + weatherIconIndex(wActual.weatherCode));
         bmpShowFromSd(wp);   // 画背景（只写非白像素；文件不存在则保持白底留空）
     }
     char line[48];
@@ -2114,7 +2114,7 @@ void renderWeatherPage(bool full) {
         // 基线 y=14/33/52（drawTextUTF8 传 y=基线-13=1/20/39），图标 13x13 顶部 y=2/21/40
         // 左列（x=1 图标 / x=16 文字）：更新时间 / 城市 / 天气现象
         drawSmallIcon(1, 2, 0, true);
-        snprintf(line, sizeof(line), "%c%c:%c%c", wActual.lastUpdate[11], wActual.lastUpdate[12],
+        snprintf(line, sizeof(line), PSTR("%c%c:%c%c"), wActual.lastUpdate[11], wActual.lastUpdate[12],
                  wActual.lastUpdate[13], wActual.lastUpdate[14]);
         drawTextUTF8(16, 1, line, 120, true);
         drawSmallIcon(1, 21, 1, true);
@@ -2123,9 +2123,9 @@ void renderWeatherPage(bool full) {
         drawTextUTF8(16, 39, wActual.weatherName, 130, true);
         // 右列（x=283 图标 / 文字右对齐到 280）：UVI / 湿度 / 风力
         char uviLine[24], humiLine[16], windLine[16];
-        snprintf(uviLine, sizeof(uviLine), "UVI %s", wLife.uvi[0] ? wLife.uvi : "未知");
-        snprintf(humiLine, sizeof(humiLine), "%s%%", wFuture.humidity);
-        snprintf(windLine, sizeof(windLine), "%s级", wFuture.windScale);
+        snprintf(uviLine, sizeof(uviLine), PSTR("UVI %s"), wLife.uvi[0] ? wLife.uvi : "未知");
+        snprintf(humiLine, sizeof(humiLine), PSTR("%s%%"), wFuture.humidity);
+        snprintf(windLine, sizeof(windLine), PSTR("%s级"), wFuture.windScale);
         drawSmallIcon(283, 2, 3, true);
         drawTextUTF8(280 - textWidth(uviLine), 1, uviLine, 120, true);
         drawSmallIcon(283, 21, 4, true);
@@ -2160,16 +2160,16 @@ void renderWeatherPage(bool full) {
             }
             x += dw + gap;
         }
-        drawTextUTF8(x + 2, y + dh - 16, "℃", 20, true);
+        drawTextUTF8(x + 2, y + dh - 16, PSTR("℃"), 20, true);
         x += 24;
         drawWeatherIcon(x + 4, y + (dh - 24) / 2, weatherIconIndex(wActual.weatherCode), true);
         // ===== 双横线 y=56/74 + 中间一行（电量百分比；夜间跳过时提示）=====
         fillRect(0, 56, SCR_W, 1, true);
         fillRect(0, 74, SCR_W, 1, true);
         if (wNightSkip) {
-            snprintf(line, sizeof(line), "夜间不更新");
+            snprintf(line, sizeof(line), PSTR("夜间不更新"));
         } else {
-            snprintf(line, sizeof(line), "电量%d%%", batPercent(readBatteryMV()));
+            snprintf(line, sizeof(line), PSTR("电量%d%%"), batPercent(readBatteryMV()));
         }
         int tx = (SCR_W - textWidth(line)) / 2;
         if (isCharging()) drawLightningIcon(tx - 10, 58 - 13, true);  // 充电：画闪电图标
@@ -2186,16 +2186,16 @@ void renderWeatherPage(bool full) {
         char col0[3][16], col1[3][32], col2[3][16];
         int c0w[3], c1w[3], c2w[3], c0max = 0, c1max = 0;
         for (int i = 0; i < 3; i++) {
-            snprintf(col0[i], sizeof(col0[i]), "%s %s", dayTag[i], wFuture.date[i]);
+            snprintf(col0[i], sizeof(col0[i]), PSTR("%s %s"), dayTag[i], wFuture.date[i]);
             const char *dn = wFuture.textNight[i];
             if (strcmp(wFuture.textDay[i], wFuture.textNight[i]) != 0) {
-                snprintf(col1[i], sizeof(col1[i]), "%s %s转%s",
+                snprintf(col1[i], sizeof(col1[i]), PSTR("%s %s转%s"),
                          (wd0 >= 0) ? weekdayCn(wd0 + i) : "", wFuture.textDay[i], wFuture.textNight[i]);
             } else {
-                snprintf(col1[i], sizeof(col1[i]), "%s %s",
+                snprintf(col1[i], sizeof(col1[i]), PSTR("%s %s"),
                          (wd0 >= 0) ? weekdayCn(wd0 + i) : "", dn);
             }
-            snprintf(col2[i], sizeof(col2[i]), "%s/%s", wFuture.high[i], wFuture.low[i]);
+            snprintf(col2[i], sizeof(col2[i]), PSTR("%s/%s"), wFuture.high[i], wFuture.low[i]);
             c0w[i] = textWidth(col0[i]);
             c1w[i] = textWidth(col1[i]);
             c2w[i] = textWidth(col2[i]);
@@ -2220,22 +2220,22 @@ void renderWeatherPage(bool full) {
     } else if (wFetching) {
         // 对齐 A7 天气获取提示文案（步骤回调实时更新）
         drawTextUTF8(4, 55, wFetchStep[0] ? wFetchStep : "获取天气实况数据", 288, true);
-        drawTextUTF8(4, 80, "获取未来天气数据/生活指数", 288, true);
+        drawTextUTF8(4, 80, PSTR("获取未来天气数据/生活指数"), 288, true);
     } else if (wNightSkip) {
-        drawTextUTF8(4, 55, "夜间不更新，请白天查看", 288, true);
+        drawTextUTF8(4, 55, PSTR("夜间不更新，请白天查看"), 288, true);
     } else if (wErrCode[0]) {
         // 错误提示：对齐 A7（连接超时用 A7 原文），其余中文说明 + 状态码
         char line[48];
         if (strstr(wErrCode, "TIMEOUT") || strstr(wErrCode, "TIME")) {
-            drawTextUTF8(4, 55, "* 连接超时 *", 288, true);
+            drawTextUTF8(4, 55, PSTR("* 连接超时 *"), 288, true);
         } else {
-            snprintf(line, sizeof(line), "%s [%s]", weatherErrorText(wErrCode), wErrCode);
+            snprintf(line, sizeof(line), PSTR("%s [%s]"), weatherErrorText(wErrCode), wErrCode);
             drawTextUTF8(4, 55, line, 288, true);
         }
         bool needCfg = (strcmp(wErrCode, "NOKEY") == 0 || strcmp(wErrCode, "NOCFG") == 0);
         drawTextUTF8(4, 80, needCfg ? "请到配网页设置" : "右键长按重试", 288, true);
     } else {
-        drawTextUTF8(4, 55, "获取天气实况数据", 288, true);
+        drawTextUTF8(4, 55, PSTR("获取天气实况数据"), 288, true);
     }
     refresh(full);
 }
@@ -2245,7 +2245,7 @@ void renderWeatherPage(bool full) {
 void renderWeatherErrorOverlay(const char *code) {
     const int wx = 12, wy = 100, ww = 272, wh = 24;
     char line[48];
-    snprintf(line, sizeof(line), "%s [%s]", weatherErrorText(code), code);
+    snprintf(line, sizeof(line), PSTR("%s [%s]"), weatherErrorText(code), code);
     fillRect(wx, wy, ww, wh, false);
     drawRect(wx, wy, ww, wh, true);
     drawTextUTF8(wx + 6, wy + 4, line, ww - 12, true);
@@ -2256,7 +2256,7 @@ void renderWeatherErrorOverlay(const char *code) {
 void weatherStepCb(int step) {
     static const char *const steps[3] = {"获取天气实况数据", "获取未来天气数据", "获取生活指数"};
     if (step >= 0 && step < 3) {
-        snprintf(wFetchStep, sizeof(wFetchStep), "%s", steps[step]);
+        snprintf(wFetchStep, sizeof(wFetchStep), PSTR("%s"), steps[step]);
         renderWeatherPage(false);
     }
 }
@@ -2321,7 +2321,7 @@ void enterWeatherPage() {
         wFetching = false;
         strncpy(wErrCode, "NOKEY", sizeof(wErrCode) - 1);
         wErrCode[sizeof(wErrCode) - 1] = '\0';
-        showMsg("未配置天气", "未保存天气密钥或城市");
+        showMsg(PSTR("未配置天气"), "未保存天气密钥或城市");
         if (wDataValid) renderWeatherErrorOverlay(wErrCode);
         else renderWeatherPage(true);
         saveSleepRecord();
@@ -2333,11 +2333,11 @@ void enterWeatherPage() {
 }
 
 void formatSize(uint32_t sz, char *buf, int buflen) {
-    if (sz >= 10000000)      snprintf(buf, buflen, "%luMB", (unsigned long)(sz / 1000000));
-    else if (sz >= 1000000)  snprintf(buf, buflen, "%lu.%luMB", (unsigned long)(sz / 1000000), (unsigned long)((sz / 100000) % 10));
-    else if (sz >= 10000)    snprintf(buf, buflen, "%luKB", (unsigned long)(sz / 1000));
-    else if (sz >= 1000)     snprintf(buf, buflen, "%lu.%luKB", (unsigned long)(sz / 1000), (unsigned long)((sz / 100) % 10));
-    else                     snprintf(buf, buflen, "%luB", (unsigned long)sz);
+    if (sz >= 10000000)      snprintf(buf, buflen, PSTR("%luMB"), (unsigned long)(sz / 1000000));
+    else if (sz >= 1000000)  snprintf(buf, buflen, PSTR("%lu.%luMB"), (unsigned long)(sz / 1000000), (unsigned long)((sz / 100000) % 10));
+    else if (sz >= 10000)    snprintf(buf, buflen, PSTR("%luKB"), (unsigned long)(sz / 1000));
+    else if (sz >= 1000)     snprintf(buf, buflen, PSTR("%lu.%luKB"), (unsigned long)(sz / 1000), (unsigned long)((sz / 100) % 10));
+    else                     snprintf(buf, buflen, PSTR("%luB"), (unsigned long)sz);
 }
 
 bool reinitSdBus(const char *reason) {
@@ -2346,7 +2346,7 @@ bool reinitSdBus(const char *reason) {
     pinMode(5, OUTPUT);
     SPI.begin();
     bool ok = SD.begin(5, SD_SCK_MHZ(20));
-    traceFmtLevel(ok ? 'I' : 'E', "SD_REINIT reason=%s ok=%d", reason ? reason : "?", ok ? 1 : 0);
+    traceFmtLevel(ok ? 'I' : 'E', PSTR("SD_REINIT reason=%s ok=%d"), reason ? reason : "?", ok ? 1 : 0);
     return ok;
 }
 
@@ -2464,7 +2464,7 @@ void loadListWindow(const char *path, int startIdx) {
       ESP.wdtFeed();
     }
     topIndex = startIdx;
-    traceFmtLevel('I', "WIN_LOAD path=%s start=%d win=%d total=%d",
+    traceFmtLevel('I', PSTR("WIN_LOAD path=%s start=%d win=%d total=%d"),
                   path ? path : "(null)", startIdx, winCount, itemCount);
 }
 
@@ -2478,7 +2478,7 @@ bool listDir(const char *path) {
         pinMode(5, OUTPUT);
         SPI.begin();
         bool sdBusOk = SD.begin(5, SD_SCK_MHZ(20));
-        traceFmtLevel(sdBusOk ? 'I' : 'E', "SD_REINIT path=%s ok=%d", path ? path : "(null)", sdBusOk ? 1 : 0);
+        traceFmtLevel(sdBusOk ? 'I' : 'E', PSTR("SD_REINIT path=%s ok=%d"), path ? path : "(null)", sdBusOk ? 1 : 0);
         if (!sdBusOk) return false;
     }
     // 使用官方 A7 同款枚举: openDir + Dir::next()（纯目录项扫描, 零重开文件）。
@@ -2511,9 +2511,9 @@ bool listDir(const char *path) {
         itemCount++;
         ESP.wdtFeed();
       }
-      traceFmtLevel('I', "DIR_RAW path=%s raw=%d kept=%d", path ? path : "(null)", rawCount, itemCount);
+      traceFmtLevel('I', PSTR("DIR_RAW path=%s raw=%d kept=%d"), path ? path : "(null)", rawCount, itemCount);
     }
-    traceFmtLevel(itemCount == 0 ? 'W' : 'I', "DIR_DONE path=%s count=%d elapsed=%lu",
+    traceFmtLevel(itemCount == 0 ? 'W' : 'I', PSTR("DIR_DONE path=%s count=%d elapsed=%lu"),
                   path ? path : "(null)", itemCount, (unsigned long)(millis() - started));
     if (traceWasOpen) {
 #if DIAG_SD
@@ -2529,7 +2529,7 @@ bool listDir(const char *path) {
 void enterDir(int idx) {
     FileItem *it = itemAt(idx);
     if (idx < 0 || idx >= itemCount || !it || !it->isDir) {
-        traceFmtLevel('E', "DIR_ENTER_BAD idx=%d count=%d", idx, itemCount);
+        traceFmtLevel('E', PSTR("DIR_ENTER_BAD idx=%d count=%d"), idx, itemCount);
         return;
     }
     String oldPath = currentPath;
@@ -2537,7 +2537,7 @@ void enterDir(int idx) {
     else currentPath = currentPath + it->name + "/";
     selIndex = 0; topIndex = 0;
     bool ok = listDir(currentPath.c_str());
-    traceFmtLevel(ok ? 'I' : 'W', "DIR_ENTER to=%s count=%d", currentPath.c_str(), itemCount);
+    traceFmtLevel(ok ? 'I' : 'W', PSTR("DIR_ENTER to=%s count=%d"), currentPath.c_str(), itemCount);
     saveSleepRecord();   // 界面快照: 已进入子目录
 }
 
@@ -2580,7 +2580,7 @@ void splitNameExt(const char *full, char *name, int nameLen, char *ext, int extL
         if (n >= (size_t)nameLen) n = nameLen - 1;
         memcpy(name, full, n);
         name[n] = '\0';
-        snprintf(ext, extLen, "%s", dot);
+        snprintf(ext, extLen, PSTR("%s"), dot);
     } else {
         strncpy(name, full, nameLen - 1);
         name[nameLen - 1] = '\0';
@@ -2606,7 +2606,7 @@ void renderTitle() {
     drawTextUTF8(2, TITLE_Y, disp, 220, true);
 
     char page[16];
-    snprintf(page, sizeof(page), "%d/%d", selIndex + 1, itemCount);
+    snprintf(page, sizeof(page), PSTR("%d/%d"), selIndex + 1, itemCount);
     drawTextUTF8(SCR_W - 4 - utf8Width(page), TITLE_Y, page, 40, true);
     // 分隔线
     fillRect(0, 16, SCR_W, 1, true);
@@ -2688,7 +2688,7 @@ bool isBmpFile(const char *name) {
 // 全屏显示 SD 卡 BMP：进入 APP_BMP，绘制后全刷；失败自动恢复文件管理器
 void showBmpFile(const char *path) {
     if (gBrowseLocal) {   // 本地 LittleFS 介质仅浏览, 不支持图片查看
-        showMsg("本地空间", "仅浏览，不支持查看");
+        showMsg(PSTR("本地空间"), "仅浏览，不支持查看");
         return;
     }
     appMode = APP_BMP;
@@ -2697,11 +2697,11 @@ void showBmpFile(const char *path) {
         appMode = APP_BROWSER;
         renderAll();
         refresh(true);
-        showMsg("打开失败", "不支持的图片格式");
+        showMsg(PSTR("打开失败"), "不支持的图片格式");
         return;
     }
     refresh(true);
-    debugFmt("BMP_SHOW %s", path);
+    debugFmt(PSTR("BMP_SHOW %s"), path);
 }
 
 // 从文件管理器打开 BMP 图片（返回时回到文件管理器）
@@ -2759,8 +2759,8 @@ void renderConfirmRebuild() {
     const int x = 40, y = 32, w = SCR_W - 80, h = 62;
     fillRect(x, y, w, h, false);
     drawRect(x, y, w, h, true);
-    drawTextUTF8(x + 4, y + 8, "真的要重建吗！", w - 8, true);
-    drawTextUTF8(x + 4, y + 32, "长按重建，短按退出", w - 8, true);
+    drawTextUTF8(x + 4, y + 8, PSTR("真的要重建吗！"), w - 8, true);
+    drawTextUTF8(x + 4, y + 32, PSTR("长按重建，短按退出"), w - 8, true);
     refresh(false);
 }
 
@@ -2801,7 +2801,7 @@ void execMenu() {
                 FileItem *it = itemAt(selIndex);
                 if (it && it->isDir) {
                     hideMenu();
-                    showMsg("文件夹删除", "暂不支持");
+                    showMsg(PSTR("文件夹删除"), "暂不支持");
                 } else if (it) {
                     String path = currentPath + it->name;
                     if (browseFs().remove(path.c_str())) {
@@ -2815,24 +2815,24 @@ void execMenu() {
                         refresh(true);
                     } else {
                         hideMenu();
-                        showMsg("删除失败", "");
+                        showMsg(PSTR("删除失败"), "");
                     }
                 }
             }
             break;
         }
         case 3: {  // 重建索引
-            traceFmt("REBUILD_SELECT count=%d sel=%d", itemCount, selIndex);
+            traceFmt(PSTR("REBUILD_SELECT count=%d sel=%d"), itemCount, selIndex);
             FileItem *it = itemAt(selIndex);
             if (itemCount > 0 && selIndex < itemCount && it && !it->isDir) {
                 String path = currentPath + it->name;
-                traceFmt("REBUILD_CONFIRM path=%s", path.c_str());
+                traceFmt(PSTR("REBUILD_CONFIRM path=%s"), path.c_str());
                 // 对齐 A7: 先弹确认框 (长按重建, 短按退出), 防误触直接截断重建
                 mode = 0;                        // 关功能框, 回浏览态
                 rebuildConfirmPath = path;
                 renderConfirmRebuild();
             } else {
-                traceLine("REBUILD_SKIP invalid selection");
+                traceLine(PSTR("REBUILD_SKIP invalid selection"));
             }
             break;
         }
@@ -2875,7 +2875,7 @@ int scanKey(struct KState &k, bool nowDown) {
 // 局部动作只做局刷; 进入休眠提示也只覆盖提示区域。
 void refresh(bool full) {
     uint32_t started = millis();
-    traceFmt("RENDER_START kind=%s fb=%u", full ? "FULL" : "PART", (unsigned)sizeof(fb));
+    traceFmt(PSTR("RENDER_START kind=%s fb=%u"), full ? "FULL" : "PART", (unsigned)sizeof(fb));
     if (full) {
         epd.display(fb);          // 全刷末尾内部已 powerOff (对齐官方)
     } else {
@@ -2950,8 +2950,8 @@ static bool resumePendingIndexBuild() {
     txtChapterPath += readerIsPortrait() ? ".vz1" : ".z1";
     if (txtFile) txtFile.close();
     txtFile = readerFs().open(txtPath.c_str(), "r");
-    if (!txtFile) { traceFmt("IDX_AUTO_RESUME no-txt path=%s", txtPath.c_str()); return false; }
-    traceFmt("IDX_AUTO_RESUME begin path=%s", txtPath.c_str());
+    if (!txtFile) { traceFmt(PSTR("IDX_AUTO_RESUME no-txt path=%s"), txtPath.c_str()); return false; }
+    traceFmt(PSTR("IDX_AUTO_RESUME begin path=%s"), txtPath.c_str());
     beginResumeIndexBuildFromPartial();
     return txtIndexBuilding;
 }
@@ -2961,7 +2961,7 @@ static bool buildTaskActiveOrResumed() {
     if (txtIndexBuilding) return true;
     if (!indexBuildPendingForRecent()) return false;
     if (resumePendingIndexBuild()) return true;
-    traceFmt("SLEEP_PENDING_UNRESUMABLE");
+    traceFmt(PSTR("SLEEP_PENDING_UNRESUMABLE"));
     return false;
 }
 
@@ -2982,7 +2982,7 @@ void drawSleepNotice() {
     fillRect(x, y, w, h, false);
     fillRect(x, y, w, 1, true);
     fillRect(x, y + h - 1, w, 1, true);
-    drawTextUTF8(x + 3, y + 1, "休眠中", w - 6, true);
+    drawTextUTF8(x + 3, y + 1, PSTR("休眠中"), w - 6, true);
     refresh(false);
 }
 
@@ -3102,17 +3102,17 @@ void beginTxtIndexBuild() {
     if (txtIndexBuildFile) txtIndexBuildFile.close();
     if (txtChapterBuildFile) txtChapterBuildFile.close();
     resetIndexReaderState();   // 硬规则: 任何构建入口先清块读缓冲残留 (见 resetIndexReaderState 注释)
-    debugFmt("IDX BUILD_OPEN index=%s chapter=%s txt=%s", txtIndexPath.c_str(), txtChapterPath.c_str(), txtPath.c_str());
+    debugFmt(PSTR("IDX BUILD_OPEN index=%s chapter=%s txt=%s"), txtIndexPath.c_str(), txtChapterPath.c_str(), txtPath.c_str());
     readerFs().remove(txtIndexPath.c_str());
     readerFs().remove(txtChapterPath.c_str());
     readerFs().remove((txtIndexPath + "p").c_str());   // 全新构建: 清旧会话 sidecar (旧进度已在上游恢复进内存)
     txtIndexBuildFile = readerFs().open(txtIndexPath.c_str(), "w");
     txtChapterBuildFile = readerFs().open(txtChapterPath.c_str(), "w");
     txtIndexScanFile = readerFs().open(txtPath.c_str(), "r");
-    debugFmt("IDX BUILD_HANDLES index=%d chapter=%d scan=%d", (bool)txtIndexBuildFile, (bool)txtChapterBuildFile, (bool)txtIndexScanFile);
+    debugFmt(PSTR("IDX BUILD_HANDLES index=%d chapter=%d scan=%d"), (bool)txtIndexBuildFile, (bool)txtChapterBuildFile, (bool)txtIndexScanFile);
     if (!txtIndexBuildFile || !txtChapterBuildFile || !txtIndexScanFile) {
-        debugLine("IDX async open failed");
-        traceFmt("IDX BUILD_FAIL index=%d chapter=%d scan=%d", (bool)txtIndexBuildFile, (bool)txtChapterBuildFile, (bool)txtIndexScanFile);
+        debugLine(PSTR("IDX async open failed"));
+        traceFmt(PSTR("IDX BUILD_FAIL index=%d chapter=%d scan=%d"), (bool)txtIndexBuildFile, (bool)txtChapterBuildFile, (bool)txtIndexScanFile);
         if (txtIndexBuildFile) txtIndexBuildFile.close();
         if (txtChapterBuildFile) txtChapterBuildFile.close();
         if (txtIndexScanFile) txtIndexScanFile.close();
@@ -3135,7 +3135,7 @@ void beginTxtIndexBuild() {
     resumeChapterSeed[0] = '\0';   // 全新构建: 清续建去重种子
     resumeChapterSeedPage = 0;
     txtIndexBuilding = true;
-    debugFmt("IDX async begin pos=%lu size=%lu", (unsigned long)txtIndexScanFile.position(), (unsigned long)txtIndexScanFile.size());
+    debugFmt(PSTR("IDX async begin pos=%lu size=%lu"), (unsigned long)txtIndexScanFile.position(), (unsigned long)txtIndexScanFile.size());
 }
 
 void finishTxtIndexBuild() {
@@ -3160,7 +3160,7 @@ void finishTxtIndexBuild() {
     gProgPagesSince = 0;
     if (readerFs().exists((txtIndexPath + "p").c_str())) {
         readerFs().remove((txtIndexPath + "p").c_str());
-        debugLine("IDX sidecar removed after merge");
+        debugLine(PSTR("IDX sidecar removed after merge"));
     }
     txtChapterBuildFile.flush();
     txtChapterBuildFile.close();
@@ -3175,16 +3175,16 @@ void finishTxtIndexBuild() {
     uint32_t doneChapterSize = doneChapter ? doneChapter.size() : 0;
     if (doneIndex) doneIndex.close();
     if (doneChapter) doneChapter.close();
-    debugFmt("IDX async done pages=%lu chapters=%lu indexSize=%lu z1Size=%lu", (unsigned long)txtTotalPages,
+    debugFmt(PSTR("IDX async done pages=%lu chapters=%lu indexSize=%lu z1Size=%lu"), (unsigned long)txtTotalPages,
              (unsigned long)txtChapterCount, (unsigned long)doneIndexSize,
              (unsigned long)doneChapterSize);
-    traceFmt("IDX_KEYSTATS maxGapMs=%lu yields=%lu", (unsigned long)gIndexStepMaxGapMs, (unsigned long)gIndexStepKeyYield);
+    traceFmt(PSTR("IDX_KEYSTATS maxGapMs=%lu yields=%lu"), (unsigned long)gIndexStepMaxGapMs, (unsigned long)gIndexStepKeyYield);
     // 主页正显示该书且构建刚在后台完成: 刷新最近阅读(页码回归真实总页数、去掉"构建中"标注), 局刷主卡
     if (appMode == APP_HOME && recentReadPath == txtPath) {
         loadRecentReadSummary();
         renderHome(false);
     }
-    if (appMode == APP_READER) showMsg("索引完成", "可翻页/章节/保存进度");
+    if (appMode == APP_READER) showMsg(PSTR("索引完成"), "可翻页/章节/保存进度");
 }
 
 // 索引构建块读缓冲: 单字节 read() 约 8.5KB/s, 55MB 需 1.8 小时; 块读+时间片后 ~4 分钟
@@ -3304,7 +3304,7 @@ void beginResumeIndexBuildFromPartial() {
     }
     if (last) last.close();
     if (offset == 0 || offset >= txtFile.size()) {
-        debugLine("IDX resume invalid tail -> full rebuild");
+        debugLine(PSTR("IDX resume invalid tail -> full rebuild"));
         beginTxtIndexBuild();
         return;
     }
@@ -3318,7 +3318,7 @@ void beginResumeIndexBuildFromPartial() {
     txtIndexBuildFile = readerFs().open(txtIndexPath.c_str(), "a");      // 追加, 不截断
     txtChapterBuildFile = readerFs().open(txtChapterPath.c_str(), "a");
     if (!txtIndexScanFile || !txtIndexBuildFile || !txtChapterBuildFile) {
-        debugLine("IDX resume open failed -> full rebuild");
+        debugLine(PSTR("IDX resume open failed -> full rebuild"));
         if (txtIndexScanFile) txtIndexScanFile.close();
         if (txtIndexBuildFile) txtIndexBuildFile.close();
         if (txtChapterBuildFile) txtChapterBuildFile.close();
@@ -3338,7 +3338,7 @@ void beginResumeIndexBuildFromPartial() {
     indexPageStartPending = false;   // 该页页首记录已存在, 换页后才 append 下一页
     txtIndexBuilding = true;
     for (uint8_t i = 0; i < txtLineCount() + 1; i++) indexRows[i] = "";
-    debugFmt("IDX super-resume pos=%lu pages=%lu chapters=%lu", (unsigned long)offset,
+    debugFmt(PSTR("IDX super-resume pos=%lu pages=%lu chapters=%lu"), (unsigned long)offset,
              (unsigned long)pagesDone, (unsigned long)txtChapterCount);
 }
 
@@ -3423,7 +3423,7 @@ void indexTaskStep() {
         }
     }
     if (idxBufPos >= idxBufLen && !txtIndexScanFile.available()) {
-        traceFmt("IDX EOF stepStart=%lu pos=%lu", (unsigned long)stepStart, (unsigned long)txtIndexScanFile.position());
+        traceFmt(PSTR("IDX EOF stepStart=%lu pos=%lu"), (unsigned long)stepStart, (unsigned long)txtIndexScanFile.position());
         finishTxtIndexBuild();
     }
 }
@@ -3445,35 +3445,35 @@ static bool parsePageRecordEx(uint32_t page, uint32_t *out) {
         File f = readerFs().open(path.c_str(), "r");
         if (!f) {
             if (attempt == 0) { readerBusReady("page_rec_retry"); continue; }
-            traceFmtLevel('E', "PAGE_REC_OPEN_FAIL page=%lu path=%s", (unsigned long)page, path.c_str());
+            traceFmtLevel('E', PSTR("PAGE_REC_OPEN_FAIL page=%lu path=%s"), (unsigned long)page, path.c_str());
             return false;
         }
         if (!f.seek((page - 1) * 8)) {
             f.close();
-            traceFmtLevel('E', "PAGE_REC_SEEK_FAIL page=%lu", (unsigned long)page);
+            traceFmtLevel('E', PSTR("PAGE_REC_SEEK_FAIL page=%lu"), (unsigned long)page);
             return false;
         }
         char rec[9];
         int got = (int)f.read((uint8_t *)rec, 8);
         f.close();
         if (got != 8) {
-            traceFmtLevel('E', "PAGE_REC_SHORT page=%lu got=%d", (unsigned long)page, got);
+            traceFmtLevel('E', PSTR("PAGE_REC_SHORT page=%lu got=%d"), (unsigned long)page, got);
             return false;
         }
         rec[8] = '\0';
         for (uint8_t i = 0; i < 8; i++) {
             if (rec[i] < '0' || rec[i] > '9') {
-                traceFmtLevel('E', "PAGE_REC_BAD page=%lu rec=%s", (unsigned long)page, rec);
+                traceFmtLevel('E', PSTR("PAGE_REC_BAD page=%lu rec=%s"), (unsigned long)page, rec);
                 return false;
             }
         }
         uint32_t v = strtoul(rec, nullptr, 10);
         if (v == 0) {   // 页 >1 的页首偏移不可能为 0 (0 只属第 1 页)
-            traceFmtLevel('E', "PAGE_REC_ZERO page=%lu", (unsigned long)page);
+            traceFmtLevel('E', PSTR("PAGE_REC_ZERO page=%lu"), (unsigned long)page);
             return false;
         }
         *out = v;
-        if (attempt > 0) traceFmt("PAGE_REC_RETRY_OK page=%lu off=%lu", (unsigned long)page, (unsigned long)v);
+        if (attempt > 0) traceFmt(PSTR("PAGE_REC_RETRY_OK page=%lu off=%lu"), (unsigned long)page, (unsigned long)v);
         return true;
     }
     return false;
@@ -3492,7 +3492,7 @@ static bool progressWriteToDisk(uint32_t offset) {
     // 防御: 页 >1 的进度偏移不可能为 0 (0=第 1 页)。写入 0 会把"当前阅读位置"打回开头
     // (原 parsePageRecord 失败返回 0 时曾把进度写成 0)。
     if (offset == 0 && txtPage > 1) {
-        traceFmtLevel('E', "PROGRESS_ZERO_SKIP page=%lu", (unsigned long)txtPage);
+        traceFmtLevel('E', PSTR("PROGRESS_ZERO_SKIP page=%lu"), (unsigned long)txtPage);
         return false;
     }
     if (txtIndexBuilding) {
@@ -3504,7 +3504,7 @@ static bool progressWriteToDisk(uint32_t offset) {
         File f = readerFs().open(sidecar.c_str(), "r+");
         if (!f) f = readerFs().open(sidecar.c_str(), "w");   // 首次写入: 新建
         if (!f) {
-            traceFmtLevel('E', "PROGRESS_OPEN_FAIL sidecar=%s offset=%lu", sidecar.c_str(), (unsigned long)offset);
+            traceFmtLevel('E', PSTR("PROGRESS_OPEN_FAIL sidecar=%s offset=%lu"), sidecar.c_str(), (unsigned long)offset);
             return false;
         }
         f.seek(0);
@@ -3528,7 +3528,7 @@ static bool progressWriteToDisk(uint32_t offset) {
         readerBusReady("progress_retry");
         f = readerFs().open(progressPath.c_str(), "r+");
         if (f) { opened = true; break; }
-        traceFmtLevel('E', "PROGRESS_OPEN_FAIL path=%s offset=%lu", progressPath.c_str(), (unsigned long)offset);
+        traceFmtLevel('E', PSTR("PROGRESS_OPEN_FAIL path=%s offset=%lu"), progressPath.c_str(), (unsigned long)offset);
         return false;
     }
     f.seek(0);
@@ -3548,9 +3548,9 @@ bool progressFlushForce(const char *reason) {
         gProgDirty = false;
         gProgPagesSince = 0;
         gProgLastFlushMs = millis();
-        traceFmt("PROG_FLUSH reason=%s off=%lu", reason ? reason : "?", (unsigned long)off);
+        traceFmt(PSTR("PROG_FLUSH reason=%s off=%lu"), reason ? reason : "?", (unsigned long)off);
     } else {
-        traceFmtLevel('E', "PROG_FLUSH_FAIL reason=%s off=%lu", reason ? reason : "?", (unsigned long)off);
+        traceFmtLevel('E', PSTR("PROG_FLUSH_FAIL reason=%s off=%lu"), reason ? reason : "?", (unsigned long)off);
     }
     return ok;
 }
@@ -3567,7 +3567,7 @@ void progressTick() {
 bool writeProgress(uint32_t offset) {
     // 防御: 页 >1 的进度偏移不可能为 0 (0=第 1 页)。写入 0 会把"当前阅读位置"打回开头
     if (offset == 0 && txtPage > 1) {
-        traceFmtLevel('E', "PROGRESS_ZERO_SKIP page=%lu", (unsigned long)txtPage);
+        traceFmtLevel('E', PSTR("PROGRESS_ZERO_SKIP page=%lu"), (unsigned long)txtPage);
         return false;
     }
     gProgPending = offset;
@@ -3619,8 +3619,8 @@ uint32_t readProgressOffset() {
         }
         if (attempt < 2) { delay(10); ESP.wdtFeed(); }
     }
-    if (!opened) traceFmtLevel('E', "PROGRESS_READ_FAIL path=%s", path.c_str());
-    else if (off == 0) traceFmtLevel('W', "PROGRESS_READ0 path=%s", path.c_str());
+    if (!opened) traceFmtLevel('E', PSTR("PROGRESS_READ_FAIL path=%s"), path.c_str());
+    else if (off == 0) traceFmtLevel('W', PSTR("PROGRESS_READ0 path=%s"), path.c_str());
     return off;
 }
 
@@ -3722,7 +3722,7 @@ void normalizeReaderLines(String *displayLines) {
 // 读一页正文到 txtLines。返回是否实际读到内容 (读到内容/页首推进 = true)。
 // 失败(TXT_READ_FAIL 或 全空)返回 false, 由外层 readTxtPage 做总线自愈重试。
 static bool readTxtPageCore(uint32_t offset) {
-    traceFmt("PAGE_READ_BEGIN page=%lu offset=%lu", (unsigned long)txtPage, (unsigned long)offset);
+    traceFmt(PSTR("PAGE_READ_BEGIN page=%lu offset=%lu"), (unsigned long)txtPage, (unsigned long)offset);
     txtPageStartsParagraph = false;
     if (offset == 0) txtPageStartsParagraph = true;
     else {
@@ -3744,7 +3744,7 @@ static bool readTxtPageCore(uint32_t offset) {
         if (c < 0) {
             // SD 读失败(卡接触不良/坏块): 立即停止填充本页, 防止 available() 卡真导致
             // 死循环(翻页卡死根因: 循环内每圈喂狗 → 按键永不响应, 仅 KEY1 硬复位可恢复)
-            traceFmtLevel('E', "TXT_READ_FAIL file=%s pos=%lu line=%d",
+            traceFmtLevel('E', PSTR("TXT_READ_FAIL file=%s pos=%lu line=%d"),
                          txtPath.c_str(), (unsigned long)txtFile.position(), line);
             break;
         }
@@ -3759,7 +3759,7 @@ static bool readTxtPageCore(uint32_t offset) {
                 line++;
             }
             if (line <= lines - 1) { c = txtFile.read(); if (c < 0) break; }
-            traceFmt("PAGE_NEWLINE line=%d pos=%lu text=%d", line, (unsigned long)txtFile.position(), hadText ? 1 : 0);
+            traceFmt(PSTR("PAGE_NEWLINE line=%d pos=%lu text=%d"), line, (unsigned long)txtFile.position(), hadText ? 1 : 0);
             enCount = 0; chCount = 0;
         }
         if (c < 0) break;
@@ -3792,7 +3792,7 @@ static bool readTxtPageCore(uint32_t offset) {
             }
         }
     }
-    traceFmt("PAGE_READ_DONE page=%lu pos=%lu lengths=%u,%u,%u,%u,%u,%u,%u,%u",
+    traceFmt(PSTR("PAGE_READ_DONE page=%lu pos=%lu lengths=%u,%u,%u,%u,%u,%u,%u,%u"),
              (unsigned long)txtPage, (unsigned long)txtFile.position(),
              txtLines[0].length(), txtLines[1].length(), txtLines[2].length(), txtLines[3].length(),
              txtLines[4].length(), txtLines[5].length(), txtLines[6].length(), txtLines[7].length());
@@ -3812,13 +3812,13 @@ static bool readTxtPageCore(uint32_t offset) {
 // 返回 true = 本页内容已就绪 (txtLines 有效); false = 读取失败 (txtLines 空, 调用方不得渲染)。
 bool readTxtPage(uint32_t offset) {
     if (readTxtPageCore(offset)) return true;
-    traceFmtLevel('W', "PAGE_READ_RETRY page=%lu offset=%lu", (unsigned long)txtPage, (unsigned long)offset);
+    traceFmtLevel('W', PSTR("PAGE_READ_RETRY page=%lu offset=%lu"), (unsigned long)txtPage, (unsigned long)offset);
     if (readerBusReady("page_retry")) {
         if (txtFile) txtFile.close();
         txtFile = readerFs().open(txtPath.c_str(), "r");
         if (txtFile && readTxtPageCore(offset)) return true;
     }
-    traceFmtLevel('E', "PAGE_READ_FAIL page=%lu offset=%lu", (unsigned long)txtPage, (unsigned long)offset);
+    traceFmtLevel('E', PSTR("PAGE_READ_FAIL page=%lu offset=%lu"), (unsigned long)txtPage, (unsigned long)offset);
     return false;
 }
 
@@ -3903,9 +3903,9 @@ void renderJumpOverlay() {
     }
     char buf[40];
     if (jumpRejectMs && (uint32_t)(millis() - jumpRejectMs) < 1000) {
-        snprintf(buf, sizeof(buf), "%lu/%lu页 !", (unsigned long)jumpPage, (unsigned long)txtTotalPages);
+        snprintf(buf, sizeof(buf), PSTR("%lu/%lu页 !"), (unsigned long)jumpPage, (unsigned long)txtTotalPages);
     } else {
-        snprintf(buf, sizeof(buf), "%lu/%lu页", (unsigned long)jumpPage, (unsigned long)txtTotalPages);
+        snprintf(buf, sizeof(buf), PSTR("%lu/%lu页"), (unsigned long)jumpPage, (unsigned long)txtTotalPages);
     }
     drawTextUTF8(jx + 4, pageY, buf, jw - 8, true);
     refresh(false);
@@ -3919,11 +3919,11 @@ void jumpToPage() {
     if (txtIndexBuilding && jumpPage > txtIndexedPages) jumpPage = txtIndexedPages;
     uint32_t off = 0;
     if (!parsePageRecordEx(jumpPage, &off)) {   // 页首偏移读失败: 不静默当第 1 页
-        showMsg("跳转失败", "读取失败");
+        showMsg(PSTR("跳转失败"), "读取失败");
         return;
     }
     if (!readTxtPage(off)) {
-        showMsg("读取失败", "请重试");
+        showMsg(PSTR("读取失败"), "请重试");
         return;
     }
     txtPage = jumpPage;
@@ -3958,7 +3958,7 @@ void renderTxtPage(bool full) {
         for (uint8_t i = 0; i < txtLineCount(); i++)
             if (displayLines[i].length()) { any = true; break; }
         if (!any) {
-            traceFmtLevel('W', "RENDER_SKIP_BLANK page=%lu", (unsigned long)txtPage);
+            traceFmtLevel('W', PSTR("RENDER_SKIP_BLANK page=%lu"), (unsigned long)txtPage);
             return;
         }
     }
@@ -3998,7 +3998,7 @@ extern bool gBootFromSleep;   // 定义在休眠记录区 (saveSleepRecord 附�
 void clearSleepNoticeAfterBoot() {
     if (!gBootFromSleep) return;
     gBootFromSleep = false;
-    traceLine("BOOT_CLEAR_SLEEP_NOTICE");
+    traceLine(PSTR("BOOT_CLEAR_SLEEP_NOTICE"));
     refresh(false);   // 局刷: 只更新变化像素, 擦掉右上角"休眠中"
 }
 
@@ -4024,11 +4024,11 @@ void renderReaderMenu() {
     char itemText[12][24];
     for (int i = 0; i < 12; i++) {
         switch (i) {
-            case 0: snprintf(itemText[i], sizeof(itemText[i]), "%s%s", itemNames[i], fontExternal ? " 外" : " 自"); break;
-            case 2: snprintf(itemText[i], sizeof(itemText[i]), "%s%s", itemNames[i], autoFlipSpeed ? " 开" : " 关"); break;
-            case 3: snprintf(itemText[i], sizeof(itemText[i]), "%s %d", itemNames[i], fixedRefreshEvery); break;
-            case 4: snprintf(itemText[i], sizeof(itemText[i]), "%s %s°", itemNames[i], rotLabel(readerRot)); break;
-            default: snprintf(itemText[i], sizeof(itemText[i]), "%s", itemNames[i]); break;
+            case 0: snprintf(itemText[i], sizeof(itemText[i]), PSTR("%s%s"), itemNames[i], fontExternal ? " 外" : " 自"); break;
+            case 2: snprintf(itemText[i], sizeof(itemText[i]), PSTR("%s%s"), itemNames[i], autoFlipSpeed ? " 开" : " 关"); break;
+            case 3: snprintf(itemText[i], sizeof(itemText[i]), PSTR("%s %d"), itemNames[i], fixedRefreshEvery); break;
+            case 4: snprintf(itemText[i], sizeof(itemText[i]), PSTR("%s %s°"), itemNames[i], rotLabel(readerRot)); break;
+            default: snprintf(itemText[i], sizeof(itemText[i]), PSTR("%s"), itemNames[i]); break;
         }
     }
     // 菜单临时切 12px 中文字体 (按钮/文字更小); 渲染完恢复 16px 主字体。
@@ -4062,19 +4062,19 @@ void renderReaderMenu() {
     char line1[48], line2[48];
     time_t nowT = clockManagerNow();
     struct tm *tmv = nowT > 1600000000UL ? localtime(&nowT) : nullptr;
-    if (tmv) snprintf(line1, sizeof(line1), "%02d:%02d:%02d 电量%d%%", tmv->tm_hour, tmv->tm_min, tmv->tm_sec, batPercent(lastBatteryMV));
-    else snprintf(line1, sizeof(line1), "--:--:-- 电量%d%%", batPercent(lastBatteryMV));
+    if (tmv) snprintf(line1, sizeof(line1), PSTR("%02d:%02d:%02d 电量%d%%"), tmv->tm_hour, tmv->tm_min, tmv->tm_sec, batPercent(lastBatteryMV));
+    else snprintf(line1, sizeof(line1), PSTR("--:--:-- 电量%d%%"), batPercent(lastBatteryMV));
     if (txtIndexBuilding) {
         // 竖屏面板窄 (MW=112, 信息行 maxW=104): "索引建立中 64322页" 超宽截断 → 用短文案完整显示
-        if (readerIsPortrait()) snprintf(line2, sizeof(line2), "已建%lu页", (unsigned long)txtIndexedPages);
-        else snprintf(line2, sizeof(line2), "索引建立中 %lu页", (unsigned long)txtIndexedPages);
+        if (readerIsPortrait()) snprintf(line2, sizeof(line2), PSTR("已建%lu页"), (unsigned long)txtIndexedPages);
+        else snprintf(line2, sizeof(line2), PSTR("索引建立中 %lu页"), (unsigned long)txtIndexedPages);
     } else {
         char pr[12];
         formatProgressPercent((uint64_t)txtPage, (uint64_t)txtTotalPages, pr);
-        snprintf(line2, sizeof(line2), "%s %lu/%lu页", pr,
+        snprintf(line2, sizeof(line2), PSTR("%s %lu/%lu页"), pr,
                  (unsigned long)txtPage, (unsigned long)txtTotalPages);
     }
-    if (readerMenuNote[0]) snprintf(line2, sizeof(line2), "%s", readerMenuNote);
+    if (readerMenuNote[0]) snprintf(line2, sizeof(line2), PSTR("%s"), readerMenuNote);
     drawTextUTF8(MX + 4, infoTop, line1, MW - 8, true);
     drawTextUTF8(MX + 4, infoTop + 16, line2, MW - 8, true);
     refresh(false);
@@ -4082,7 +4082,7 @@ void renderReaderMenu() {
 }
 
 void openReaderMenu() {
-    traceFmt("EVENT_MENU_OPEN page=%lu offset=%lu", (unsigned long)txtPage,
+    traceFmt(PSTR("EVENT_MENU_OPEN page=%lu offset=%lu"), (unsigned long)txtPage,
              (unsigned long)txtPageStart);
     if (txtFile) writeProgress(txtPageStart);   // 构建中自动走 sidecar, 不碰 .i1 双句柄
     readerMenuOpen = true;
@@ -4113,7 +4113,7 @@ static void renderRotSelOverlay() {
     const int MH = readerIsPortrait() ? 280 : 128;
     fillRect(MX, MY, MW, MH, false);
     drawRect(MX, MY, MW, MH, true);
-    drawTextUTF8(MX + 5, MY + 4, "旋转方向", MW - 10, true);
+    drawTextUTF8(MX + 5, MY + 4, PSTR("旋转方向"), MW - 10, true);
     static const char *const opts[4] = {"0° 横屏", "90° 竖翻", "180° 横翻", "270° 竖屏"};
     const int rowH = 20, step = 24, top = MY + 22;
     for (int i = 0; i < 4; i++) {
@@ -4159,7 +4159,7 @@ void renderMarkMenuOverlay() {
     const int MH = readerIsPortrait() ? 280 : 128;
     fillRect(MX, MY, MW, MH, false);
     drawRect(MX, MY, MW, MH, true);
-    drawTextUTF8(MX + 5, MY + 4, "标签", MW - 10, true);
+    drawTextUTF8(MX + 5, MY + 4, PSTR("标签"), MW - 10, true);
     static const char *const opts[2] = {"标记本页", "历史标记"};
     const int rowH = 24, step = 30, top = MY + 26;
     for (int i = 0; i < 2; i++) {
@@ -4179,11 +4179,11 @@ void execReaderMenu() {
             if (fontExternal) {
                 if (!initExternalFont()) {
                     fontExternal = false;
-                    snprintf(readerMenuNote, sizeof(readerMenuNote), "外部字体初始化失败");
-                } else snprintf(readerMenuNote, sizeof(readerMenuNote), "已使用外部字体");
+                    snprintf(readerMenuNote, sizeof(readerMenuNote), PSTR("外部字体初始化失败"));
+                } else snprintf(readerMenuNote, sizeof(readerMenuNote), PSTR("已使用外部字体"));
             } else {
                 u8g2Fonts.setFont(chinese_gb2312);
-                snprintf(readerMenuNote, sizeof(readerMenuNote), "已使用自带字体");
+                snprintf(readerMenuNote, sizeof(readerMenuNote), PSTR("已使用自带字体"));
             }
             renderReaderMenu();
             break;
@@ -4200,13 +4200,13 @@ void execReaderMenu() {
             if (idx >= 5) idx = -1;   // 25(或表外值) → 回 0 关
             autoFlipSpeed = speeds[idx + 1];
             autoFlipNextMs = millis() + autoFlipIntervalMs();
-            snprintf(readerMenuNote, sizeof(readerMenuNote), "自动翻页:%s", autoFlipSpeed ? "开" : "关");
+            snprintf(readerMenuNote, sizeof(readerMenuNote), PSTR("自动翻页:%s"), autoFlipSpeed ? "开" : "关");
             renderReaderMenu();
             break;
         }
         case 3:  // 全刷间隔：1..10 次局刷一次全刷
             fixedRefreshEvery = (uint8_t)((fixedRefreshEvery % 10) + 1);
-            snprintf(readerMenuNote, sizeof(readerMenuNote), "全刷间隔:%d次", fixedRefreshEvery);
+            snprintf(readerMenuNote, sizeof(readerMenuNote), PSTR("全刷间隔:%d次"), fixedRefreshEvery);
             renderReaderMenu();
             break;
         case 4:  // 旋转: 打开四向选择弹窗 (光标选中方案, 右长确认才切换; 同向确认=仅回正文)
@@ -4241,7 +4241,7 @@ void execReaderMenu() {
             // 前置检查: 仅需当前 TXT 有效且有大小。同步只依赖 txtSize + .i1[0]/sidecar 的 offset +
             // seek(offset) 读页, 不依赖完整索引/页码(索引构建中也可同步, 页码仅显示近似)。
             if (txtIndexPath.length() == 0 || !txtFile || txtFile.size() == 0) {
-                snprintf(readerMenuNote, sizeof(readerMenuNote), "无法同步");
+                snprintf(readerMenuNote, sizeof(readerMenuNote), PSTR("无法同步"));
                 renderReaderMenu();
                 break;
             }
@@ -4272,11 +4272,11 @@ void execReaderMenu() {
         }
         case 11: {  // 重建索引: 对齐文件管理器"重建" — 删除当前使用的索引 → 回第一页 → 后台重建
             if (txtPath.length() == 0 || txtIndexPath.length() == 0) {
-                snprintf(readerMenuNote, sizeof(readerMenuNote), "无索引可重建");
+                snprintf(readerMenuNote, sizeof(readerMenuNote), PSTR("无索引可重建"));
                 renderReaderMenu();
                 break;
             }
-            traceFmt("REBUILD_READER path=%s", txtPath.c_str());
+            traceFmt(PSTR("REBUILD_READER path=%s"), txtPath.c_str());
             readerMenuOpen = false;
             // 关键: 重建会 SD.remove 当前 .i1/.z1(+p), 必须先在阅读器内关掉旧句柄
             // (txtFile/txtIndexScanFile 等; 关 txtFile 后 startTxtReader 会重开)。
@@ -4329,7 +4329,7 @@ bool progressSyncApplyRemote(uint32_t offset) {
     readerBusReady("sync_apply");   // 网络阶段 GPIO12/GPIO5 可能被电量采样动过, 先恢复 SD 总线
     if (!txtFile) txtFile = readerFs().open(txtPath.c_str(), "r");   // 网络阶段 Free hook 可能已关闭, 重开
     if (!txtFile || offset > txtFile.size()) {
-        traceFmtLevel('E', "APPLY_FAIL txtFile=%d offset=%lu size=%lu",
+        traceFmtLevel('E', PSTR("APPLY_FAIL txtFile=%d offset=%lu size=%lu"),
                       (int)(txtFile ? 1 : 0), (unsigned long)offset,
                       txtFile ? (unsigned long)txtFile.size() : 0UL);
         return false;
@@ -4344,7 +4344,7 @@ bool progressSyncApplyRemote(uint32_t offset) {
         if (page > 1) {
             if (!parsePageRecordEx(page, &ps)) {
                 // 索引记录读失败: 保留手机 offset 直读(不静默当第 1 页)
-                traceFmtLevel('W', "SYNC_RECFAIL page=%lu off=%lu", (unsigned long)page, (unsigned long)offset);
+                traceFmtLevel('W', PSTR("SYNC_RECFAIL page=%lu off=%lu"), (unsigned long)page, (unsigned long)offset);
                 ps = offset;
             }
         }
@@ -4382,16 +4382,16 @@ void progressSyncRender(int state) {
         // → warn[wl-1] 越界读/写 (栈破坏)。逐段追加后重取实际 strlen, 不用 snprintf 返回值。
         char warn[56] = "！！文件不一致：";
         size_t wl = strlen(warn);
-        if (mm & 1) { snprintf(warn + wl, sizeof(warn) - wl, "大小/"); wl = strlen(warn); }
-        if (mm & 2) { snprintf(warn + wl, sizeof(warn) - wl, "头部/"); wl = strlen(warn); }
-        if (mm & 4) { snprintf(warn + wl, sizeof(warn) - wl, "中部/"); wl = strlen(warn); }
-        if (mm & 8) { snprintf(warn + wl, sizeof(warn) - wl, "尾部/"); wl = strlen(warn); }
+        if (mm & 1) { snprintf(warn + wl, sizeof(warn) - wl, PSTR("大小/")); wl = strlen(warn); }
+        if (mm & 2) { snprintf(warn + wl, sizeof(warn) - wl, PSTR("头部/")); wl = strlen(warn); }
+        if (mm & 4) { snprintf(warn + wl, sizeof(warn) - wl, PSTR("中部/")); wl = strlen(warn); }
+        if (mm & 8) { snprintf(warn + wl, sizeof(warn) - wl, PSTR("尾部/")); wl = strlen(warn); }
         if (wl > 0 && warn[wl - 1] == '/') warn[--wl] = '\0';
         fillRect(MX + 4, MY + 4, MW - 8, 16, true);          // 黑底 (盖标题区, 不碰下方)
         drawTextUTF8(MX + 6, MY + 4, warn, MW - 12, false);  // 白字同基线
         y += 16;   // 标题行占位不变, 后续行不下移
     } else {
-        drawTextUTF8(MX + 4, y, "进度同步", 100, true); y += 16;
+        drawTextUTF8(MX + 4, y, PSTR("进度同步"), 100, true); y += 16;
     }
     int i = txtPath.lastIndexOf('/');
     String name = i >= 0 ? txtPath.substring(i + 1) : txtPath;
@@ -4399,20 +4399,20 @@ void progressSyncRender(int state) {
     char line[40];
 
     if (state == SYNC_COMPARE) {
-        snprintf(line, sizeof(line), "本地 %.2f%%", (double)progressSyncLocalPercent());
+        snprintf(line, sizeof(line), PSTR("本地 %.2f%%"), (double)progressSyncLocalPercent());
         drawTextUTF8(MX + 4, y, line, MW - 8, true); y += 16;
-        snprintf(line, sizeof(line), "%lu B", (unsigned long)progressSyncLocalSize());
+        snprintf(line, sizeof(line), PSTR("%lu B"), (unsigned long)progressSyncLocalSize());
         drawTextUTF8(MX + 4, y, line, MW - 8, false); y += 18;
-        snprintf(line, sizeof(line), "手机 %.2f%%", (double)progressSyncRemotePercent());
+        snprintf(line, sizeof(line), PSTR("手机 %.2f%%"), (double)progressSyncRemotePercent());
         drawTextUTF8(MX + 4, y, line, MW - 8, true); y += 16;
-        snprintf(line, sizeof(line), "%lu B", (unsigned long)progressSyncRemoteOffset());
+        snprintf(line, sizeof(line), PSTR("%lu B"), (unsigned long)progressSyncRemoteOffset());
         drawTextUTF8(MX + 4, y, line, MW - 8, false); y += 18;
         uint64_t ts = progressSyncRemoteTsMs();
         if (ts > 0) {
             time_t t = (time_t)(ts / 1000ULL);
             struct tm* tmv = localtime(&t);
             if (tmv) {
-                snprintf(line, sizeof(line), "更新 %04d-%02d-%02d %02d:%02d",
+                snprintf(line, sizeof(line), PSTR("更新 %04d-%02d-%02d %02d:%02d"),
                          tmv->tm_year + 1900, tmv->tm_mon + 1, tmv->tm_mday, tmv->tm_hour, tmv->tm_min);
                 drawTextUTF8(MX + 4, y, line, MW - 8, false); y += 16;
             }
@@ -4432,29 +4432,29 @@ void progressSyncRender(int state) {
             by = by1;
             fillRect(MX + 6, by1, bw, bh, b1sel);
             drawRect(MX + 6, by1, bw, bh, !b1sel);
-            drawTextUTF8(MX + 12, by1 + 3, "同步=从手机拉取", bw - 12, !b1sel);
+            drawTextUTF8(MX + 12, by1 + 3, PSTR("同步=从手机拉取"), bw - 12, !b1sel);
             fillRect(MX + 6, by2, bw, bh, b2sel);
             drawRect(MX + 6, by2, bw, bh, !b2sel);
-            drawTextUTF8(MX + 12, by2 + 3, "覆盖=推送到手机", bw - 12, !b2sel);
+            drawTextUTF8(MX + 12, by2 + 3, PSTR("覆盖=推送到手机"), bw - 12, !b2sel);
         } else {
             const int bw = 126;
             const int b1x = MX + 8, b2x = MX + MW - 8 - bw;
             fillRect(b1x, by, bw, bh, b1sel);
             drawRect(b1x, by, bw, bh, !b1sel);
-            drawTextUTF8(b1x + 6, by + 3, "同步=从手机拉取", bw - 4, !b1sel);
+            drawTextUTF8(b1x + 6, by + 3, PSTR("同步=从手机拉取"), bw - 4, !b1sel);
             fillRect(b2x, by, bw, bh, b2sel);
             drawRect(b2x, by, bw, bh, !b2sel);
-            drawTextUTF8(b2x + 6, by + 3, "覆盖=推送到手机", bw - 4, !b2sel);
+            drawTextUTF8(b2x + 6, by + 3, PSTR("覆盖=推送到手机"), bw - 4, !b2sel);
         }
         drawTextUTF8(MX + 4, by - 16,
                      progressSyncConfirmUploadPending() ? "再按右长确认推送到手机" : "中短/右短 移动  中长取消 右长确认",
                      MW - 8, progressSyncConfirmUploadPending());
     } else if (state == SYNC_ERROR) {
         drawTextUTF8(MX + 4, y, progressSyncStatusText(), MW - 8, true);
-        drawTextUTF8(MX + 4, MY + MH - 26, "中长/右长 返回", MW - 8, false);
+        drawTextUTF8(MX + 4, MY + MH - 26, PSTR("中长/右长 返回"), MW - 8, false);
     } else {
         drawTextUTF8(MX + 4, y, progressSyncStatusText(), MW - 8, true);
-        drawTextUTF8(MX + 4, MY + MH - 26, "进度同步中...", MW - 8, false);
+        drawTextUTF8(MX + 4, MY + MH - 26, PSTR("进度同步中..."), MW - 8, false);
     }
     refresh(false);
     fbRot = 90;
@@ -4504,9 +4504,9 @@ void saveSleepRecord() {
         readerBusReady("sleep_save_retry");
         f = readerFs().open(SLEEP_RECORD_PATH, "w");
     }
-    debugFmt("UI_SAVE_PRE exists=%d removed=%d", readerFs().exists(SLEEP_RECORD_PATH) ? 1 : 0, removed ? 1 : 0);
+    debugFmt(PSTR("UI_SAVE_PRE exists=%d removed=%d"), readerFs().exists(SLEEP_RECORD_PATH) ? 1 : 0, removed ? 1 : 0);
     if (!f) {
-        debugLine("SLEEP_SAVE open-fail");
+        debugLine(PSTR("SLEEP_SAVE open-fail"));
         return;
     }
     size_t wrote = f.write((const uint8_t *)&rec, sizeof(rec));
@@ -4517,7 +4517,7 @@ void saveSleepRecord() {
     File vf = readerFs().open(SLEEP_RECORD_PATH, "r");
     uint32_t vsize = vf ? vf.size() : 0;
     if (vf) vf.close();
-    debugFmt("SLEEP_SAVE mode=%d speed=%u popup=%u sel=%u page=%d chSel=%d selIdx=%d top=%d path=%s exist=%d size=%u wrote=%u pos=%lu",
+    debugFmt(PSTR("SLEEP_SAVE mode=%d speed=%u popup=%u sel=%u page=%d chSel=%d selIdx=%d top=%d path=%s exist=%d size=%u wrote=%u pos=%lu"),
              rec.mode, rec.chapterSpeed, rec.chapterSpeedPopup, rec.chapterSpeedSel,
              (int)rec.chapterPage, (int)rec.chapterSel,
              (int)rec.selIndex, (int)rec.topIndex, rec.path,
@@ -4528,26 +4528,26 @@ void saveSleepRecord() {
 // 读取并清除休眠记录; 返回 true 且填充 rec 表示有有效记录。
 bool readSleepRecord(SleepRecord &rec) {
     if (!readerFs().exists(SLEEP_RECORD_PATH)) {
-        debugLine("SLEEP_READ no-file");
+        debugLine(PSTR("SLEEP_READ no-file"));
         return false;
     }
     File f = readerFs().open(SLEEP_RECORD_PATH, "r");
     if (!f) {
-        debugLine("SLEEP_READ open-fail");
+        debugLine(PSTR("SLEEP_READ open-fail"));
         return false;
     }
     size_t got = f.read((uint8_t *)&rec, sizeof(rec));
     f.close();
     readerFs().remove(SLEEP_RECORD_PATH);   // 一次性: 读完即删, 避免下次误用
     if (got != sizeof(rec)) {
-        debugFmt("SLEEP_READ short got=%u", (unsigned)got);
+        debugFmt(PSTR("SLEEP_READ short got=%u"), (unsigned)got);
         return false;
     }
     if (rec.magic != SLEEP_RECORD_MAGIC) {
-        debugFmt("SLEEP_READ bad-magic=%08lX", (unsigned long)rec.magic);
+        debugFmt(PSTR("SLEEP_READ bad-magic=%08lX"), (unsigned long)rec.magic);
         return false;
     }
-    debugFmt("SLEEP_READ mode=%d speed=%u popup=%u sel=%u page=%d chSel=%d selIdx=%d top=%d path=%s",
+    debugFmt(PSTR("SLEEP_READ mode=%d speed=%u popup=%u sel=%u page=%d chSel=%d selIdx=%d top=%d path=%s"),
              rec.mode, rec.chapterSpeed, rec.chapterSpeedPopup, rec.chapterSpeedSel,
              (int)rec.chapterPage, (int)rec.chapterSel,
              (int)rec.selIndex, (int)rec.topIndex, rec.path);
@@ -4556,8 +4556,8 @@ bool readSleepRecord(SleepRecord &rec) {
 
 void enterSleepMode() {
     progressFlushForce("sleep");   // P6: 休眠前落盘待写进度
-    traceLine("SLEEP_ENTER");
-    debugFmt("SLEEP mode=%d page=%lu chPage=%d chSel=%d speed=%u popup=%d",
+    traceLine(PSTR("SLEEP_ENTER"));
+    debugFmt(PSTR("SLEEP mode=%d page=%lu chPage=%d chSel=%d speed=%u popup=%d"),
              appMode, (unsigned long)txtPage, chapterPage, chapterSel, chapterSpeed,
              chapterSpeedPopup ? 1 : 0);
     if (appMode == APP_READER && txtIndexPath.length()) writeProgress(txtPageStart);
@@ -4610,7 +4610,7 @@ void drawLowBatteryNotice() {
 }
 
 void enterLowBatterySleep() {
-    traceLine("LOWBAT_SLEEP");
+    traceLine(PSTR("LOWBAT_SLEEP"));
     if (txtIndexScanFile) txtIndexScanFile.close();
     if (txtIndexBuildFile) txtIndexBuildFile.close();
     if (txtChapterBuildFile) txtChapterBuildFile.close();
@@ -4639,11 +4639,11 @@ bool checkLowBattery() {
     delay(50);
     int v2 = readBatteryMV();
     if (v2 > BAT_LOW_MV) return false;
-    traceFmt("LOWBAT detect v1=%d v2=%d", v1, v2);
+    traceFmt(PSTR("LOWBAT detect v1=%d v2=%d"), v1, v2);
 #if SERIAL_REMOTE
     // 远程控制专用版: 低压深睡同样只能 KEY1 硬件复位唤醒, 摸不到设备时睡着不可逆。
     // 远程调试多接 USB 供电, 电压检测常误判 → 只记日志不深睡, 保住串口远程通道。
-    traceFmt("LOWBAT_SKIP remote mode v1=%d v2=%d", v1, v2);
+    traceFmt(PSTR("LOWBAT_SKIP remote mode v1=%d v2=%d"), v1, v2);
     return false;
 #else
     enterLowBatterySleep();
@@ -4652,9 +4652,9 @@ bool checkLowBattery() {
 }
 
 void nextTxtPage() {
-    traceFmt("PAGE_NEXT from=%lu", (unsigned long)txtPage);
+    traceFmt(PSTR("PAGE_NEXT from=%lu"), (unsigned long)txtPage);
     if (txtIndexBuilding && txtPage >= txtIndexedPages) {
-        showMsg("索引构建中", "请稍候再翻页");
+        showMsg(PSTR("索引构建中"), "请稍候再翻页");
         return;
     }
     if (txtPage >= txtTotalPages) return;
@@ -4662,8 +4662,8 @@ void nextTxtPage() {
     uint32_t off = 0;
     // 关键: 先取下一页页首偏移, 失败就**不递增页码**(原实现把 0 当第 1 页渲染并写坏进度)
     if (!parsePageRecordEx(txtPage + 1, &off)) {
-        showMsg("读取失败", "请重试");
-        traceFmtLevel('E', "PAGE_NEXT_RECFAIL page=%lu", (unsigned long)(txtPage + 1));
+        showMsg(PSTR("读取失败"), "请重试");
+        traceFmtLevel('E', PSTR("PAGE_NEXT_RECFAIL page=%lu"), (unsigned long)(txtPage + 1));
         return;
     }
     txtPage = txtPage + 1;
@@ -4672,8 +4672,8 @@ void nextTxtPage() {
         // 读失败(偶发 SD 总线坏): 回退页码保持原显示, 不渲染空页(白屏)。下一翻页自愈后继续。
         txtPage = prevPage;
         txtPageStart = prevStart;
-        showMsg("读取失败", "请重试");
-        traceFmtLevel('E', "PAGE_NEXT_FAIL page=%lu", (unsigned long)txtPage);
+        showMsg(PSTR("读取失败"), "请重试");
+        traceFmtLevel('E', PSTR("PAGE_NEXT_FAIL page=%lu"), (unsigned long)txtPage);
         return;
     }
     writeProgress(txtPageStart);
@@ -4682,16 +4682,16 @@ void nextTxtPage() {
 }
 
 void previousTxtPage() {
-    traceFmt("PAGE_PREVIOUS from=%lu", (unsigned long)txtPage);
+    traceFmt(PSTR("PAGE_PREVIOUS from=%lu"), (unsigned long)txtPage);
     if (txtPage <= 1) {
-        showMsg("已是第一页", "");
+        showMsg(PSTR("已是第一页"), "");
         return;
     }
     uint32_t prevPage = txtPage, prevStart = txtPageStart;
     uint32_t off = 0;
     if (!parsePageRecordEx(txtPage - 1, &off)) {
-        showMsg("读取失败", "请重试");
-        traceFmtLevel('E', "PAGE_PREV_RECFAIL page=%lu", (unsigned long)(txtPage - 1));
+        showMsg(PSTR("读取失败"), "请重试");
+        traceFmtLevel('E', PSTR("PAGE_PREV_RECFAIL page=%lu"), (unsigned long)(txtPage - 1));
         return;
     }
     txtPage = txtPage - 1;
@@ -4700,8 +4700,8 @@ void previousTxtPage() {
         // 读失败: 回退页码保持原显示, 不渲染空页(白屏)。
         txtPage = prevPage;
         txtPageStart = prevStart;
-        showMsg("读取失败", "请重试");
-        traceFmtLevel('E', "PAGE_PREV_FAIL page=%lu", (unsigned long)txtPage);
+        showMsg(PSTR("读取失败"), "请重试");
+        traceFmtLevel('E', PSTR("PAGE_PREV_FAIL page=%lu"), (unsigned long)txtPage);
         return;
     }
     writeProgress(txtPageStart);
@@ -4778,7 +4778,7 @@ static void chapterBuildPageTable() {
                     // 表上限(1024 页=6144 章): 之后的章节"上一页"不可达(表静默截断)。
                     // 只告警不改结构 (扩表吃 4KB+ RAM; 现有最大书 947 页不触发, 属超长书边界)。
                     tableCapped = true;
-                    traceFmtLevel('W', "CH_TABLE_CAPPED pages=%lu chapters>=%lu",
+                    traceFmtLevel('W', PSTR("CH_TABLE_CAPPED pages=%lu chapters>=%lu"),
                                   (unsigned long)CHAPTER_PAGE_TABLE_MAX, (unsigned long)chapterIdx);
                 }
             }
@@ -4788,7 +4788,7 @@ static void chapterBuildPageTable() {
     f.close();
     // 最后一页可能不足 CHAPTER_ROWS 行, 但 offset 已由"翻页时 loadChapterRows"定位, 表只需覆盖
     // chapterPageTableCount-1 个完整页; chapterTotalPages 精确 = 完整页数 + 1 (末页可能有残行)
-    traceFmt("CH_TABLE built pages=%lu", (unsigned long)chapterPageTableCount);
+    traceFmt(PSTR("CH_TABLE built pages=%lu"), (unsigned long)chapterPageTableCount);
 }
 
 // 统计 .z1 总章节数 (每行一章)
@@ -4911,7 +4911,7 @@ void drawChapterBottomElement(int idx, const char *label) {
 void renderChapterList(bool full) {
     fillRect(0, 0, SCR_W, SCR_H, false);
     // 顶栏: 标题 + 右上角 "本页最后项/总章节数" (如 6/35)
-    drawTextUTF8(2, 0, "章节目录", 100, true);
+    drawTextUTF8(2, 0, PSTR("章节目录"), 100, true);
     uint32_t total = txtChapterCount;
     uint32_t lastShown = 0;
     if (total > 0) {
@@ -4919,7 +4919,7 @@ void renderChapterList(bool full) {
         if (lastShown > total) lastShown = total;
     }
     char headerInfo[20];
-    snprintf(headerInfo, sizeof(headerInfo), "%lu/%lu", (unsigned long)lastShown, (unsigned long)total);
+    snprintf(headerInfo, sizeof(headerInfo), PSTR("%lu/%lu"), (unsigned long)lastShown, (unsigned long)total);
     drawTextUTF8(SCR_W - 4 - utf8Width(headerInfo), 0, headerInfo, 90, true);
     fillRect(0, 16, SCR_W, 1, true);
     // 6 行, 15px 行距: 标题 (无序号) + 页码右对齐
@@ -4929,7 +4929,7 @@ void renderChapterList(bool full) {
         fillRect(0, y, SCR_W, 15, false);   // 恒白底 (空心框样式)
         int fg = true;   // 恒黑字
         char pageStr[12];
-        snprintf(pageStr, sizeof(pageStr), "%lu", (unsigned long)chapterRows[i].page);
+        snprintf(pageStr, sizeof(pageStr), PSTR("%lu"), (unsigned long)chapterRows[i].page);
         int pageW = utf8Width(pageStr);
         int titleMax = SCR_W - 8 - pageW - 6;
         char disp[56];
@@ -4942,12 +4942,12 @@ void renderChapterList(bool full) {
     fillRect(0, 108, SCR_W, 20, false);
     fillRect(0, 108, SCR_W, 1, true);
     char pageInd[16];
-    snprintf(pageInd, sizeof(pageInd), "%d/%d", chapterPage, chapterTotalPages);
+    snprintf(pageInd, sizeof(pageInd), PSTR("%d/%d"), chapterPage, chapterTotalPages);
     drawTextUTF8(4, 111, pageInd, 69, true);
     drawChapterBottomElement(6, "上一页");
     drawChapterBottomElement(7, "下一页");
     char spd[8];
-    snprintf(spd, sizeof(spd), "x%d", chapterSpeed);
+    snprintf(spd, sizeof(spd), PSTR("x%d"), chapterSpeed);
     drawChapterBottomElement(8, spd);
     refresh(full);
 }
@@ -4964,7 +4964,7 @@ void renderChapterSpeedPopup() {
         fillRect(bx, MY + 4, r1w, 19, sel);
         drawRect(bx, MY + 4, r1w, 19, !sel);
         char lbl[8];
-        snprintf(lbl, sizeof(lbl), "x%d", speeds[i]);
+        snprintf(lbl, sizeof(lbl), PSTR("x%d"), speeds[i]);
         int tw = utf8Width(lbl);
         drawTextUTF8(bx + (r1w - tw) / 2, MY + 4 + 2, lbl, tw + 2, !sel);
     }
@@ -4976,7 +4976,7 @@ void renderChapterSpeedPopup() {
         fillRect(bx, MY + 27, r2w, 19, sel);
         drawRect(bx, MY + 27, r2w, 19, !sel);
         char lbl[8];
-        snprintf(lbl, sizeof(lbl), "x%d", speeds[idx]);
+        snprintf(lbl, sizeof(lbl), PSTR("x%d"), speeds[idx]);
         int tw = utf8Width(lbl);
         drawTextUTF8(bx + (r2w - tw) / 2, MY + 27 + 2, lbl, tw + 2, !sel);
     }
@@ -4984,9 +4984,9 @@ void renderChapterSpeedPopup() {
 }
 
 void enterChapterList() {
-    traceLine("CHAPTER_ENTER");
+    traceLine(PSTR("CHAPTER_ENTER"));
     if (txtIndexBuilding) {
-        showMsg("索引构建中", "请稍候再进章节");
+        showMsg(PSTR("索引构建中"), "请稍候再进章节");
         return;
     }
     if (txtChapterCount == 0) txtChapterCount = countTxtChapters();
@@ -5028,7 +5028,7 @@ void closeTxtReader() {
         renderAll();
         refresh(true);
         saveSleepRecord();
-        debugLine("CLOSE keep index building in background");
+        debugLine(PSTR("CLOSE keep index building in background"));
         return;
     }
     if (txtIndexScanFile) txtIndexScanFile.close();
@@ -5133,43 +5133,43 @@ void startTxtReader(const char *path, bool forceRebuild) {
         if (!lfsReady) {
             lfsReady = LittleFS.begin();
             if (!lfsReady) {
-                traceFmtLevel('E', "LFS_MOUNT_FAIL");
-                showMsg("内部存储", "挂载失败");
+                traceFmtLevel('E', PSTR("LFS_MOUNT_FAIL"));
+                showMsg(PSTR("内部存储"), "挂载失败");
                 return;
             }
-            traceFmt("LFS_MOUNT ok");
+            traceFmt(PSTR("LFS_MOUNT ok"));
         }
     } else {
         // SD 介质: 阅读前恢复 SD 总线(EPD 刷新/电池采样与 SD 共用引脚)
         if (!readerBusReady("reader_enter")) {
-            traceFmtLevel('E', "READER_SD_BUS_FAIL");
-            showMsg("SD 读取失败", "请重试");
+            traceFmtLevel('E', PSTR("READER_SD_BUS_FAIL"));
+            showMsg(PSTR("SD 读取失败"), "请重试");
             return;
         }
-        traceFmt("READER_SRC sd path=%s", localPath.c_str());
+        traceFmt(PSTR("READER_SRC sd path=%s"), localPath.c_str());
     }
-    traceFmt("TXT open step=flush_begin");
+    traceFmt(PSTR("TXT open step=flush_begin"));
     progressFlushForce("book_change");   // P6: 换书前把上一本的待写进度落盘
-    traceFmt("TXT open step=flush_done");
+    traceFmt(PSTR("TXT open step=flush_done"));
     // 仅"内部介质阅读"时关闭 SD(省电 + 免 GPIO5/GPIO12 争抢); SD 介质阅读时 SD 就是数据源, 必须在线。
     if (gBrowseLocal) {
         SD.end();
         digitalWrite(5, HIGH);
         pinMode(5, OUTPUT);
-        traceFmt("SD_OFF reader_enter");
+        traceFmt(PSTR("SD_OFF reader_enter"));
     }
-    traceFmt("TXT open step=path_check");
+    traceFmt(PSTR("TXT open step=path_check"));
     if (!isTxtPath(path)) {
-        traceFmtLevel('W', "TXT unsupported path=%s", path ? path : "(null)");
-        showMsg("不支持打开", "仅支持TXT文件");
+        traceFmtLevel('W', PSTR("TXT unsupported path=%s"), path ? path : "(null)");
+        showMsg(PSTR("不支持打开"), "仅支持TXT文件");
         return;
     }
-    traceFmt("TXT open step=list_free_begin");
+    traceFmt(PSTR("TXT open step=list_free_begin"));
     freeItemList();   // 语义复位 (窗口静态数组不占堆; 回浏览模式 listDir 重建窗口)
-    traceFmt("TXT open step=list_free_done");
+    traceFmt(PSTR("TXT open step=list_free_done"));
     wifiManagerRfOff("reader_enter");   // P5: 进入阅读强制关 RF (官方 DisplayTxt.ino:854 WifiShutdown 对齐)
-    traceFmt("TXT open step=rf_off_done");
-    debugFmt("TXT open path=%s rebuild=%d", localPath.c_str(), forceRebuild ? 1 : 0);
+    traceFmt(PSTR("TXT open step=rf_off_done"));
+    debugFmt(PSTR("TXT open path=%s rebuild=%d"), localPath.c_str(), forceRebuild ? 1 : 0);
     statsOnSessionStart(localPath.c_str());   // 阅读统计: 会话开始, 记录当前书 + 今日/本周/连续天数检查
     // 旋转续读: 读走即清零 (任何路径都不残留; 失败提前 return 也安全)
     uint32_t rotateResume = gRotateResumeOffset;
@@ -5188,8 +5188,8 @@ void startTxtReader(const char *path, bool forceRebuild) {
     if (txtDot > 0) txtChapterPath = txtChapterPath.substring(0, txtDot);
     txtChapterPath += readerIsPortrait() ? ".vz1" : ".z1";
     if (!readerBusReady("txt_open")) {
-        debugLine("TXT SD reinit failed");
-        showMsg("SD错误", "无法读取TXT");
+        debugLine(PSTR("TXT SD reinit failed"));
+        showMsg(PSTR("SD错误"), "无法读取TXT");
         return;
     }
     // 兼容改名前已经生成的 `小说.txt.i1/.z1`，避免升级后所有大文件被强制重建。
@@ -5197,14 +5197,14 @@ void startTxtReader(const char *path, bool forceRebuild) {
     String legacyChapterPath = txtPath + (readerIsPortrait() ? ".vz1" : ".z1");
     if (!readerFs().exists(txtIndexPath.c_str()) && readerFs().exists(legacyIndexPath.c_str())) {
         txtIndexPath = legacyIndexPath;
-        debugLine("TXT using legacy index name");
+        debugLine(PSTR("TXT using legacy index name"));
     }
     if (!readerFs().exists(txtChapterPath.c_str()) && readerFs().exists(legacyChapterPath.c_str())) {
         txtChapterPath = legacyChapterPath;
-        debugLine("TXT using legacy chapter name");
+        debugLine(PSTR("TXT using legacy chapter name"));
     }
     txtFile = readerFs().open(txtPath.c_str(), "r");
-    if (!txtFile) { debugLine("TXT open failed"); showMsg("打开失败", ""); return; }
+    if (!txtFile) { debugLine(PSTR("TXT open failed")); showMsg(PSTR("打开失败"), ""); return; }
     saveRecentReadPath(txtPath);
     recentReadPath = txtPath;
     recentReadValid = true;
@@ -5232,7 +5232,7 @@ void startTxtReader(const char *path, bool forceRebuild) {
         for (uint8_t i = 0; i < 8; i++) recPrev[i] = (char)index.read();
         recPrev[8] = '\0';
         if (strtoul(recPrev, nullptr, 10) == 0) {
-            debugLine("TXT index polluted, force rebuild");
+            debugLine(PSTR("TXT index polluted, force rebuild"));
             indexValid = false;
         }
     }
@@ -5254,7 +5254,7 @@ void startTxtReader(const char *path, bool forceRebuild) {
             prevOff = v;
         }
         if (indexFormatCorrupt) {
-            debugLine("TXT index non-monotonic (aligned bug) -> force full rebuild");
+            debugLine(PSTR("TXT index non-monotonic (aligned bug) -> force full rebuild"));
             indexValid = false;
         }
     }
@@ -5262,7 +5262,7 @@ void startTxtReader(const char *path, bool forceRebuild) {
     if (chapters) chapters.close();
 
     bool rebuild = forceRebuild || !indexValid || !chaptersValid;
-    debugFmt("TXT index=%d chapters=%d rebuild=%d", indexValid ? 1 : 0,
+    debugFmt(PSTR("TXT index=%d chapters=%d rebuild=%d"), indexValid ? 1 : 0,
              chaptersValid ? 1 : 0, rebuild ? 1 : 0);
     if (rebuild) {
         // 超级抗打断: 仅当索引未完成(indexValid=false)且非强制重建时,
@@ -5296,7 +5296,7 @@ void startTxtReader(const char *path, bool forceRebuild) {
         if (rotateResume > 0) {
             // 旋转续读: 新方向索引不存在/不完整 → 直接用当前页字节偏移读页 (内容=当前阅读位置)
             savedOffset = rotateResume;
-            debugFmt("TXT rotate-resume offset=%lu", (unsigned long)savedOffset);
+            debugFmt(PSTR("TXT rotate-resume offset=%lu"), (unsigned long)savedOffset);
         } else if (!forceRebuild) {
             // 构建中进度优先: sidecar (txtIndexPath+"p") 是重建/续建期间实时写入的阅读位置;
             // 完成时已合并回记录[0] 并删除, 因此存在即代表上次构建被中断。
@@ -5308,7 +5308,7 @@ void startTxtReader(const char *path, bool forceRebuild) {
                     for (uint8_t i = 0; i < 8; i++) rec[i] = (char)sp.read();
                     rec[8] = '\0';
                     savedOffset = strtoul(rec, nullptr, 10);
-                    debugFmt("TXT restore from sidecar offset=%lu", (unsigned long)savedOffset);
+                    debugFmt(PSTR("TXT restore from sidecar offset=%lu"), (unsigned long)savedOffset);
                 }
                 if (sp) sp.close();
             }
@@ -5327,7 +5327,7 @@ void startTxtReader(const char *path, bool forceRebuild) {
             //    全空页 ("隐形阅读器": 面板停留旧画面但 appMode=READER), 且越界偏移会被写回进度。
             //    越界即作废回第一页 (对齐 progressSyncApplyRemote 的 offset>size 检查)。
             if (savedOffset >= txtFile.size()) {
-                traceFmtLevel('W', "RESTORE_OFFSET_OOB off=%lu size=%lu",
+                traceFmtLevel('W', PSTR("RESTORE_OFFSET_OOB off=%lu size=%lu"),
                               (unsigned long)savedOffset, (unsigned long)txtFile.size());
                 savedOffset = 0;
             }
@@ -5338,7 +5338,7 @@ void startTxtReader(const char *path, bool forceRebuild) {
                     if (found > 0) {
                         uint32_t ps = 0;
                         if (parsePageRecordEx(found, &ps)) { txtPage = found; txtPageStart = ps; }
-                        else { txtPage = 1; txtPageStart = savedOffset; traceFmtLevel('W', "RESTORE_RECFAIL found=%lu", (unsigned long)found); }
+                        else { txtPage = 1; txtPageStart = savedOffset; traceFmtLevel('W', PSTR("RESTORE_RECFAIL found=%lu"), (unsigned long)found); }
                     }
                 } else if (bootHintPage >= 2 && parsePageRecord(bootHintPage) == savedOffset) {
                     // 启动路径页号复用 (优化②): 索引完整但章节缺失触发的续建同样生效
@@ -5364,13 +5364,13 @@ void startTxtReader(const char *path, bool forceRebuild) {
             renderTxtPage(true);
         }
         if (resumeOffset > 0) {
-            debugFmt("TXT super-resume from page-table offset=%lu page=%lu", (unsigned long)resumeOffset, (unsigned long)txtPage);
+            debugFmt(PSTR("TXT super-resume from page-table offset=%lu page=%lu"), (unsigned long)resumeOffset, (unsigned long)txtPage);
             beginResumeIndexBuildFromPartial();
-            debugLine("TXT async index resumed");
+            debugLine(PSTR("TXT async index resumed"));
         } else {
-            debugFmt("TXT first page displayed before index page=%lu", (unsigned long)txtPage);
+            debugFmt(PSTR("TXT first page displayed before index page=%lu"), (unsigned long)txtPage);
             beginTxtIndexBuild();
-            debugLine("TXT async index scheduled");
+            debugLine(PSTR("TXT async index scheduled"));
         }
     } else {
         txtChapterCount = countTxtChapters();   // 修复 "0章": 有效索引时从未加载章节数
@@ -5380,7 +5380,7 @@ void startTxtReader(const char *path, bool forceRebuild) {
             //    + seek/read 空转 → 总页数巨大翻页异常。按"索引无效"兜底: 第一页 + 后台重建
             //    (与 rebuild 分支同语义), 不带着坏页数进阅读。
             if (ready) ready.close();
-            traceFmtLevel('E', "IDX_REOPEN_FAIL %s", txtIndexPath.c_str());
+            traceFmtLevel('E', PSTR("IDX_REOPEN_FAIL %s"), txtIndexPath.c_str());
             txtTotalPages = 1;
             txtPage = 1;
             txtPageStart = 0;
@@ -5403,7 +5403,7 @@ void startTxtReader(const char *path, bool forceRebuild) {
         if (rotateResume > 0) saved = rotateResume;   // 旋转: 用当前页字节偏移转换页码
         // ⚠️ 换过更小的同名文件: 旧偏移 ≥ 新文件大小 → seek 越过 EOF → 空页隐形阅读器 (同 rebuild 分支)
         if (saved >= txtFile.size()) {
-            traceFmtLevel('W', "RESTORE_OFFSET_OOB2 off=%lu size=%lu",
+            traceFmtLevel('W', PSTR("RESTORE_OFFSET_OOB2 off=%lu size=%lu"),
                           (unsigned long)saved, (unsigned long)txtFile.size());
             saved = 0;
         }
@@ -5415,7 +5415,7 @@ void startTxtReader(const char *path, bool forceRebuild) {
                 if (found > 0) {
                     uint32_t ps = 0;
                     if (parsePageRecordEx(found, &ps)) { txtPage = found; txtPageStart = ps; }
-                    else { txtPage = 1; txtPageStart = saved; traceFmtLevel('W', "RESTORE_RECFAIL2 found=%lu", (unsigned long)found); }
+                    else { txtPage = 1; txtPageStart = saved; traceFmtLevel('W', PSTR("RESTORE_RECFAIL2 found=%lu"), (unsigned long)found); }
                 } else {
                     txtPage = txtTotalPages;   // saved 超最后页首 → 最后一页
                     txtPageStart = saved;
@@ -5441,7 +5441,7 @@ void startTxtReader(const char *path, bool forceRebuild) {
         if (txtPage == 1 && saved == 0) txtPageStart = 0;
         readTxtPage(txtPageStart);
         appMode = APP_READER;
-        debugFmt("TXT restored page=%lu/%lu offset=%lu", (unsigned long)txtPage,
+        debugFmt(PSTR("TXT restored page=%lu/%lu offset=%lu"), (unsigned long)txtPage,
                  (unsigned long)txtTotalPages, (unsigned long)txtPageStart);
         if (bootPartialRestore) {
             renderTxtPageNoRefresh();   // 优化④: 面板已显示同页, 仅渲染不写屏 (0s)
@@ -5478,7 +5478,7 @@ uint8_t markCountRead(const String &path) {
     if (!f) return 0;
     uint32_t size = f.size();
     f.close();
-    if (size % 8 != 0) traceFmtLevel('W', "BM_CORRUPT size=%lu", (unsigned long)size);
+    if (size % 8 != 0) traceFmtLevel('W', PSTR("BM_CORRUPT size=%lu"), (unsigned long)size);
     uint32_t n = size / 8;
     return n > MARK_MAX ? MARK_MAX : (uint8_t)n;
 }
@@ -5609,16 +5609,16 @@ bool markDeleteOne(uint8_t idx) {
 // 顶栏右上 = 选中序号/总条数 (项维度); 底栏 = 当前列表页/总页数 (页维度), 两种计数不重复。
 void renderMarkList(bool full) {
     fillRect(0, 0, SCR_W, SCR_H, false);
-    drawTextUTF8(2, 0, "历史标记", 100, true);
+    drawTextUTF8(2, 0, PSTR("历史标记"), 100, true);
     int gsel = markCount ? (int)((markPage - 1) * CHAPTER_ROWS + markSel + 1) : 0;
     if (gsel > (int)markCount) gsel = markCount;
     char selInfo[16];
-    snprintf(selInfo, sizeof(selInfo), "%d/%d", gsel, (int)markCount);
+    snprintf(selInfo, sizeof(selInfo), PSTR("%d/%d"), gsel, (int)markCount);
     drawTextUTF8(SCR_W - 4 - utf8Width(selInfo), 0, selInfo, 90, true);
     fillRect(0, 16, SCR_W, 1, true);
     if (markCountLoaded == 0) {
-        drawTextUTF8((SCR_W - utf8Width("暂无标签")) / 2, 40, "暂无标签", SCR_W - 8, true);
-        drawTextUTF8(4, 111, "菜单-标签-标记本页添加", SCR_W - 8, true);
+        drawTextUTF8((SCR_W - utf8Width("暂无标签")) / 2, 40, PSTR("暂无标签"), SCR_W - 8, true);
+        drawTextUTF8(4, 111, PSTR("菜单-标签-标记本页添加"), SCR_W - 8, true);
         refresh(full);
         return;
     }
@@ -5629,12 +5629,12 @@ void renderMarkList(bool full) {
         fillRect(0, y, SCR_W, 15, false);   // 恒白底 (空心框样式)
         int fg = true;   // 恒黑字
         char name[16];
-        snprintf(name, sizeof(name), "标记%lu", (unsigned long)((markPage - 1) * CHAPTER_ROWS + i + 1));
+        snprintf(name, sizeof(name), PSTR("标记%lu"), (unsigned long)((markPage - 1) * CHAPTER_ROWS + i + 1));
         uint64_t off = markOffsets[i];
         uint32_t pct10 = tsize ? (uint32_t)(off * 1000ULL / tsize) : 0;   // 截断取整, 同进度千分位口径
         if (pct10 > 1000) pct10 = 1000;
         char pctStr[12];
-        snprintf(pctStr, sizeof(pctStr), "%lu.%lu%%", (unsigned long)(pct10 / 10), (unsigned long)(pct10 % 10));
+        snprintf(pctStr, sizeof(pctStr), PSTR("%lu.%lu%%"), (unsigned long)(pct10 / 10), (unsigned long)(pct10 % 10));
         int pctW = utf8Width(pctStr);
         drawTextUTF8(2, y, name, SCR_W - 8 - pctW - 6, fg);
         drawTextUTF8(SCR_W - 4 - pctW, y, pctStr, pctW + 4, fg);
@@ -5643,7 +5643,7 @@ void renderMarkList(bool full) {
     fillRect(0, 108, SCR_W, 20, false);
     fillRect(0, 108, SCR_W, 1, true);
     char pageInd[16];
-    snprintf(pageInd, sizeof(pageInd), "%d/%d 页", markPage, markTotalPages);
+    snprintf(pageInd, sizeof(pageInd), PSTR("%d/%d 页"), markPage, markTotalPages);
     drawTextUTF8(4, 111, pageInd, 100, true);
     refresh(full);
 }
@@ -5681,22 +5681,22 @@ void markMoveSelection(int delta) {
 void jumpToMark(uint32_t off) {
     markEnsureTxtFile();   // 局刷后总线在 EPD 侧 + 旧句柄可能失效: 先恢复 (否则索引打不开/读正文白屏)
     if (!txtFile || off >= txtFile.size()) {
-        showMsg("标记失效", "文件已变更");
+        showMsg(PSTR("标记失效"), "文件已变更");
         return;
     }
     uint32_t page = findPageCeil(txtIndexPath, off);
     if (page == 0) {
-        showMsg("跳转失败", "索引不可用");   // 不静默兜底到第1页 (曾致白屏误导)
+        showMsg(PSTR("跳转失败"), "索引不可用");   // 不静默兜底到第1页 (曾致白屏误导)
         return;
     }
     if (txtIndexBuilding && page > txtIndexedPages) page = txtIndexedPages;
     uint32_t pageOff = 0;
     if (!parsePageRecordEx(page, &pageOff)) {   // 标记页首偏移读失败: 不静默当第 1 页
-        showMsg("跳转失败", "读取失败");
+        showMsg(PSTR("跳转失败"), "读取失败");
         return;
     }
     if (!readTxtPage(pageOff)) {
-        showMsg("读取失败", "请重试");
+        showMsg(PSTR("读取失败"), "请重试");
         return;
     }
     txtPage = page;
@@ -5707,7 +5707,7 @@ void jumpToMark(uint32_t off) {
 }
 
 void enterMarksList() {
-    traceLine("MARK_ENTER");
+    traceLine(PSTR("MARK_ENTER"));
     markCount = markCountRead(markPath());   // 只读 .bm, 不依赖索引 (构建中可进)
     markTotalPages = markCount ? (int)((markCount + CHAPTER_ROWS - 1) / CHAPTER_ROWS) : 1;
     markPage = 1;
@@ -5773,14 +5773,14 @@ void setup() {
 #if TEST_CLEANUP
     testCleanupRun("early");   // 早跑一次(部分机型此处 SD 未挂载, 故 SD 初始化后再跑一次)
 #endif
-    Serial.printf("[u=%lu][I][heap=%lu stack=%lu] BOOT reason=%s info=%s\n",
+    Serial.printf(PSTR("[u=%lu][I][heap=%lu stack=%lu] BOOT reason=%s info=%s\n"),
                   (unsigned long)millis(), (unsigned long)ESP.getFreeHeap(),
                   (unsigned long)ESP.getFreeContStack(), ESP.getResetReason().c_str(),
                   ESP.getResetInfo().c_str());
 
     // 全局持久设置: 恢复上次阅读旋转方向 (横/竖), 打开小说/恢复阅读/重建索引都按此方向
     readerRot = storedToRot(settingsGetPortrait());
-    debugFmt("ROT restore=%u", (unsigned)readerRot);
+    debugFmt(PSTR("ROT restore=%u"), (unsigned)readerRot);
 
     epd.init();
     initTextRenderer();
@@ -5809,10 +5809,10 @@ void setup() {
     if (sdOk) {
         sdAvailable = true;
         traceOpen();
-        traceFmt("BOOT reason=%s info=%s", ESP.getResetReason().c_str(), ESP.getResetInfo().c_str());
-        traceFmt("SD_READY cs=5 speed=20MHz");
+        traceFmt(PSTR("BOOT reason=%s info=%s"), ESP.getResetReason().c_str(), ESP.getResetInfo().c_str());
+        traceFmt(PSTR("SD_READY cs=5 speed=20MHz"));
     }
-    debugFmt("SD begin=%d wantSd=%d local=%d", sdOk ? 1 : 0, wantSd ? 1 : 0, gBrowseLocal ? 1 : 0);
+    debugFmt(PSTR("SD begin=%d wantSd=%d local=%d"), sdOk ? 1 : 0, wantSd ? 1 : 0, gBrowseLocal ? 1 : 0);
 #if TEST_CLEANUP
     testCleanupRun("afterSD");   // SD 已挂载: 再跑一次, 确保测试产物被真正删除
 #endif
@@ -5824,7 +5824,7 @@ void setup() {
     //    本地介质无需 SD 目录缓存(SD 不参与), 直接起 AP。
 #if BOOT_AP_MODE
     {
-        debugLine("BOOT route=ap-setup (BOOT_AP_MODE)");
+        debugLine(PSTR("BOOT route=ap-setup (BOOT_AP_MODE)"));
         renderBootStage("正在初始化", "请稍候");
         progressSyncFreeReaderHeap();
         freeItemList();
@@ -5903,7 +5903,7 @@ void setup() {
             smagic = ((uint32_t)m[0]) | ((uint32_t)m[1] << 8) | ((uint32_t)m[2] << 16) | ((uint32_t)m[3] << 24);
         }
         if (sf) sf.close();
-        debugFmt("BOOT_SLEEPFILE exist=%d size=%u magic=%08lX", readerFs().exists(SLEEP_RECORD_PATH) ? 1 : 0,
+        debugFmt(PSTR("BOOT_SLEEPFILE exist=%d size=%u magic=%08lX"), readerFs().exists(SLEEP_RECORD_PATH) ? 1 : 0,
                  (unsigned)ssize, (unsigned long)smagic);
     }
     // 只读取睡眠记录
@@ -5923,7 +5923,7 @@ void setup() {
     }
     gBootKey3Window = false;
     bool key3Held = gBootKey3Held;
-    traceFmt("WAKE key3Held=%d", key3Held ? 1 : 0);
+    traceFmt(PSTR("WAKE key3Held=%d"), key3Held ? 1 : 0);
 
     // ---------- 优化④: 启动恢复刷新策略 (局刷/免刷替代全刷) ----------
     // 面板 (e-ink 双稳态) 在任意复位/唤醒/断电后都物理保留复位前画面。不能按复位原因
@@ -5937,7 +5937,7 @@ void setup() {
         haveRec && (bootRec.mode == APP_HOME || bootRec.mode == APP_READER ||
                     bootRec.mode == APP_BROWSER);
     if (gBootPartialRefresh && readBatteryMV() <= BAT_LOW_MV) gBootPartialRefresh = false;
-    debugFmt("BOOT partial-restore=%d mode=%d mv=%d", gBootPartialRefresh ? 1 : 0,
+    debugFmt(PSTR("BOOT partial-restore=%d mode=%d mv=%d"), gBootPartialRefresh ? 1 : 0,
              (int)bootRec.mode, lastBatteryMV);
 
     // ---------- 先重绘恢复界面 (内容页, 必要重绘; 不画白/黑画面) ----------
@@ -5949,14 +5949,14 @@ void setup() {
         appMode = APP_HOME;
         renderHome(true);          // 内容与面板不同 (面板=复位前界面) → 必须全刷
         saveSleepRecord();
-        debugLine("WAKE route=key3-home");
+        debugLine(PSTR("WAKE route=key3-home"));
     } else if (haveRec) {
         if (bootRec.mode == APP_HOME) {
             // 休眠前在首页 → 唤醒后仍回首页 (不误入阅读页)
             freeItemList();   // setup 探测 listDir("/") 分配的 items 在首页无用, 释放腾堆
             appMode = APP_HOME;
             renderHome(!gBootPartialRefresh);   // 优化④: 面板与首页一致时局刷恢复
-            debugLine("WAKE route=sleep-home");
+            debugLine(PSTR("WAKE route=sleep-home"));
         } else if (bootRec.mode == APP_CLOCK_DISGUISE) {
             // 老板快捷键伪装模式唤醒: 未按 KEY3 → 继续伪装时钟页 (局刷, 面板已是时钟页)。
             // 按了 KEY3 会走上面的 key3Held 分支全刷回主页 (退出伪装 = KEY1 复位 + 1 秒内按 KEY3)。
@@ -5966,12 +5966,12 @@ void setup() {
             yiyanText[0] = '\0';
             lastClockDisplayedMinute = clockManagerNow() / 60;
             renderClockPage(false);
-            debugLine("WAKE route=sleep-disguise");
+            debugLine(PSTR("WAKE route=sleep-disguise"));
         } else if (bootRec.mode == APP_READER && recentReadValid) {
             // 休眠前在阅读页 → 继续恢复最近阅读 (重绘当前进度页)
             gBootHintPage = recentReadPage;   // 优化②: 复用最近阅读页号, 跳过重复二分
             startTxtReader(recentReadPath.c_str(), false);
-            debugLine("WAKE route=sleep-reader");
+            debugLine(PSTR("WAKE route=sleep-reader"));
         } else if (bootRec.mode == APP_BROWSER) {
             // 复位前在文件管理器 → 恢复目录和光标位置
             String savedPath = bootRec.path;
@@ -5995,7 +5995,7 @@ void setup() {
             }
             renderAll();
             refresh(!gBootPartialRefresh);   // 优化④: 面板与目录一致时局刷恢复
-            debugFmt("WAKE route=sleep-browser path=%s sel=%d/%d top=%d",
+            debugFmt(PSTR("WAKE route=sleep-browser path=%s sel=%d/%d top=%d"),
                      currentPath.c_str(), selIndex, itemCount, topIndex);
         } else if (bootRec.mode == APP_CHAPTERS && recentReadValid) {
             // 休眠前在章节目录 → 先开书, 再恢复目录位置
@@ -6025,41 +6025,41 @@ void setup() {
                     loadChapterRows(restoreOff);
                     renderChapterList(true);
                     if (chapterSpeedPopup) renderChapterSpeedPopup();
-                    debugFmt("WAKE route=sleep-chapters page=%d/%d sel=%d loaded=%d speed=%u popup=%d",
+                    debugFmt(PSTR("WAKE route=sleep-chapters page=%d/%d sel=%d loaded=%d speed=%u popup=%d"),
                              chapterPage, chapterTotalPages, chapterSel, chapterCountLoaded,
                              chapterSpeed, chapterSpeedPopup ? 1 : 0);
                 } else {
                     // 章节文件为空 → 留在阅读页
-                    debugLine("WAKE route=sleep-chapters-empty");
+                    debugLine(PSTR("WAKE route=sleep-chapters-empty"));
                 }
             } else {
                 // 章节目录文件缺失 → 留在 startTxtReader 已渲染的阅读页
-                debugLine("WAKE route=sleep-chapters-fallback-reader");
+                debugLine(PSTR("WAKE route=sleep-chapters-fallback-reader"));
             }
         } else if (recentReadValid) {
             // 其他模式(非HOME/READER/BROWSER/CHAPTERS) → 回首页，避免因旧记录误入阅读页
             freeItemList();   // setup 探测 listDir("/") 分配的 items 在首页无用
             appMode = APP_HOME;
             renderHome(true);
-            debugLine("WAKE route=sleep-other-home");
+            debugLine(PSTR("WAKE route=sleep-other-home"));
         } else {
             freeItemList();   // 同上
             appMode = APP_HOME;
             renderHome(true);
-            debugLine("WAKE route=sleep-other-home");
+            debugLine(PSTR("WAKE route=sleep-other-home"));
         }
     } else if (recentReadValid) {
         // 无休眠记录(正常开机): 默认回首页，避免正常开机也自动进阅读页
         freeItemList();   // setup 探测 listDir("/") 分配的 items 在首页无用
         appMode = APP_HOME;
         renderHome(true);
-        debugLine("WAKE route=recent-read-home");
+        debugLine(PSTR("WAKE route=recent-read-home"));
     } else {
         freeItemList();   // 同上
         appMode = APP_HOME;
         renderHome(true);
         saveSleepRecord();
-        debugLine("WAKE route=home");
+        debugLine(PSTR("WAKE route=home"));
     }
 
     // 未按: 保持上面重绘的恢复界面, 无提示框需清除, 不做额外画面操作
@@ -6087,7 +6087,7 @@ static void readerAutotestRun() {
     // 仅测试: 从 SD 根目录第一本 .txt 复制前 200KB 成 /PEND_T1.txt (非破坏性, 不碰原书),
     // 用于人为制造"未完成索引"场景(配合 IMPORT_TEST_OPEN 启动构建, 再中途复位)。
     static char pendBuf[24];
-    snprintf(pendBuf, sizeof(pendBuf), "/PEND_T1.txt");
+    snprintf(pendBuf, sizeof(pendBuf), PSTR("/PEND_T1.txt"));
     const char *bookPath = pendBuf;
     {
         if (activeFsBusReady("pend_clone")) {
@@ -6155,7 +6155,7 @@ static void readerAutotestRun() {
 #define IMPORT_TEST_SEED_NO 2
 #endif
     static char seedPathBuf[32];
-    snprintf(seedPathBuf, sizeof(seedPathBuf), "/IMPORT_T%u.txt", (unsigned)IMPORT_TEST_SEED_NO);
+    snprintf(seedPathBuf, sizeof(seedPathBuf), PSTR("/IMPORT_T%u.txt"), (unsigned)IMPORT_TEST_SEED_NO);
     const char *bookPath = seedPathBuf;   // 种子: 从内部复制到 SD 的新名字(强制走导入拷贝路径)
     {
         if (LittleFS.begin()) {
@@ -6284,7 +6284,7 @@ void loop() {
             if (buildTaskActiveOrResumed()) {
                 // 构建任务未完成: 静默校准的"停机休眠"同样延后到构建完成(用户规则: 构建期任何界面都不休眠)
                 gSleepDeferForBuild = true;
-                traceFmt("SILENT_CAL_DEFER building=1 mode=%d", appMode);
+                traceFmt(PSTR("SILENT_CAL_DEFER building=1 mode=%d"), appMode);
             } else {
                 Serial.println(F("SILENT_CAL fail & force -> sleep"));
                 enterSleepMode();
@@ -6304,7 +6304,7 @@ void loop() {
         if (lastKeyScanMs && txtIndexBuilding) {
             uint32_t gap = nowMs - lastKeyScanMs;
             if (gap > gIndexStepMaxGapMs) gIndexStepMaxGapMs = gap;
-            if (gap > 80) traceFmtLevel('W', "KEYLAG gap=%lu", (unsigned long)gap);
+            if (gap > 80) traceFmtLevel('W', PSTR("KEYLAG gap=%lu"), (unsigned long)gap);
         }
         lastKeyScanMs = nowMs;
     }
@@ -6315,14 +6315,14 @@ void loop() {
 #if SERIAL_REMOTE
     // 远程控制专用: 消费串口注入的按键事件, 覆盖物理扫描结果 → 走同一 appMode 分发。
     serialRemotePoll();
-    if (gInjR2) { r2 = gInjR2; traceFmt("REMOTE_INJ key2=%d", gInjR2); gInjR2 = 0; }
-    if (gInjR3) { r3 = gInjR3; traceFmt("REMOTE_INJ key3=%d", gInjR3); gInjR3 = 0; }
+    if (gInjR2) { r2 = gInjR2; traceFmt(PSTR("REMOTE_INJ key2=%d"), gInjR2); gInjR2 = 0; }
+    if (gInjR3) { r3 = gInjR3; traceFmt(PSTR("REMOTE_INJ key3=%d"), gInjR3); gInjR3 = 0; }
 #endif
     notePhysicalKeyActivity(r2, r3);
     static uint32_t lastKeyLogMs = 0;
     static int lastRaw2 = -1, lastRaw3 = -1;
     if (raw2 != lastRaw2 || raw3 != lastRaw3 || r2 || r3 || millis() - lastKeyLogMs >= 5000) {
-        traceFmt("KEY raw2=%d raw3=%d event2=%d event3=%d down2=%d down3=%d mode=%d home=%d page=%lu",
+        traceFmt(PSTR("KEY raw2=%d raw3=%d event2=%d event3=%d down2=%d down3=%d mode=%d home=%d page=%lu"),
                  raw2, raw3, r2, r3, k2.down ? 1 : 0, k3.down ? 1 : 0,
                  appMode, homeSel, (unsigned long)txtPage);
         lastRaw2 = raw2;
@@ -6333,7 +6333,7 @@ void loop() {
     // 仅按键事件才打印, 去掉无条件 250ms 轮询: 持续串口输出会加剧电源噪声对
     // GPIO3=RX 的耦合(误判按键 → 构建期间休眠计时被假事件刷新 → 不自动休眠)。
     if ((r2 || r3) && millis() - lastSerialKeyMs >= 50) {
-        Serial.printf("KEY raw2=%d raw3=%d event2=%d event3=%d down2=%d down3=%d mode=%d home=%d page=%lu\n",
+        Serial.printf(PSTR("KEY raw2=%d raw3=%d event2=%d event3=%d down2=%d down3=%d mode=%d home=%d page=%lu\n"),
                       raw2, raw3, r2, r3, k2.down ? 1 : 0, k3.down ? 1 : 0,
                       appMode, homeSel, (unsigned long)txtPage);
         Serial.flush();
@@ -6358,7 +6358,7 @@ void loop() {
         if (appMode == APP_READER && txtIndexPath.length()) {
             lfsOk = readerFs().exists(txtIndexPath.c_str()) ? 1 : 0;
         }
-        traceFmt("BATCHK mv=%d page=%lu mode=%d lfs=%d", lastBatteryMV, (unsigned long)txtPage, appMode, lfsOk);
+        traceFmt(PSTR("BATCHK mv=%d page=%lu mode=%d lfs=%d"), lastBatteryMV, (unsigned long)txtPage, appMode, lfsOk);
     }
 
     // ===== 构建期禁休眠 (用户定稿) =====
@@ -6371,7 +6371,7 @@ void loop() {
             gSleepDeferForBuild = false;   // 这两类界面本就不自动休眠(伪装闹钟 / AP 配网会话)
         } else {
             gSleepDeferForBuild = false;
-            traceFmt("SLEEP_DEFER_EXEC idle=%lu mode=%d", (unsigned long)(millis() - lastPhysicalKeyMs), appMode);
+            traceFmt(PSTR("SLEEP_DEFER_EXEC idle=%lu mode=%d"), (unsigned long)(millis() - lastPhysicalKeyMs), appMode);
             enterSleepMode();
             return;
         }
@@ -6394,11 +6394,11 @@ void loop() {
                 // ① 构建任务未完成: 任何界面都不休眠, 记待休眠(构建结束即睡)
                 if (!gSleepDeferForBuild) {
                     gSleepDeferForBuild = true;
-                    traceFmt("SLEEP_DEFER building=%d idle=%lu mode=%d", txtIndexBuilding ? 1 : 0,
+                    traceFmt(PSTR("SLEEP_DEFER building=%d idle=%lu mode=%d"), txtIndexBuilding ? 1 : 0,
                              (unsigned long)(millis() - lastPhysicalKeyMs), appMode);
                 }
             } else {
-                traceFmt("SLEEP_AUTO idle=%lu building=%d mode=%d", (unsigned long)(millis() - lastPhysicalKeyMs),
+                traceFmt(PSTR("SLEEP_AUTO idle=%lu building=%d mode=%d"), (unsigned long)(millis() - lastPhysicalKeyMs),
                          txtIndexBuilding ? 1 : 0, appMode);
                 enterSleepMode();
                 return;
@@ -6407,10 +6407,10 @@ void loop() {
 #endif
     }
 
-    if (r2 == 1) debugLine("KEY middle short");
-    else if (r2 == 2) debugLine("KEY middle long");
-    if (r3 == 1) debugLine("KEY right short");
-    else if (r3 == 2) debugLine("KEY right long");
+    if (r2 == 1) debugLine(PSTR("KEY middle short"));
+    else if (r2 == 2) debugLine(PSTR("KEY middle long"));
+    if (r3 == 1) debugLine(PSTR("KEY right short"));
+    else if (r3 == 2) debugLine(PSTR("KEY right long"));
 
     // 组合键: 按 KEY2(中) 后 1 秒内按 KEY3(右) → 强制返回首页 (任何界面均可)
     // ⚠️ 需先读两键: KEY2 短按记时刻, KEY3 短按且距上次 KEY2 短按 <=1s → 触发
@@ -6426,7 +6426,7 @@ void loop() {
         }
     }
     if (comboHome) {
-        traceFmt("COMBO_HOME from mode=%d", appMode);
+        traceFmt(PSTR("COMBO_HOME from mode=%d"), appMode);
         // 关闭阅读器会话(若有)加统计收尾, 再回首页
         if (appMode == APP_READER) closeTxtReader();
         appMode = APP_HOME;
@@ -6564,9 +6564,9 @@ void loop() {
                 if (jumpCursor < 10) {   // 数字 1..9 0: 末尾追加 (超总页数位数拒绝)
                     uint8_t digit = (jumpCursor == 9) ? 0 : (jumpCursor + 1);
                     char tbuf[16];
-                    snprintf(tbuf, sizeof(tbuf), "%lu", (unsigned long)txtTotalPages);
+                    snprintf(tbuf, sizeof(tbuf), PSTR("%lu"), (unsigned long)txtTotalPages);
                     int maxDigits = strlen(tbuf);
-                    snprintf(tbuf, sizeof(tbuf), "%lu", (unsigned long)jumpPage);
+                    snprintf(tbuf, sizeof(tbuf), PSTR("%lu"), (unsigned long)jumpPage);
                     if ((int)strlen(tbuf) < maxDigits) {
                         jumpPage = (jumpPage == 0) ? digit : jumpPage * 10 + digit;
                     } else {
@@ -6625,9 +6625,9 @@ void loop() {
                     // 标记本页: 追加当前页首字节偏移 (重复标记同一页合法)
                     bool ok = markAppend(txtPageStart);
                     markEnsureTxtFile();   // markAppend 内部 reinit 过总线, 恢复阅读句柄再回正文
-                    if (ok) showMsg("已标记", "");
-                    else if (markCountRead(markPath()) >= MARK_MAX) showMsg("标签已满", "上限50个");
-                    else showMsg("保存失败", "");
+                    if (ok) showMsg(PSTR("已标记"), "");
+                    else if (markCountRead(markPath()) >= MARK_MAX) showMsg(PSTR("标签已满"), "上限50个");
+                    else showMsg(PSTR("保存失败"), "");
                 } else {
                     enterMarksList();
                 }
@@ -6698,9 +6698,9 @@ void loop() {
                     uint32_t off = 0;
                     uint32_t wantPage = chapterRows[chapterSel].page;
                     if (!parsePageRecordEx(wantPage, &off)) {
-                        showMsg("跳转失败", "读取失败");
+                        showMsg(PSTR("跳转失败"), "读取失败");
                     } else if (!readTxtPage(off)) {
-                        showMsg("读取失败", "请重试");
+                        showMsg(PSTR("读取失败"), "请重试");
                     } else {
                         txtPage = wantPage;
                         txtPageStart = off;
@@ -6760,7 +6760,7 @@ void loop() {
                         if (markCount > 0) markLoadPage(markPage);
                         renderMarkList(false);
                     } else {
-                        showMsg("删除失败", "");
+                        showMsg(PSTR("删除失败"), "");
                     }
                 } else {
                     renderMarkList(false);              // 取消
@@ -6795,7 +6795,7 @@ void loop() {
         if (r3 == 2) {            // 长按右键 = 确认重建
             String path = rebuildConfirmPath;
             rebuildConfirmPath = "";
-            traceFmt("REBUILD_START path=%s", path.c_str());
+            traceFmt(PSTR("REBUILD_START path=%s"), path.c_str());
             startTxtReader(path.c_str(), true);
         } else if (r2 == 2 || r3 == 1 || r2 == 1) {   // 中长/任意短按 = 退出
             rebuildConfirmPath = "";

@@ -292,9 +292,9 @@ static void loadSyncCfg() {
         if (eq && eq > line && eq[1]) {
           *eq = '\0';
           const char* val = eq + 1;
-          if      (strcmp(line, "ssid") == 0)     snprintf(gCfgSsid, sizeof(gCfgSsid), "%s", val);
-          else if (strcmp(line, "password") == 0) snprintf(gCfgPass, sizeof(gCfgPass), "%s", val);
-          else if (strcmp(line, "ip") == 0)       snprintf(gCfgIp,   sizeof(gCfgIp),   "%s", val);
+          if      (strcmp(line, "ssid") == 0)     snprintf(gCfgSsid, sizeof(gCfgSsid), PSTR("%s"), val);
+          else if (strcmp(line, "password") == 0) snprintf(gCfgPass, sizeof(gCfgPass), PSTR("%s"), val);
+          else if (strcmp(line, "ip") == 0)       snprintf(gCfgIp,   sizeof(gCfgIp),   PSTR("%s"), val);
           else if (strcmp(line, "port") == 0) {
             // port= 纯数字 1..65535 才生效
             bool digits = (val[0] != '\0');

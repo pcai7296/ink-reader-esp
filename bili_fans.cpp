@@ -39,23 +39,23 @@ bool fetchBiliFollower(const char *uid, uint32_t *out, char *errCode, size_t err
     // uid 只允许数字, 防注入 URL
     size_t ui = 0;
     while (uid[ui] >= '0' && uid[ui] <= '9' && ui < 32) ui++;
-    if (ui == 0) { snprintf(errCode, errCap, "UID"); return false; }
-    snprintf(url, sizeof(url), "http://api.bilibili.com/x/relation/stat?vmid=%.*s&jsonp=jsonp",
+    if (ui == 0) { snprintf(errCode, errCap, PSTR("UID")); return false; }
+    snprintf(url, sizeof(url), PSTR("http://api.bilibili.com/x/relation/stat?vmid=%.*s&jsonp=jsonp"),
              (int)ui, uid);
 
     WiFiClient client;
     HTTPClient http;
-    if (!http.begin(client, url)) { snprintf(errCode, errCap, "BEGIN"); return false; }
+    if (!http.begin(client, url)) { snprintf(errCode, errCap, PSTR("BEGIN")); return false; }
     http.setTimeout(2500);
     int code = http.GET();
     if (code == HTTP_CODE_OK) {
         String body = http.getString();
         http.end();
         if (parseBiliFollower(body.c_str(), out)) return true;
-        snprintf(errCode, errCap, "PARSE");
+        snprintf(errCode, errCap, PSTR("PARSE"));
         return false;
     }
-    snprintf(errCode, errCap, "HTTP%d", code);
+    snprintf(errCode, errCap, PSTR("HTTP%d"), code);
     http.end();
     return false;
 }

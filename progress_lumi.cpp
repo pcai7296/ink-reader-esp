@@ -12,15 +12,15 @@
 bool lumiMakeEx(char* out, size_t cap, uint64_t ts, uint32_t size, uint32_t offset, float pct,
                 uint64_t fs, const char* h0, const char* h1, const char* h2) {
   if (cap < 64) return false;
-  int n = snprintf(out, cap, "LUMI1\nts=%llu\nsize=%lu\noffset=%lu\npct=%.2f\n",
+  int n = snprintf(out, cap, PSTR("LUMI1\nts=%llu\nsize=%lu\noffset=%lu\npct=%.2f\n"),
                    (unsigned long long)ts, (unsigned long)size, (unsigned long)offset, (double)pct);
   if (n < 0 || (size_t)n >= cap) return false;   // 必填放不下 → 整包失败（调用方处理）
   // v3 指纹组: 原子——h0/h1/h2 全给才附加; 放不下则整组省略（绝不截断成半组）
   if (h0 && h1 && h2) {
-    int need = snprintf(NULL, 0, "fs=%llu\nh0=%s\nh1=%s\nh2=%s\n",
+    int need = snprintf(NULL, 0, PSTR("fs=%llu\nh0=%s\nh1=%s\nh2=%s\n"),
                         (unsigned long long)fs, h0, h1, h2);
     if (need > 0 && (size_t)(n + need) < cap) {
-      snprintf(out + n, cap - n, "fs=%llu\nh0=%s\nh1=%s\nh2=%s\n",
+      snprintf(out + n, cap - n, PSTR("fs=%llu\nh0=%s\nh1=%s\nh2=%s\n"),
                (unsigned long long)fs, h0, h1, h2);
       n += need;
     }
@@ -279,7 +279,7 @@ void lumiUrlEncodeFilename(const char* s, char* out, size_t cap) {
 void lumiBuildProgressRequest(const char* filename, char* out, size_t cap) {
   char enc[LUMI_MAX_FILE_NAME * 4 + 1];   // 64B 文件名 → 编码 ≤192B + 安全余量
   lumiUrlEncodeFilename(filename, enc, sizeof(enc));
-  snprintf(out, cap, "GET /progress?file=%s HTTP/1.1", enc);
+  snprintf(out, cap, PSTR("GET /progress?file=%s HTTP/1.1"), enc);
 }
 
 void lumiBuildCloudPath(const char* endpoint, const char* filename, char* out, size_t cap) {

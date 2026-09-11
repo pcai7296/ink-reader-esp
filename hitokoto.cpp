@@ -117,7 +117,7 @@ bool fetchHitokoto(char* out, size_t cap, char* errCode, size_t errCap) {
     WiFiClient client;
     HTTPClient http;
     if (!http.begin(client, "http://v1.hitokoto.cn/")) {
-        snprintf(errCode, errCap, "BEGIN");
+        snprintf(errCode, errCap, PSTR("BEGIN"));
         return false;
     }
     http.setTimeout(2000);   // 进入时钟页总阻塞 = 全刷 1.5s + 获取 ≤2s
@@ -126,10 +126,10 @@ bool fetchHitokoto(char* out, size_t cap, char* errCode, size_t errCap) {
         String body = http.getString();
         http.end();
         if (parseHitokoto(body.c_str(), out, cap)) return true;
-        snprintf(errCode, errCap, "PARSE");
+        snprintf(errCode, errCap, PSTR("PARSE"));
         return false;
     }
-    snprintf(errCode, errCap, "HTTP%d", code);
+    snprintf(errCode, errCap, PSTR("HTTP%d"), code);
     http.end();
     return false;
 }

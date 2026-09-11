@@ -140,7 +140,7 @@ static void handleApiCapacity() {
     return;
   }
   char tmp[160];
-  snprintf(tmp, sizeof(tmp), "{\"ok\":true,\"total\":%llu,\"used\":%llu,\"free\":%llu}",
+  snprintf(tmp, sizeof(tmp), PSTR("{\"ok\":true,\"total\":%llu,\"used\":%llu,\"free\":%llu}"),
            (unsigned long long)total, (unsigned long long)used,
            (unsigned long long)(total > used ? total - used : 0));
   srv.send(200, "application/json; charset=utf-8", tmp);
@@ -226,7 +226,7 @@ static void handleApiFiles() {
   srv.sendContent_P(truncated ? (const char *)F("true") : (const char *)F("false"));
   srv.sendContent_P((const char *)F(",\"count\":"));
   char cnt[16];
-  snprintf(cnt, sizeof(cnt), "%d", count);
+  snprintf(cnt, sizeof(cnt), PSTR("%d"), count);
   srv.sendContent(cnt);
   srv.sendContent_P((const char *)F("}"));
   srv.chunkedResponseFinalize();
@@ -283,10 +283,10 @@ static void handleApiSearch() {
   free(fmtBuf);
   srv.sendContent_P((const char *)F("],\"searched\":"));
   char tmp[24];
-  snprintf(tmp, sizeof(tmp), "%d", scanned);
+  snprintf(tmp, sizeof(tmp), PSTR("%d"), scanned);
   srv.sendContent(tmp);
   srv.sendContent_P((const char *)F(",\"found\":"));
-  snprintf(tmp, sizeof(tmp), "%d", found);
+  snprintf(tmp, sizeof(tmp), PSTR("%d"), found);
   srv.sendContent(tmp);
   srv.sendContent_P((const char *)F(",\"truncated\":"));
   srv.sendContent_P(truncated ? (const char *)F("true") : (const char *)F("false"));
@@ -317,12 +317,12 @@ static void handleApiUploadStatus() {
   // ⚠️ 栈瘦身: SdEntry(~672B) 原栈上 → heap（同 handleApiStat 的栈炸弹修复）; 拼接路径 600B static
   //   （深链剩余栈 0~100B, 见 gOp* 注释; 单线程顺序处理 static 安全）
   static char tmpPath[600];
-  snprintf(tmpPath, sizeof(tmpPath), "%s/%s.uploading", dir, name);
+  snprintf(tmpPath, sizeof(tmpPath), PSTR("%s/%s.uploading"), dir, name);
   SdEntry *e = (SdEntry *)malloc(sizeof(SdEntry));
   if (!e) { sendApiErr(500, F("internal_error")); return; }
   bool exists = sdStat(tmpPath, e);
   char tmp[160];
-  snprintf(tmp, sizeof(tmp), "{\"ok\":true,\"exists\":%s,\"size\":%llu}",
+  snprintf(tmp, sizeof(tmp), PSTR("{\"ok\":true,\"exists\":%s,\"size\":%llu}"),
            exists ? "true" : "false",
            exists ? (unsigned long long)e->size : 0ULL);
   free(e);
@@ -418,9 +418,9 @@ static void handleApiRename() {
   char target[560];
   const char *slash = strrchr(path, '/');
   if (slash && slash != path) {
-    snprintf(target, sizeof(target), "%.*s/%s", (int)(slash - path), path, name);
+    snprintf(target, sizeof(target), PSTR("%.*s/%s"), (int)(slash - path), path, name);
   } else {
-    snprintf(target, sizeof(target), "/%s", name);
+    snprintf(target, sizeof(target), PSTR("/%s"), name);
   }
   if (isProtectedPath(target)) { sendApiErr(403, F("protected")); return; }
   if (!reinitSdBus("api_rename")) { sendApiErr(500, F("internal_error")); return; }
@@ -448,7 +448,7 @@ static void handleApiMove() {
   const char *base = strrchr(path, '/');
   base = base ? base + 1 : path;
   char target[560];
-  snprintf(target, sizeof(target), "%s/%s", dest, base);
+  snprintf(target, sizeof(target), PSTR("%s/%s"), dest, base);
   if (isProtectedPath(target)) { sendApiErr(403, F("protected")); return; }
   if (!reinitSdBus("api_move")) { sendApiErr(500, F("internal_error")); return; }
   SdErr r = sdMove(path, dest);
@@ -527,7 +527,7 @@ static void handleApiDownload() {
   if (range == -2) {
     f.close();
     char cr[48];
-    snprintf(cr, sizeof(cr), "bytes */%llu", (unsigned long long)size);
+    snprintf(cr, sizeof(cr), PSTR("bytes */%llu"), (unsigned long long)size);
     srv.sendHeader("Content-Range", cr);
     sendApiErr(416, F("invalid_range"));
     return;
@@ -548,16 +548,16 @@ static void handleApiDownload() {
     return;
   }
   char *plain = hdr, *enc = hdr + 256, *disp = hdr + 256 + 300;
-  snprintf(plain, 256, "%s", bname);
+  snprintf(plain, 256, PSTR("%s"), bname);
   percentEncode(bname, enc, 300);
-  snprintf(disp, 700, "attachment; filename=\"%s\"; filename*=UTF-8''%s", plain, enc);
+  snprintf(disp, 700, PSTR("attachment; filename=\"%s\"; filename*=UTF-8''%s"), plain, enc);
   srv.sendHeader("Accept-Ranges", "bytes");
   srv.sendHeader("Content-Disposition", disp);
   free(hdr);   // 头已发出, 立即释放
   srv.setContentLength((size_t)len);
   if (range == 1) {
     char cr[80];
-    snprintf(cr, sizeof(cr), "bytes %llu-%llu/%llu", (unsigned long long)start,
+    snprintf(cr, sizeof(cr), PSTR("bytes %llu-%llu/%llu"), (unsigned long long)start,
              (unsigned long long)end, (unsigned long long)size);
     srv.sendHeader("Content-Range", cr);
     srv.send_P(206, PSTR("application/octet-stream"), PSTR(""));
@@ -692,8 +692,8 @@ static void handleApiUploadCb() {
     if (!normalizeApiPath(pathArg.c_str(), dir, sizeof(dir))) { gUp->err = UP_INVALID; return; }
     char name[256];
     if (!sanitizeUploadName(upload.filename.c_str(), name, sizeof(name))) { gUp->err = UP_INVALID; return; }
-    snprintf(gUp->tmpPath, sizeof(gUp->tmpPath), "%s/%s.uploading", dir, name);
-    snprintf(gUp->finalPath, sizeof(gUp->finalPath), "%s/%s", dir, name);
+    snprintf(gUp->tmpPath, sizeof(gUp->tmpPath), PSTR("%s/%s.uploading"), dir, name);
+    snprintf(gUp->finalPath, sizeof(gUp->finalPath), PSTR("%s/%s"), dir, name);
     // 顺序固定: 受保护 → 已存在 → 续传校验 → 空间预检 → 创建 .uploading
     if (isProtectedPath(gUp->finalPath)) { gUp->err = UP_PROTECTED; return; }
     if (SD.exists(gUp->finalPath)) { gUp->err = UP_EXISTS; return; }
@@ -802,7 +802,7 @@ static void handleApiUploadDone() {
     uint64_t size = gUp->received;
     upReset();
     char tmp[160];
-    snprintf(tmp, sizeof(tmp), "{\"ok\":true,\"size\":%llu}", (unsigned long long)size);
+    snprintf(tmp, sizeof(tmp), PSTR("{\"ok\":true,\"size\":%llu}"), (unsigned long long)size);
     srv.send(201, "application/json; charset=utf-8", tmp);
     return;
   }
@@ -814,7 +814,7 @@ static void handleApiUploadDone() {
     case UP_EXISTS:         sendApiErr(409, F("exists")); break;
     case UP_RESUME_MISMATCH: {
       char tmp[180];
-      snprintf(tmp, sizeof(tmp), "{\"ok\":false,\"error\":\"resume_mismatch\",\"serverOffset\":%llu}",
+      snprintf(tmp, sizeof(tmp), PSTR("{\"ok\":false,\"error\":\"resume_mismatch\",\"serverOffset\":%llu}"),
                (unsigned long long)actualSize);
       srv.send(409, "application/json; charset=utf-8", tmp);
       break;

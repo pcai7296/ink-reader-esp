@@ -198,7 +198,7 @@ static void ofsLastExistingParent(const char *path, char *out, size_t outSize) {
   while (out[0] && !activeFileFs().exists(out)) {
     char up[300];
     ofsParent(out, up, sizeof(up));
-    snprintf(out, outSize, "%s", up);
+    snprintf(out, outSize, PSTR("%s"), up);
   }
 }
 
@@ -239,10 +239,10 @@ static void ofsListItemCb(const SdEntry *e, void *ctx) {
   char *nameEsc = gWebArena + 940;   // P2 槽位 lsNameEsc(512)
   ofsJsonEscape(e->name, nameEsc, 512);
   if (e->isDir) {
-    snprintf(buf, 640, "%s{\"type\":\"dir\",\"name\":\"%s\"}",
+    snprintf(buf, 640, PSTR("%s{\"type\":\"dir\",\"name\":\"%s\"}"),
              lc->first ? "" : ",", nameEsc);
   } else {
-    snprintf(buf, 640, "%s{\"type\":\"file\",\"size\":\"%llu\",\"name\":\"%s\"}",
+    snprintf(buf, 640, PSTR("%s{\"type\":\"file\",\"size\":\"%llu\",\"name\":\"%s\"}"),
              lc->first ? "" : ",", (unsigned long long)e->size, nameEsc);
   }
   lc->first = false;
@@ -302,7 +302,7 @@ static void handleOfsList() {
   // 响应后缀: ],"nextStart":<start+emitted>,"hasMore":<0|1>}
   s.sendContent_P(PSTR("],\"nextStart\":"));
   char num[16];
-  snprintf(num, sizeof(num), "%u", (unsigned)(start + emitted));
+  snprintf(num, sizeof(num), PSTR("%u"), (unsigned)(start + emitted));
   s.sendContent(num);
   s.sendContent_P(PSTR(",\"hasMore\":"));
   s.sendContent_P(hasMore ? PSTR("true") : PSTR("false"));
@@ -337,9 +337,9 @@ static void handleOfsEditPut() {
     char *lab = gOpLab;
     if (isDir) {
       char *d = gOpB;
-      snprintf(d, 300, "%s", path);
+      snprintf(d, 300, PSTR("%s"), path);
       d[strlen(d) - 1] = '\0';
-      snprintf(lab, 220, "新建文件夹:%s", d);
+      snprintf(lab, 220, PSTR("新建文件夹:%s"), d);
       ofsOpReport(OFS_OP_PHASE_START, lab);
       ESP.wdtFeed();
       if (!activeFileFs().mkdir(d)) { ofsOpReport(OFS_OP_PHASE_FAIL, lab); ofsReply(500, "MKDIR FAILED"); return; }
@@ -352,7 +352,7 @@ static void handleOfsEditPut() {
       ofsReplyOKWithMsg(parent);
       return;
     } else {
-      snprintf(lab, 220, "新建:%s", path);
+      snprintf(lab, 220, PSTR("新建:%s"), path);
       ofsOpReport(OFS_OP_PHASE_START, lab);
       ESP.wdtFeed();
       File f = activeFileFs().open(path, "w");   // "w" 即创建/截断为空文件, 无需再 write
@@ -375,14 +375,14 @@ static void handleOfsEditPut() {
   if (!activeFileFs().exists(src)) { ofsReply(404, "SRC FILE NOT FOUND"); return; }
   if (isProtectedPath(src) || isProtectedPath(path)) { ofsReply(403, "protected"); return; }
   char *t = gOpB;
-  snprintf(t, 300, "%s", path);
+  snprintf(t, 300, PSTR("%s"), path);
   size_t tl = strlen(t); if (tl > 1 && t[tl - 1] == '/') t[tl - 1] = '\0';
   char *s2 = src;                          // src 用后即弃, 就地除尾斜杠作 s2
   size_t sl = strlen(s2); if (sl > 1 && s2[sl - 1] == '/') s2[sl - 1] = '\0';
   if (strcmp(s2, t) == 0) { ofsReplyBadRequest("PATH FILE EXISTS"); return; }
   if (activeFileFs().exists(t)) { ofsReplyBadRequest("PATH FILE EXISTS"); return; }
   char *lab = gOpLab;
-  snprintf(lab, 220, "重命名/移动:%s → %s", s2, t);
+  snprintf(lab, 220, PSTR("重命名/移动:%s → %s"), s2, t);
   ofsOpReport(OFS_OP_PHASE_START, lab);
   ESP.wdtFeed();
   if (!activeFileFs().rename(s2, t)) { ofsOpReport(OFS_OP_PHASE_FAIL, lab); ofsReply(500, "RENAME FAILED"); return; }
@@ -423,9 +423,9 @@ static bool ofsDeleteRecursive(const char *path, int depth, int *count) {
     //   删深层目录必 Exception。改每层 heap（最深同时 16×420 ≈ 6.7KB; 低堆 malloc 失败 → 放弃并回 500, 不崩）。
     char *full = (char *)malloc(420);
     if (!full) { ok = false; break; }
-    if (nm.length() && nm[0] == '/') snprintf(full, 420, "%s%s", path, nm.c_str());
-    else if (strcmp(path, "/") == 0) snprintf(full, 420, "/%s", nm.c_str());
-    else snprintf(full, 420, "%s/%s", path, nm.c_str());
+    if (nm.length() && nm[0] == '/') snprintf(full, 420, PSTR("%s%s"), path, nm.c_str());
+    else if (strcmp(path, "/") == 0) snprintf(full, 420, PSTR("/%s"), nm.c_str());
+    else snprintf(full, 420, PSTR("%s/%s"), path, nm.c_str());
     bool childOk = ofsDeleteRecursive(full, depth + 1, count);
     free(full);
     if (!childOk) { ok = false; break; }
@@ -447,7 +447,7 @@ static void handleOfsEditDelete() {
   if (!activeFileFs().exists(path)) { ofsReply(404, "FILE NOT FOUND"); return; }
   // ★ 通用操作墨水屏通知: 动手删除前 START, 成/败 DONE/FAIL（渲染在 loop, 此处只记录）
   char *lab = gOpLab;
-  snprintf(lab, 220, "删除:%s", path);
+  snprintf(lab, 220, PSTR("删除:%s"), path);
   ofsOpReport(OFS_OP_PHASE_START, lab);
   ESP.wdtFeed();
   int count = 0;
@@ -481,7 +481,7 @@ static void ofsUpReset() {
 static void ofsUpFail(int code, const char *msg) {
   ofsUpErr = 1;
   ofsUpErrCode = code;
-  snprintf(ofsUpErrMsg, sizeof(ofsUpErrMsg), "%s", msg);
+  snprintf(ofsUpErrMsg, sizeof(ofsUpErrMsg), PSTR("%s"), msg);
 }
 
 // ---- 上传墨水屏状态（file_manager 注入渲染; 深回调内只设状态/调回调, 不直接刷屏）----
@@ -663,16 +663,16 @@ static void handleOfsFile() {
       char *plain = hdr, *enc = hdr + 256, *disp = hdr + 256 + 300;
       const char *bname = path;
       for (const char *p = path; *p; p++) { if (*p == '/') bname = p + 1; }
-      snprintf(plain, 256, "%s", bname);
+      snprintf(plain, 256, PSTR("%s"), bname);
       // RFC3986 percent-encode（中文/空格文件名）
       size_t oi = 0;
       for (const unsigned char *p = (const unsigned char*)bname; *p && oi + 3 < 300; p++) {
         unsigned char c = *p;
         if (isalnum(c) || c=='-'||c=='_'||c=='.'||c=='~') enc[oi++] = (char)c;
-        else { oi += snprintf(enc + oi, 300 - oi, "%%%02X", c); }
+        else { oi += snprintf(enc + oi, 300 - oi, PSTR("%%%02X"), c); }
       }
       enc[oi] = '\0';
-      snprintf(disp, 700, "attachment; filename=\"%s\"; filename*=UTF-8''%s", plain, enc);
+      snprintf(disp, 700, PSTR("attachment; filename=\"%s\"; filename*=UTF-8''%s"), plain, enc);
       s.sendHeader("Content-Disposition", disp);
       free(hdr);   // ★ 头已发出, 立即释放
     }

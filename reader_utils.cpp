@@ -100,7 +100,7 @@ int txtCharWidth(uint8_t c) {
 }
 
 void formatIndexNumber(uint32_t value, char *out) {
-    snprintf(out, 9, "%08lu", (unsigned long)value);
+    snprintf(out, 9, PSTR("%08lu"), (unsigned long)value);
 }
 
 const char* weekdayCn(int wday) {
@@ -109,12 +109,12 @@ const char* weekdayCn(int wday) {
 }
 
 void formatProgressPercent(uint64_t page, uint64_t total, char *out) {
-    if (total == 0) { snprintf(out, 12, "0%%"); return; }
+    if (total == 0) { snprintf(out, 12, PSTR("0%%")); return; }
     uint32_t p10k = (uint32_t)((page * 10000ULL) / total);   // 万分位 0-10000 (0-100%)
     if (p10k > 10000) p10k = 10000;
     if (p10k < 10) {   // < 0.1%: 两位小数 (0.01~0.09)
-        snprintf(out, 12, "0.%02lu%%", (unsigned long)p10k);
+        snprintf(out, 12, PSTR("0.%02lu%%"), (unsigned long)p10k);
     } else {           // >= 0.1%: 一位小数
-        snprintf(out, 12, "%lu.%lu%%", (unsigned long)(p10k / 100), (unsigned long)((p10k % 100) / 10));
+        snprintf(out, 12, PSTR("%lu.%lu%%"), (unsigned long)(p10k / 100), (unsigned long)((p10k % 100) / 10));
     }
 }

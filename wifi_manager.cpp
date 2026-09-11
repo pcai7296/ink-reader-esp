@@ -592,7 +592,7 @@ static String jsonEscape(const char *s) {
       default:
         if ((uint8_t)c < 0x20) {
           char buf[8];
-          snprintf(buf, sizeof(buf), "\\u%04X", (uint8_t)c);
+          snprintf(buf, sizeof(buf), PSTR("\\u%04X"), (uint8_t)c);
           out += buf;
         } else {
           out += c;
@@ -707,7 +707,7 @@ void handleSave() {
                   static_cast<unsigned>(wc.nightUpdata));
     webNotifyReset();
     char wnb[64];
-    if (city.length() > 0) { snprintf(wnb, sizeof(wnb), "城市=%s ", city.c_str()); webNotifyAdd(wnb); }
+    if (city.length() > 0) { snprintf(wnb, sizeof(wnb), PSTR("城市=%s "), city.c_str()); webNotifyAdd(wnb); }
     if (key.length() > 0) webNotifyAdd("私钥=已保存 ");
   }
   if (!server.hasArg("ssid") || !server.hasArg("password")) {
@@ -770,7 +770,7 @@ void startAp() {
   uint8_t mac[6];
   WiFi.macAddress(mac);
   char name[16];
-  snprintf(name, sizeof(name), "MSP-%02X%02X", mac[4], mac[5]);
+  snprintf(name, sizeof(name), PSTR("MSP-%02X%02X"), mac[4], mac[5]);
   apSsid = name;
   // ★ 分阶段 WiFi 模式(用户定稿): 常态/扫描 = 纯 AP(WIFI_AP, 堆低, 扫描不 OOM);
   //   仅"保存连接"时临时切共存(WIFI_AP_STA) 连 STA; 连接成功/失败后回纯 AP(关 STA, 管理 web 在线)。
@@ -1197,7 +1197,7 @@ void handleSettingsSave() {
     uint8_t nv = static_cast<uint8_t>(v == 1 ? 1 : 0);
     if (settingsGetClockFormat() != nv && settingsSetClockFormat(nv)) {
       any = true;
-      snprintf(tb, sizeof(tb), "时钟格式=%s ", nv ? "12小时制" : "24小时制");
+      snprintf(tb, sizeof(tb), PSTR("时钟格式=%s "), nv ? "12小时制" : "24小时制");
       webNotifyAdd(tb);
     }
   }
@@ -1208,8 +1208,8 @@ void handleSettingsSave() {
       any = true;
       int sign = v < 0 ? -1 : 1;
       int h = (v < 0 ? -v : v) / 60, m = (v < 0 ? -v : v) % 60;
-      if (m == 0) snprintf(tb, sizeof(tb), "时区=UTC%c%d ", sign > 0 ? '+' : '-', h);
-      else snprintf(tb, sizeof(tb), "时区=UTC%c%d:%02d ", sign > 0 ? '+' : '-', h, m);
+      if (m == 0) snprintf(tb, sizeof(tb), PSTR("时区=UTC%c%d "), sign > 0 ? '+' : '-', h);
+      else snprintf(tb, sizeof(tb), PSTR("时区=UTC%c%d:%02d "), sign > 0 ? '+' : '-', h, m);
       webNotifyAdd(tb);
     }
   }
@@ -1218,7 +1218,7 @@ void handleSettingsSave() {
     uint8_t nv = static_cast<uint8_t>(v == 1 ? 1 : 0);
     if (settingsGetHitokotoEnabled() != nv && settingsSetHitokotoEnabled(nv)) {
       any = true;
-      snprintf(tb, sizeof(tb), "一言=%s ", nv ? "开" : "关");
+      snprintf(tb, sizeof(tb), PSTR("一言=%s "), nv ? "开" : "关");
       webNotifyAdd(tb);
     }
   }
@@ -1228,7 +1228,7 @@ void handleSettingsSave() {
     if (settingsGetPortrait() != nv && settingsSetPortrait(nv)) {
       any = true;
       int deg = (nv == 1) ? 270 : (nv == 2) ? 180 : (nv == 3) ? 90 : 0;
-      snprintf(tb, sizeof(tb), "阅读旋转=%d° ", deg);
+      snprintf(tb, sizeof(tb), PSTR("阅读旋转=%d° "), deg);
       webNotifyAdd(tb);
     }
   }
@@ -1236,7 +1236,7 @@ void handleSettingsSave() {
     int v = server.arg("longPress").toInt();
     if (settingsGetLongPressMs() != v && settingsSetLongPressMs(static_cast<uint16_t>(v))) {
       any = true;
-      snprintf(tb, sizeof(tb), "长按=%ums ", static_cast<unsigned>(v));
+      snprintf(tb, sizeof(tb), PSTR("长按=%ums "), static_cast<unsigned>(v));
       webNotifyAdd(tb);
     }
   }
@@ -1244,7 +1244,7 @@ void handleSettingsSave() {
     String ns = server.arg("ntpServer");
     if (strcmp(settingsGetNtpServer(), ns.c_str()) != 0 && settingsSetNtpServer(ns.c_str())) {
       any = true;
-      snprintf(tb, sizeof(tb), "NTP=%s ", ns.c_str());
+      snprintf(tb, sizeof(tb), PSTR("NTP=%s "), ns.c_str());
       webNotifyAdd(tb);
     }
   }
@@ -1252,7 +1252,7 @@ void handleSettingsSave() {
     int v = server.arg("sdFrequency").toInt();
     if (settingsGetSdFrequency() != v && settingsSetSdFrequency(static_cast<uint8_t>(v))) {
       any = true;
-      snprintf(tb, sizeof(tb), "SD频率=%uMHz ", static_cast<unsigned>(v));
+      snprintf(tb, sizeof(tb), PSTR("SD频率=%uMHz "), static_cast<unsigned>(v));
       webNotifyAdd(tb);
     }
   }
@@ -1260,7 +1260,7 @@ void handleSettingsSave() {
     int v = server.arg("fullRefresh").toInt();
     if (settingsGetFullRefreshMin() != v && settingsSetFullRefreshMin(static_cast<uint8_t>(v))) {
       any = true;
-      snprintf(tb, sizeof(tb), "全刷间隔=%u分钟 ", static_cast<unsigned>(v));
+      snprintf(tb, sizeof(tb), PSTR("全刷间隔=%u分钟 "), static_cast<unsigned>(v));
       webNotifyAdd(tb);
     }
   }
@@ -1268,7 +1268,7 @@ void handleSettingsSave() {
     int v = server.arg("calibInterval").toInt();
     if (settingsGetCalibIntervalMin() != v && settingsSetCalibIntervalMin(static_cast<uint8_t>(v))) {
       any = true;
-      snprintf(tb, sizeof(tb), "校准间隔=%u分钟 ", static_cast<unsigned>(v));
+      snprintf(tb, sizeof(tb), PSTR("校准间隔=%u分钟 "), static_cast<unsigned>(v));
       webNotifyAdd(tb);
     }
   }
@@ -1277,7 +1277,7 @@ void handleSettingsSave() {
     uint8_t nv = static_cast<uint8_t>(v == 1 ? 1 : 0);
     if (settingsGetBatDisplayType() != nv && settingsSetBatDisplayType(nv)) {
       any = true;
-      snprintf(tb, sizeof(tb), "电量显示=%s ", nv ? "百分比" : "电压");
+      snprintf(tb, sizeof(tb), PSTR("电量显示=%s "), nv ? "百分比" : "电压");
       webNotifyAdd(tb);
     }
   }
@@ -1286,7 +1286,7 @@ void handleSettingsSave() {
     uint8_t nv = static_cast<uint8_t>(v == 1 ? 1 : 0);
     if (settingsGetNightUpdate() != nv && settingsSetNightUpdate(nv)) {
       any = true;
-      snprintf(tb, sizeof(tb), "夜间更新=%s ", nv ? "更新" : "不更新");
+      snprintf(tb, sizeof(tb), PSTR("夜间更新=%s "), nv ? "更新" : "不更新");
       webNotifyAdd(tb);
     }
   }
@@ -1295,7 +1295,7 @@ void handleSettingsSave() {
     uint8_t nv = static_cast<uint8_t>(v == 1 ? 1 : 0);
     if (settingsGetFastFlip() != nv && settingsSetFastFlip(nv)) {
       any = true;
-      snprintf(tb, sizeof(tb), "快速翻页=%s ", nv ? "开" : "关");
+      snprintf(tb, sizeof(tb), PSTR("快速翻页=%s "), nv ? "开" : "关");
       webNotifyAdd(tb);
     }
   }
@@ -1303,7 +1303,7 @@ void handleSettingsSave() {
     int v = server.arg("setRotation").toInt();
     if (settingsGetSetRotation() != v && settingsSetSetRotation(static_cast<uint8_t>(v))) {
       any = true;
-      snprintf(tb, sizeof(tb), "屏幕旋转=方向%u ", static_cast<unsigned>(v));
+      snprintf(tb, sizeof(tb), PSTR("屏幕旋转=方向%u "), static_cast<unsigned>(v));
       webNotifyAdd(tb);
     }
   }
@@ -1311,7 +1311,7 @@ void handleSettingsSave() {
     int v = server.arg("outputPower").toInt();
     if (settingsGetOutputPower() != v && settingsSetOutputPower(static_cast<uint8_t>(v))) {
       any = true;
-      snprintf(tb, sizeof(tb), "功率=%udB ", static_cast<unsigned>(v));
+      snprintf(tb, sizeof(tb), PSTR("功率=%udB "), static_cast<unsigned>(v));
       webNotifyAdd(tb);
     }
   }
@@ -1320,7 +1320,7 @@ void handleSettingsSave() {
     uint8_t nv = static_cast<uint8_t>(v == 1 ? 1 : 0);
     if (settingsGetSdEnabled() != nv && settingsSetSdEnabled(nv)) {
       any = true;
-      snprintf(tb, sizeof(tb), "SD卡=%s ", nv ? "启用" : "未启用");
+      snprintf(tb, sizeof(tb), PSTR("SD卡=%s "), nv ? "启用" : "未启用");
       webNotifyAdd(tb);
     }
   }
@@ -1330,7 +1330,7 @@ void handleSettingsSave() {
     uint8_t nv = static_cast<uint8_t>(v == 1 ? 1 : 0);
     if (settingsGetHistoryEnabled() != nv && settingsSetHistoryEnabled(nv)) {
       any = true;
-      snprintf(tb, sizeof(tb), "历史=%s ", nv ? "开" : "关");
+      snprintf(tb, sizeof(tb), PSTR("历史=%s "), nv ? "开" : "关");
       webNotifyAdd(tb);
     }
   }
@@ -1339,7 +1339,7 @@ void handleSettingsSave() {
     uint8_t nv = static_cast<uint8_t>(v == 1 ? 1 : 0);
     if (settingsGetClockCalibrationState() != nv && settingsSetClockCalibrationState(nv)) {
       any = true;
-      snprintf(tb, sizeof(tb), "强制校准=%s ", nv ? "开" : "关");
+      snprintf(tb, sizeof(tb), PSTR("强制校准=%s "), nv ? "开" : "关");
       webNotifyAdd(tb);
     }
   }
@@ -1348,7 +1348,7 @@ void handleSettingsSave() {
     uint8_t nv = static_cast<uint8_t>(v == 1 ? 1 : 0);
     if (settingsGetClockMod() != nv && settingsSetClockMod(nv)) {
       any = true;
-      snprintf(tb, sizeof(tb), "时钟类型=%s ", nv ? "精美" : "简洁");
+      snprintf(tb, sizeof(tb), PSTR("时钟类型=%s "), nv ? "精美" : "简洁");
       webNotifyAdd(tb);
     }
   }
@@ -1358,7 +1358,7 @@ void handleSettingsSave() {
     if (v < -32767) v = -32767;
     if (settingsGetClockCompensate() != v && settingsSetClockCompensate(static_cast<int16_t>(v))) {
       any = true;
-      snprintf(tb, sizeof(tb), "补偿=%d ", v);
+      snprintf(tb, sizeof(tb), PSTR("补偿=%d "), v);
       webNotifyAdd(tb);
     }
   }
@@ -1366,7 +1366,7 @@ void handleSettingsSave() {
     const char *cur = settingsGetInAWord();
     if (strcmp(cur, server.arg("inAWord").c_str()) != 0 && settingsSetInAWord(server.arg("inAWord").c_str())) {
       any = true;
-      snprintf(tb, sizeof(tb), "自定义句=%s ", settingsGetInAWord()[0] ? "已存" : "已清");
+      snprintf(tb, sizeof(tb), PSTR("自定义句=%s "), settingsGetInAWord()[0] ? "已存" : "已清");
       webNotifyAdd(tb);
     }
   }
@@ -1720,7 +1720,7 @@ void wifiManagerLoop() {
       // 连上: 保持纯 STA, 管理 web 在局域网 IP 上监听; 屏幕显示 IP + 局域网访问地址。
       staIp = WiFi.localIP().toString();
       wifiSaveResult = 1;
-      snprintf(wifiSaveIp, sizeof(wifiSaveIp), "%s", staIp.c_str());
+      snprintf(wifiSaveIp, sizeof(wifiSaveIp), PSTR("%s"), staIp.c_str());
       state = STA_ONLY;
       Serial.printf_P(PSTR("WIFI_STA_ONLY_OK ip=%s heap=%u\n"), staIp.c_str(), (unsigned)ESP.getFreeHeap());
       webNotifyReset();
@@ -1774,7 +1774,7 @@ void wifiManagerLoop() {
       // 连接成功: 先在 STA 态记录 IP, 再【关 STA 回纯 AP】(IP 在切回 AP 后已失效, 必须前置取值)
       staIp = WiFi.localIP().toString();
       wifiSaveResult = 1;
-      snprintf(wifiSaveIp, sizeof(wifiSaveIp), "%s", staIp.c_str());
+      snprintf(wifiSaveIp, sizeof(wifiSaveIp), PSTR("%s"), staIp.c_str());
       WiFi.mode(WIFI_AP);
       WiFi.disconnect();
       state = AP_ONLY;
@@ -2037,10 +2037,10 @@ void clockManagerHandleKeys(int middleEvent, int rightEvent) {
       struct tm *dbgTm = dbgNow > 1600000000UL ? localtime(&dbgNow) : nullptr;
       char dbgBuf[40];
       if (dbgTm) {
-        snprintf(dbgBuf, sizeof(dbgBuf), "%04d-%02d-%02d %02d:%02d:%02d", dbgTm->tm_year + 1900,
+        snprintf(dbgBuf, sizeof(dbgBuf), PSTR("%04d-%02d-%02d %02d:%02d:%02d"), dbgTm->tm_year + 1900,
                  dbgTm->tm_mon + 1, dbgTm->tm_mday, dbgTm->tm_hour, dbgTm->tm_min, dbgTm->tm_sec);
       } else {
-        snprintf(dbgBuf, sizeof(dbgBuf), "(invalid)");
+        snprintf(dbgBuf, sizeof(dbgBuf), PSTR("(invalid)"));
       }
       Serial.printf_P(PSTR("CLOCK_SKIP_DEBUG epoch=%lu local=%s lastCal=%lu\n"), (unsigned long)dbgNow, dbgBuf,
                     (unsigned long)lastCalibrationTime);
@@ -2485,7 +2485,7 @@ bool wifiManagerStartApOnly() {
   uint8_t mac[6];
   WiFi.macAddress(mac);
   char name[16];
-  snprintf(name, sizeof(name), "MSP-%02X%02X", mac[4], mac[5]);
+  snprintf(name, sizeof(name), PSTR("MSP-%02X%02X"), mac[4], mac[5]);
   apSsid = name;
   WiFi.persistent(false);
   WiFi.disconnect();                        // 断开 STA (纯 AP)
@@ -2504,13 +2504,13 @@ const char* wifiManagerSyncTarget() {
   TargetConfig t;
   loadTargetConfig(t);
   const char* ip = (WiFi.status() == WL_CONNECTED && t.staIp[0]) ? t.staIp : t.apIp;
-  snprintf(buf, sizeof(buf), "%s", ip);
+  snprintf(buf, sizeof(buf), PSTR("%s"), ip);
   return buf;
 }
 
 // 调试: 当前 softAP IP 字符串 (如 192.168.0.1)
 const char* wifiManagerApIp() {
   static char buf[16];
-  snprintf(buf, sizeof(buf), "%s", WiFi.softAPIP().toString().c_str());
+  snprintf(buf, sizeof(buf), PSTR("%s"), WiFi.softAPIP().toString().c_str());
   return buf;
 }
