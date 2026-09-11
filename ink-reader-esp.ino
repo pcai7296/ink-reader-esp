@@ -2063,6 +2063,8 @@ void renderStatsPage(bool full) {
     drawTextUTF8(6, y, "阅读最多", 100, true); y += 16;
 
     // TOP8 按 pageTurns 降序, 同页数 lastReadTime 新优先 (简单插入排序)
+    // P4: books 懒加载, 极端低堆 NULL → 只显示全局区
+    if (!books) { drawTextUTF8(6, y, "暂无阅读数据", 200, true); refresh(full); return; }
     int idx[MAX_BOOK_STATS];
     for (int i = 0; i < MAX_BOOK_STATS; i++) idx[i] = i;
     for (int i = 0; i < MAX_BOOK_STATS; i++)
@@ -6529,6 +6531,7 @@ void loop() {
             appMode = APP_HOME;
             renderHome(true);
             saveSleepRecord();
+            statsReleaseBooks();   // P4: 离开统计页, 书表归还堆 (渲染已完成)
         }
         delay(30);
         return;

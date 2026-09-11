@@ -13,7 +13,9 @@ extern void traceFmt(const char *fmt, ...);
 
 // ---- 静态状态 ----
 static StatsGlobal gGlobal;
-static BookStat gBooks[MAX_BOOK_STATS];
+// P4 内存审计: 每书统计表(8×108B=864B)改会话级加载——阅读会话开始/统计页打开时从
+// books.dat 载入, 会话结束/离开统计页释放; 极端低堆分配失败 → 书内统计跳过(全局仍计)。
+static BookStat *gBooks = NULL;
 static bool gStatsInited = false;
 
 // 会话状态
@@ -92,26 +94,43 @@ static bool writePayload(const char *path, const void *payload, size_t payloadSi
     return true;
 }
 
+// ---- 每书表加载/释放 (P4) ----
+static bool statsEnsureBooks() {
+    if (gBooks) return true;
+    if (!ensureMounted()) return false;
+    gBooks = (BookStat *)malloc(sizeof(BookStat) * MAX_BOOK_STATS);
+    if (!gBooks) { traceFmt("STATS books alloc fail"); return false; }
+    if (!readPayload(STATS_BOOKS, gBooks, sizeof(BookStat) * MAX_BOOK_STATS)) {
+        memset(gBooks, 0, sizeof(BookStat) * MAX_BOOK_STATS);
+    }
+    return true;
+}
+void statsReleaseBooks() {
+    if (!gBooks) return;
+    free(gBooks);
+    gBooks = NULL;
+}
+
 // ---- 重置默认 ----
 static void statsReset() {
     memset(&gGlobal, 0, sizeof(gGlobal));
     gGlobal.lastDay = 0; gGlobal.lastWeek = 0;
     gGlobal.streak = 0;
-    memset(gBooks, 0, sizeof(gBooks));
+    if (gBooks) memset(gBooks, 0, sizeof(BookStat) * MAX_BOOK_STATS);
 }
 
 // ---- 初始化 ----
 void statsInit() {
     if (!ensureMounted()) { statsReset(); return; }
     bool okG = readPayload(STATS_GLOBAL, &gGlobal, sizeof(gGlobal));
-    bool okB = readPayload(STATS_BOOKS, &gBooks, sizeof(gBooks));
     if (!okG) { memset(&gGlobal, 0, sizeof(gGlobal)); traceFmt("STATS read global fail, reset"); }
-    if (!okB) { memset(gBooks, 0, sizeof(gBooks)); traceFmt("STATS read books fail, reset"); }
+    // books.dat 懒加载 (statsEnsureBooks): 会话开始/统计页时才读
     gStatsInited = true;
 }
 
 // ---- 每书槽位 ----
 static int findBookByPath(const char *path) {
+    if (!gBooks) return -1;
     for (int i = 0; i < MAX_BOOK_STATS; i++)
         if (gBooks[i].path[0] && strncmp(gBooks[i].path, path, 95) == 0) return i;
     return -1;
@@ -127,6 +146,7 @@ static int findLeastRecentSlot() {
     return best;
 }
 static int ensureBookSlot(const char *path) {
+    if (!gBooks) return -1;
     int idx = findBookByPath(path);
     if (idx >= 0) return idx;
     idx = findEmptySlot();
@@ -178,9 +198,12 @@ void statsOnSessionStart(const char *path) {
     statsDateCheck(nowT);
     gInSession = true;
     strncpy(gSessionPath, path, 95); gSessionPath[95] = '\0';
-    gSessionBook = ensureBookSlot(path);
-    gBooks[gSessionBook].lastReadTime = (uint32_t)nowT;
-    gBooks[gSessionBook].lastReadDay = curDayKey;
+    // P4: 书表懒加载; 分配失败 → gSessionBook=-1, 翻页只计全局不记书内
+    gSessionBook = statsEnsureBooks() ? ensureBookSlot(path) : -1;
+    if (gSessionBook >= 0) {
+        gBooks[gSessionBook].lastReadTime = (uint32_t)nowT;
+        gBooks[gSessionBook].lastReadDay = curDayKey;
+    }
 }
 
 // ---- P6b (2026-09): 统计落盘节流 ----
@@ -193,7 +216,7 @@ static uint32_t gStatsLastSaveMs = 0;
 
 void statsOnPageTurn() {
     if (!gInSession) return;
-    if (gSessionBook >= 0) gBooks[gSessionBook].pageTurns++;
+    if (gBooks && gSessionBook >= 0) gBooks[gSessionBook].pageTurns++;
     gGlobal.totalPageTurns++;
     if (rtcValid) {
         gGlobal.dayPageTurns++;
@@ -220,17 +243,19 @@ void statsOnSessionEnd() {
         gGlobal.weekSessions++;
     }
     statsSave();
+    statsReleaseBooks();   // P4: 会话结束, 书表归还堆 (下次会话/统计页再加载)
 }
 
 void statsSave() {
     if (!ensureMounted()) return;
     if (!LittleFS.exists(STATS_DIR)) LittleFS.mkdir(STATS_DIR);
     writePayload(STATS_GLOBAL, &gGlobal, sizeof(gGlobal));
-    writePayload(STATS_BOOKS, &gBooks, sizeof(gBooks));
+    // P4: 书表未加载(会话从未开始)时不写, 防零表覆盖 books.dat
+    if (gBooks) writePayload(STATS_BOOKS, gBooks, sizeof(BookStat) * MAX_BOOK_STATS);
     gStatsDirty = false;
     gStatsTurnsSince = 0;
     gStatsLastSaveMs = millis();
 }
 
 const StatsGlobal& statsGetGlobal() { return gGlobal; }
-const BookStat* statsGetBooks() { return gBooks; }
+const BookStat* statsGetBooks() { statsEnsureBooks(); return gBooks; }   // P4: 可能返回 NULL (低堆)

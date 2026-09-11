@@ -51,7 +51,10 @@ void statsOnSessionEnd();
 
 // ---- 读取接口 ----
 const StatsGlobal& statsGetGlobal();
+// P4: 每书表懒加载 (会话开始/统计页打开时读 books.dat); 极端低堆时可能返回 NULL, 调用方须判空
 const BookStat* statsGetBooks();
+// P4: 释放书表 (离开统计页调用; 会话结束内部已自动释放)
+void statsReleaseBooks();
 
 // ---- 强制写盘 ----
 void statsSave();
