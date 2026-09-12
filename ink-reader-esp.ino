@@ -1916,11 +1916,11 @@ static int indoorTempInt() {
 static unsigned indoorHumiInt() { return (unsigned)((gIndoorHumi10 + 5) / 10); }
 // 副文本行的事件类型图标见文件后部 (依赖 IAM_* 枚举): clockSubIcon()
 
-// 获取一言（仅 WiFi 已连、设置开启且时钟为精美类型时；失败静默不打扰时钟页）
-void fetchHitokotoFlow() {
+// 获取一言（requirePretty=true 时仅"精美"时钟拉取；天气页中间条也显示 InAWord，故传 false）
+void fetchHitokotoFlow(bool requirePretty) {
     yiyanText[0] = '\0';
     if (settingsGetHitokotoEnabled() == 0) return;
-    if (settingsGetClockMod() != 1) return;   // 2026-09: 一言只在"精美"时钟显示; 简洁不拉取不显示
+    if (requirePretty && settingsGetClockMod() != 1) return;   // 简洁时钟不显示一言 → 不拉取
     if (WiFi.status() != WL_CONNECTED) return;
     char err[16];
     if (!fetchHitokoto(yiyanText, sizeof(yiyanText), err, sizeof(err))) {
@@ -1930,6 +1930,8 @@ void fetchHitokotoFlow() {
         debugFmt(PSTR("HITOKOTO_OK len=%u"), (unsigned)strlen(yiyanText));
     }
 }
+
+// InAWord 取数见文件后部 (依赖 IAM_* 枚举): fetchInAWordData()
 
 void enterClockPage() {
     appMode = APP_CLOCK;
@@ -1952,7 +1954,7 @@ void enterClockPage() {
     }
     // 联网数据: 一言(仅精美拉取) + B粉(倒计时不需网络); 失败静默, 屏幕仍显示上一页
     clockFansRequest();
-    fetchHitokotoFlow();
+    fetchHitokotoFlow(true);
     renderClockPage(true);
     saveSleepRecord();   // 界面快照: 已进入时钟页
 }
@@ -2005,6 +2007,16 @@ static int clockSubIcon() {
     if (mode == IAM_COUNTDOWN) return CK_ICON_FLAG;
     if (mode == IAM_FANS) return CK_ICON_BILI;
     return -1;
+}
+
+// InAWord（一言/自定义句/倒计时/B粉）取数：一言与 B粉要联网，自定义句/倒计时本地即有。
+// 时钟页与天气页**都会显示这一行** → 两处进入时都要取；天气页在联网取天气时顺手取
+// （用户 2026-09-12：取天气时就该顺便把这一行的数据取好）。失败静默：不阻塞页面。
+void fetchInAWordData() {
+    int mode = classifyInAWord(settingsGetInAWord());
+    if (mode == IAM_YIYAN) fetchHitokotoFlow(false);   // 一言: v1.hitokoto.cn（不需要"精美"时钟条件）
+    else if (mode == IAM_FANS) clockFansRequest();     // B粉: bili API
+    else debugFmt(PSTR("INAWORD local mode=%d (本地文本, 无需联网)"), mode);
 }
 
 // 解析 "倒" + 8 位 yyyymmdd + 事件(可为空); 成功返回 true
@@ -2789,6 +2801,8 @@ void fetchWeatherFlow(bool force) {
         wFetchStep[0] = '\0';
         renderWeatherPage(false);   // 无缓存: 先显示"获取中"
     }
+    // InAWord 数据随天气一起取（用户 2026-09-12：天气页中间条显示 InAWord，取天气时就该顺手取好）
+    fetchInAWordData();
     char err[16];
     bool ok = fetchWeather(&wActual, &wFuture, &wLife, wc.key, wc.city, err, sizeof(err), weatherStepCb);
     wFetching = false;
