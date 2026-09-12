@@ -129,7 +129,26 @@ static uint16_t gTargetPort = 8384;  // 手机进度服务器端口 (默认 8384
 
 static void syncDisconnect() {
   gWiFi.stop();
+  WiFi.setSleepMode(WIFI_MODEM_SLEEP);   // 恢复默认省电（同步期间临时关掉，见 syncWifiNoSleep 注释）
   syncDbg(PSTR("DISCONNECT heap=%lu"), (unsigned long)ESP.getFreeHeap());
+}
+
+// ★ 2026-09-12（用户报"设备发广播、手机收不到"）：ESP8266 默认 `WIFI_MODEM_SLEEP`（DTIM 省电），
+//   在省电态会**漏收广播/组播帧**；实测手机对 PC 的广播秒回、对设备的广播连日志都没有。
+//   同步期间临时关掉省电（同步结束 in syncDisconnect 恢复），提升收发可靠性。
+static void syncWifiNoSleep() {
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
+  syncDbg(PSTR("WIFI nosleep set (mode=%d)"), (int)WiFi.getSleepMode());
+}
+
+// 把发现到的手机 IP 记进 TargetConfig.staIp —— 下次即使广播仍被 AP 过滤，也能直接/单播命中
+static void rememberPhoneIp(const String &ip) {
+  if (ip.length() == 0) return;
+  TargetConfig t;
+  if (!loadTargetConfig(t)) return;
+  if (strcmp(t.staIp, ip.c_str()) == 0) return;
+  snprintf(t.staIp, sizeof(t.staIp), PSTR("%s"), ip.c_str());
+  if (saveTargetConfig(t)) syncDbg(PSTR("DISCOVER 记住手机 IP=%s"), t.staIp);
 }
 
 // 连接阶段 (SYNC_CONNECT 与 SYNC_UPLOAD 断线重连共用):
@@ -330,6 +349,55 @@ static void loadSyncCfg() {
 //   仅在"一发都没发出去"时 discoveryRebind() 重绑一次。
 static bool discoveryBegin();
 static void discoveryRebind();
+static int  discoveryPoll(char* out, size_t cap);   // 定义在下面（收包解析）
+
+// 逐 IP 单播扫描（AP 常过滤"无线→无线"广播；单播与 TCP 同一通路、实测可达）：
+// 对 /24 内 254 个地址各发一个 LUMIDISC，手机收到任一即回 LUMIACK。254 个小包 ≈1s。
+static void discoveryUnicastSweep() {
+  IPAddress sta = WiFi.localIP();
+  if (!sta.isSet() || sta == IPAddress(0, 0, 0, 0)) return;
+  int sent = 0;
+  for (int h = 1; h <= 254; h++) {
+    if (h == (int)sta[3]) continue;
+    IPAddress dst(sta[0], sta[1], sta[2], (uint8_t)h);
+    gDiscUdp.beginPacket(dst, DISC_PORT);
+    gDiscUdp.write((const uint8_t*)"LUMIDISC", 8);
+    if (gDiscUdp.endPacket() > 0) sent++;
+    delay(1);                       // 别一次性灌满 lwip 发送队列
+    if ((h & 31) == 0) ESP.wdtFeed();
+  }
+  syncDbg(PSTR("DISCOVER sweep sent=%d"), sent);
+}
+
+// 轮询 ACK（成功时 gTarget 已设好并已记入 TargetConfig）
+static bool discoveryPollAck(uint32_t windowMs) {
+  char ack[64];
+  uint32_t t0 = millis();
+  while ((uint32_t)(millis() - t0) < windowMs) {
+    if (discoveryPoll(ack, sizeof(ack)) > 0) {
+      char* sp = strchr(ack, ' ');
+      if (sp) {
+        // 容忍回包尾部空白/换行: IPAddress::fromString 遇非数字字符整串判失败
+        char* ips = sp + 1;
+        while (*ips == ' ' || *ips == '\r' || *ips == '\n') ips++;
+        size_t ilen = strlen(ips);
+        while (ilen > 0 && (ips[ilen - 1] == '\r' || ips[ilen - 1] == '\n' || ips[ilen - 1] == ' '))
+          ips[--ilen] = '\0';
+        IPAddress tip;
+        if (tip.fromString(ips)) {
+          gTarget = String(ips);
+          syncDbg(PSTR("DISCOVER ok ip=%s"), gTarget.c_str());
+          rememberPhoneIp(gTarget);
+          return true;
+        }
+      }
+    }
+    delay(20);
+    ESP.wdtFeed();
+  }
+  return false;
+}
+
 static void discoverySendPings() {
   // 仅 STA(局域网/手机热点)模式进入本状态: 目标地址用 STA 子网广播; 热点模式走 SYNC_WAIT_CLIENT
   // (热点固定给手机分配 192.168.0.100 且客户端上限 1, 见 wifi_managerStartApOnly) —— 不需要发现。
@@ -346,6 +414,15 @@ static void discoverySendPings() {
     gDiscUdp.beginPacket(IPAddress(255, 255, 255, 255), DISC_PORT);
     gDiscUdp.write((const uint8_t*)"LUMIDISC", 8);
     if (gDiscUdp.endPacket() > 0) sent++;
+  }
+  // ★ 同时**单播**探测已配置的目标 IP（广播可能被 AP 过滤；单播与 TCP 走同一条通路，已被证明可达）
+  const char *cfgTarget = wifiManagerSyncTarget();
+  IPAddress uni;
+  if (cfgTarget && cfgTarget[0] && uni.fromString(cfgTarget)) {
+    gDiscUdp.beginPacket(uni, DISC_PORT);
+    gDiscUdp.write((const uint8_t*)"LUMIDISC", 8);
+    if (gDiscUdp.endPacket() > 0) sent++;
+    syncDbg(PSTR("DISCOVER unicast probe -> %s"), cfgTarget);
   }
   syncDbg(PSTR("DISCOVER ping ip=%s port=%u sent=%d"), staIp.toString().c_str(), (unsigned)DISC_PORT, sent);
   if (sent == 0) {                       // 一发都没出去 → 旧 socket 失效(换网/重连), 重绑后再发一次
@@ -501,6 +578,7 @@ void progressSyncLoop() {
       if (wifiManagerIsStaUp()) {
         // 局域网模式: STA 已连 → 目标= /sync.cfg ip → UDP 发现 → TargetConfig 兜底
         syncDbg(PSTR("WIFI sta-up ip=%s"), WiFi.localIP().toString().c_str());
+        syncWifiNoSleep();
         gConnectAttempt = 0; gRetryAtMs = 0;
         if (gCfgIp[0]) { gTarget = String(gCfgIp); setState(SYNC_CONNECT); break; }
         setState(SYNC_DISCOVER);
@@ -540,6 +618,7 @@ void progressSyncLoop() {
         gStaStage = 0;
         gConnectAttempt = 0; gRetryAtMs = 0;
         syncDbg(PSTR("WIFI sta-up stage=%d ip=%s"), gStaStage, WiFi.localIP().toString().c_str());
+        syncWifiNoSleep();
         if (gCfgIp[0]) { gTarget = String(gCfgIp); setState(SYNC_CONNECT); break; }
         setState(SYNC_DISCOVER);
         break;
@@ -568,54 +647,33 @@ void progressSyncLoop() {
       break;   // 等按键: 见 progressSyncHandleKeys (右长=开热点, 短按/中长=退出)
     }
     case SYNC_DISCOVER: {
-      // STA 模式手机发现: 广播 LUMIDISC → **紧循环**轮询首个合法 "LUMIACK <ip>" (≤2s), 失败回退。
-      // ★ 2026-09-12 定稿原因：早期"主 loop 每 100ms 轮询"的写法**收不到包**（手机日志证明它已应答、
-      //   PC 广播实测手机应答正常，唯独设备收不到）；而 `-DUDP_DISC_TEST=1` 钩子用**紧循环**
-      //   (`while + delay(20)`) 收包 50/50 全中 ⇒ 采用与钩子同款形态。
+      // STA 模式手机发现，两段式（2026-09-12 实机定稿）：
+      //   ① 广播 + 已配置 IP 的单播探测 → 紧循环轮询 1s；
+      //   ② 失败则**逐 IP 单播扫描**（254 个小包 ≈1s）→ 再轮询 1.5s。
+      // 为什么要②：用户的路由器**过滤"无线→无线"广播**（实测：手机对 PC 的广播秒回、
+      // 对设备的广播连日志都没有），而单播与 TCP 同一通路、完全可达。
+      // 为什么必须紧循环轮询：早期"主 loop 每 100ms 轮询"的形态收不到包（同 socket 同网络，
+      // 仅轮询形态不同），`-DUDP_DISC_TEST=1` 钩子的紧循环 50/50 全中。
       if (gDiscStarted) break;     // 本状态一次性完成，不再分帧
       gDiscStarted = true;
       gStatus = F("正在发现手机…");
       progressSyncRender((int)gState);
       discoverySendPings();
-      {
-        char ack[64];
-        bool found = false;
-        uint32_t t0 = millis();
-        int polls = 0;
-        while ((uint32_t)(millis() - t0) < DISC_TIMEOUT_MS) {
-          polls++;
-          if (discoveryPoll(ack, sizeof(ack)) > 0) {
-            char* sp = strchr(ack, ' ');
-            if (sp) {
-              // 容忍回包尾部空白/换行: IPAddress::fromString 遇非数字字符整串判失败
-              char* ips = sp + 1;
-              while (*ips == ' ' || *ips == '\r' || *ips == '\n') ips++;
-              size_t ilen = strlen(ips);
-              while (ilen > 0 && (ips[ilen - 1] == '\r' || ips[ilen - 1] == '\n' || ips[ilen - 1] == ' '))
-                ips[--ilen] = '\0';
-              IPAddress tip;
-              if (tip.fromString(ips)) {
-                gTarget = String(ips);
-                syncDbg(PSTR("DISCOVER ok ip=%s polls=%d"), gTarget.c_str(), polls);
-                found = true;
-                break;
-              }
-            }
-          }
-          delay(20);
-          ESP.wdtFeed();
-        }
-        gConnectAttempt = 0; gRetryAtMs = 0;
-        if (found) {
-          gStatus = F("正在连接手机…");
-          setState(SYNC_CONNECT);
-        } else {
-          syncDbg(PSTR("DISCOVER timeout -> fallback polls=%d"), polls);
-          gTarget = String(wifiManagerSyncTarget());
-          if (gTarget.length() == 0) { gStatus = F("未配置手机地址"); setState(SYNC_ERROR); break; }
-          gStatus = F("正在连接手机…");
-          setState(SYNC_CONNECT);
-        }
+      bool found = discoveryPollAck(1000);
+      if (!found) {
+        discoveryUnicastSweep();
+        found = discoveryPollAck(1500);
+      }
+      gConnectAttempt = 0; gRetryAtMs = 0;
+      if (found) {
+        gStatus = F("正在连接手机…");
+        setState(SYNC_CONNECT);
+      } else {
+        syncDbg(PSTR("DISCOVER timeout -> fallback"));
+        gTarget = String(wifiManagerSyncTarget());
+        if (gTarget.length() == 0) { gStatus = F("未配置手机地址"); setState(SYNC_ERROR); break; }
+        gStatus = F("正在连接手机…");
+        setState(SYNC_CONNECT);
       }
       break;
     }
