@@ -2100,6 +2100,7 @@ void renderClockPage(bool full) {
             drawClockIcon(bx, 96, clockCalibWarn() ? CK_ICON_WARN : CK_ICON_CHECK, true);
             bx += 16 + 6;
             char num[10];
+            char th[24];   // 回落网络值时用 ("26℃65%" 含 UTF-8 ℃ 共 9 字节, num[10] 会贴边截断)
             if (gIndoorValid) {
                 snprintf(num, sizeof(num), PSTR("%d"), indoorTempInt());
                 drawClockIcon(bx, 96, CK_ICON_TEMP, true);
@@ -2110,8 +2111,8 @@ void renderClockPage(bool full) {
                 drawClockIcon(bx, 96, CK_ICON_HUMI, true);
                 bx += 16 + 6;
                 drawTextUTF8(bx, 96, num, 40, true);
-            } else if (clockThText(num, sizeof(num))) {   // 无传感器: 回落网络(城市)温湿度文字
-                drawTextUTF8(bx, 96, num, 140, true);
+            } else if (clockThText(th, sizeof(th))) {   // 无传感器: 回落网络(城市)温湿度文字
+                drawTextUTF8(bx, 96, th, 140, true);
             }
         }
         // 右侧日期: [日历]09-12 周五
