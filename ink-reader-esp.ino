@@ -98,6 +98,13 @@ EPD_290A epd;
 #ifndef COMBO_SESSION_TEST
 #define COMBO_SESSION_TEST 0
 #endif
+// ===== 章节自动定位验收钩子 (仅测试固件; 默认 0) =====
+// 验证"进章节目录自动停到当前阅读页所属章节": 近处(启动恢复页) + 远处(jump 到 70000 页) 各测一次,
+// 打印 readPage / listPage / sel / 本页 6 行页码, 便于核对"选中行的页 ≤ readPage < 下一章页"。
+// 用法: -DSERIAL_REMOTE=1 -DCHAPTER_AUTOJUMP_TEST=1 (与 COMBO_SESSION_TEST 同机制, 见文件头说明)
+#ifndef CHAPTER_AUTOJUMP_TEST
+#define CHAPTER_AUTOJUMP_TEST 0
+#endif
 // 调试行缓冲: DIAG_LINE_MAX 供 diagLog 栈上格式化 (P0 内存审计: 原常驻 diagRing[2][128]
 // 只写不读, 已删——静态 BSS 每减 1B 可用堆增 1B, 省下的 RAM 全部让给堆)
 #define DIAG_LINE_MAX 128
@@ -4818,7 +4825,14 @@ void loadChapterRows(uint32_t offset) {
 // 2.2s, 逐行喂狗), 之后 chapterNextPage/chapterPrevPage 全部 O(1) 查表, 不再任何全扫。
 static uint32_t chapterPageTableCount = 0;   // 已建表页数 (== chapterTotalPages 精确值)
 
+// 当前阅读页所属章节 (0-based 序号) —— 由 chapterBuildPageTable 顺带算出 (零额外 I/O),
+// 供 enterChapterList 自动定位 (用户需求 2026-09-12: 进章节目录直接停在当前章)。
+static uint32_t chapterCurIdx = 0;
+static bool chapterCurFound = false;
+
 static void chapterBuildPageTable() {
+    chapterCurIdx = 0;
+    chapterCurFound = false;
     if (!chapterEnsureBuffers()) { chapterPageTableCount = 0; return; }   // 低堆: 翻页走 seek 兜底
     if (!readerBusReady("chapter_table")) return;
     File f = readerFs().open(txtChapterPath.c_str(), "r");
@@ -4831,7 +4845,11 @@ static void chapterBuildPageTable() {
         uint32_t pos = f.position();
         String line = readLineCapped(f);
         line.trim();
-        if (line.lastIndexOf('-') > 0) {   // 与 loadChapterRows 同判定 (dash>0 即有效行)
+        int dash = line.lastIndexOf('-');
+        if (dash > 0) {   // 与 loadChapterRows 同判定 (dash>0 即有效行)
+            // 顺带定位"当前阅读页所属章节": .z1 的页号单调不减 → 最后一条 page <= txtPage 即当前章
+            uint32_t chPage = strtoul(line.substring(dash + 1).c_str(), nullptr, 10);
+            if (chPage <= txtPage) { chapterCurIdx = chapterIdx; chapterCurFound = true; }
             chapterIdx++;
             if ((chapterIdx % CHAPTER_ROWS) == 0) {
                 if (chapterPageTableCount < CHAPTER_PAGE_TABLE_MAX) {
@@ -5055,10 +5073,31 @@ void enterChapterList() {
     appMode = APP_CHAPTERS;
     chapterPage = 1;
     // 建页偏移表 (一次 O(n) 扫描, 之后翻页全 O(1)); chapterTotalPages 用精确页数
+    // 同一次扫描顺带算出"当前阅读页所属章节" → 自动定位 (用户需求: 进章节直接停在当前章)
     chapterBuildPageTable();
     chapterTotalPages = chapterPageTableCount > 0 ? (int)chapterPageTableCount : 0;
-    chapterSel = 0;
-    loadChapterRows(0);
+    // 目标列表页/行: 当前章序号 / 每页 6 章。chapterCurFound=false = 当前页在第一章之前
+    // (或表建失败/低堆降级) → 退回第 1 页第 1 行 (与旧行为一致)。
+    int startPage = 1, startRow = 0;
+    if (chapterCurFound) {
+        startPage = (int)(chapterCurIdx / CHAPTER_ROWS) + 1;
+        startRow = (int)(chapterCurIdx % CHAPTER_ROWS);
+        if (chapterTotalPages > 0 && startPage > chapterTotalPages) {   // 表被截断/末页残行兜底
+            startPage = chapterTotalPages;
+            startRow = 0;
+        }
+    }
+    chapterPage = startPage;
+    uint32_t startOff = 0;
+    if (chapterPage >= 1 && (uint32_t)(chapterPage - 1) < chapterPageTableCount) {
+        startOff = chapterPageOffsets[chapterPage - 1];
+    }
+    loadChapterRows(startOff);
+    // 末页可能不足 6 行 → 光标夹到已加载范围; 无行可指时回 0 (不越界)
+    chapterSel = (startRow < chapterCountLoaded) ? startRow : (chapterCountLoaded > 0 ? chapterCountLoaded - 1 : 0);
+    traceFmt(PSTR("CHAPTER_AUTOJUMP readPage=%lu curCh=%lu found=%d listPage=%d row=%d loaded=%d"),
+             (unsigned long)txtPage, (unsigned long)chapterCurIdx, chapterCurFound ? 1 : 0,
+             chapterPage, chapterSel, chapterCountLoaded);
     renderChapterList(true);
     saveSleepRecord();   // 界面快照: 已进入章节目录
 }
@@ -6401,8 +6440,7 @@ void loop() {
     serialRemotePoll();
 #if COMBO_SESSION_TEST
     // ---- 审查 #1 确定性验收钩子 (见文件头说明; 走真实 comboHome 分发路径) ----
-    static uint8_t comboT = 0;
-    static uint32_t comboTMs = 0;
+    static uint8_t comboT = 0;    static uint32_t comboTMs = 0;
     static uint32_t comboTHeapIn = 0;
     if (comboT == 0 && millis() > 4000) {
         // 阶段 0: 确保停在阅读页(睡眠记录可能把设备恢复成首页 → 先打开最近阅读)
@@ -6443,6 +6481,45 @@ void loop() {
                         appMode, (unsigned)h, (int)h - (int)comboTHeapIn,
                         (h >= comboTHeapIn + 4096) ? "PASS" : "FAIL");
         comboT = 3;
+    }
+#endif
+#if CHAPTER_AUTOJUMP_TEST
+    // ---- 章节自动定位验收钩子 (见文件头说明): 近处 + 远处各进一次章节目录, 打印定位结果 ----
+    static uint8_t jt = 0;
+    static uint32_t jtMs = 0;
+    if (jt == 0 && millis() > 4000) {
+        if (appMode != APP_READER) {
+            if ((millis() - jtMs) > 4000) { jtMs = millis(); openRecentRead(); }
+        } else if (!txtIndexBuilding) {
+            Serial.printf_P(PSTR("JTEST_READY readPage=%lu total=%lu\n"),
+                            (unsigned long)txtPage, (unsigned long)txtTotalPages);
+            enterChapterList();
+            Serial.printf_P(PSTR("JTEST_RESULT1 readPage=%lu listPage=%d sel=%d loaded=%d\n"),
+                            (unsigned long)txtPage, chapterPage, chapterSel, chapterCountLoaded);
+            // 本页 6 行页码 (核对: 选中行页 <= readPage < 下一章页)
+            for (int i = 0; i < chapterCountLoaded; i++) {
+                Serial.printf_P(PSTR("JTEST_ROW1 i=%d page=%lu\n"), i, (unsigned long)chapterRows[i].page);
+            }
+            appMode = APP_READER;      // 回正文 (测试用简化出口, 不影响被测逻辑)
+            renderTxtPage(false);
+            jt = 1;
+            jtMs = millis();
+        }
+    } else if (jt == 1 && (millis() - jtMs) > 2500) {
+        jumpPage = 70000;              // 远处页码: 验证列表会翻到对应页(而非总在第 1 页)
+        jumpToPage();
+        Serial.printf_P(PSTR("JTEST_JUMPED readPage=%lu\n"), (unsigned long)txtPage);
+        jt = 2;
+        jtMs = millis();
+    } else if (jt == 2 && (millis() - jtMs) > 2500) {
+        enterChapterList();
+        Serial.printf_P(PSTR("JTEST_RESULT2 readPage=%lu listPage=%d sel=%d loaded=%d\n"),
+                        (unsigned long)txtPage, chapterPage, chapterSel, chapterCountLoaded);
+        for (int i = 0; i < chapterCountLoaded; i++) {
+            Serial.printf_P(PSTR("JTEST_ROW2 i=%d page=%lu%s\n"), i, (unsigned long)chapterRows[i].page,
+                            (i == chapterSel) ? "  <=选中" : "");
+        }
+        jt = 3;
     }
 #endif
     if (gInjR2) { r2 = gInjR2; traceFmt(PSTR("REMOTE_INJ key2=%d"), gInjR2); gInjR2 = 0; }
