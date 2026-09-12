@@ -53,6 +53,8 @@ bool syncBindClear();                                // 清除绑定 (配网页)
 bool syncBindGet(char *ipOut, size_t cap, uint16_t &portOut);   // 读绑定目标 ("" = 未绑定)
 const char *syncBindLastOk();                        // 上次成功 IP (" = 无)
 const char *progressSyncTargetIp();                  // 当前同步目标 IP (只读访问器, 供 UI 显示)
+const char *syncStaticDevIp();                       // 设备静态 IP 设定("" = 用 DHCP; 默认 192.168.0.100)
+const char *syncLocalIpText();                       // 设备当前局域网 IP 文本(供屏幕显示)
 
 // ---- 纯工具（LUMI1，实现见 progress_lumi.h/cpp，PC 可测）----
 

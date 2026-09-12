@@ -5256,6 +5256,11 @@ void progressSyncRender(int state) {
             snprintf(line, sizeof(line), PSTR("手机：未绑定"));
         }
         drawTextUTF8(MX + 4, y, line, MW - 8, false); y += 16;
+        // 本机局域网 IP（用户要求：屏幕显示自己的地址，便于在手机端输入框填写）
+        if (syncLocalIpText()[0]) {
+            snprintf(line, sizeof(line), PSTR("本机：%s"), syncLocalIpText());
+            drawTextUTF8(MX + 4, y, line, MW - 8, false); y += 16;
+        }
     }
 
     if (state == SYNC_COMPARE) {

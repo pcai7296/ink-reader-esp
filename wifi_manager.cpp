@@ -1573,6 +1573,18 @@ bool wifiManagerStartSta() {
   if (!wifiManagerHasCredentials()) return false;
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
+  // ★ 2026-09-12 用户拍板: 设备以**静态 IP** 加入 WiFi（默认 192.168.0.100），
+  //   手机端输入框默认也填 .100 → 两边地址确定，不依赖 DHCP/发现。
+  //   设定来源: progress_sync 的 gSyncDevIp（可由 /sync_bind.dat 的 dev_ip= 覆盖；"" = 用 DHCP）
+  {
+    const char *sip = syncStaticDevIp();
+    IPAddress ipa;
+    if (sip && sip[0] && ipa.fromString(sip)) {
+      IPAddress gw(ipa[0], ipa[1], ipa[2], 1);
+      WiFi.config(ipa, gw, IPAddress(255, 255, 255, 0));
+      Serial.printf_P(PSTR("WIFI_STATIC_IP %s\n"), ipa.toString().c_str());
+    }
+  }
   WiFi.begin(config.ssid, config.password);
   return true;
 }

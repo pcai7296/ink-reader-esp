@@ -107,9 +107,15 @@ static char gCfgIp[16];
 static WiFiUDP  gDiscUdp;
 static bool     gDiscBound = false;    // 本会话是否已绑定 8390
 static char     gOfferIp[16] = "";     // 手机刚通过 LUMIBIND 主动上报的 IP（当次同步立即采用）
+// ★ 2026-09-12 用户拍板的简化架构：**设备以静态 IP 加入 WiFi**（默认 192.168.0.100），
+//   手机端输入框默认也填 .100 → 两边地址都确定，不依赖 DHCP/发现。
+//   可用 /sync_bind.dat 的 dev_ip= 覆盖；配网失败时自动回落 DHCP（见 WIFI 状态）。
+static char     gSyncDevIp[16] = "192.168.0.100";
+static bool     gStaticIpTried = false;
 static bool     gDiscStarted = false;
 static uint32_t gDiscDeadline = 0;
 static uint32_t gDiscPollMs = 0;
+static uint32_t gDiscSweepMs = 0;    // 逐 IP 单播扫描节流(每 15s 一次)
 static const uint16_t  DISC_PORT = 8390;
 static const uint32_t  DISC_TIMEOUT_MS = 2000UL;
 
@@ -198,7 +204,8 @@ static int syncConnectPhase() {
   }
   syncDbg(PSTR("CONNECT attempt=%d target=[%s] port=%u"), gConnectAttempt, gTarget.c_str(), (unsigned)gTargetPort);
   gStatus = F("正在连接手机…");
-  bool ok = gWiFi.connect(tip, gTargetPort);    // 阻塞 ≤5s (默认超时), 失败立即返回
+  gWiFi.setTimeout(3000);                       // 3s 连接超时（用户要求：整体超时压到 10 秒内）
+  bool ok = gWiFi.connect(tip, gTargetPort);    // 失败立即返回
   ESP.wdtFeed();
   if (ok) {
     gWiFi.setTimeout(3000);       // 读超时 3s
@@ -470,6 +477,7 @@ static void bindLoad() {
       if (eq <= 0) continue;
       String k = line.substring(0, eq), v = line.substring(eq + 1);
       if (k == "port") { long p = v.toInt(); if (p >= 1 && p <= 65535) gBindPort = (uint16_t)p; }
+      else if (k == "dev_ip") { IPAddress chk; if (v.length() && chk.fromString(v.c_str())) snprintf(gSyncDevIp, sizeof(gSyncDevIp), PSTR("%s"), v.c_str()); }
       else if (k == "last_ok") snprintf(gBindLastOk, sizeof(gBindLastOk), PSTR("%s"), v.c_str());
     }
     f.close();
@@ -532,6 +540,16 @@ const char *syncBindLastOk() { bindLoad(); return gBindLastOk; }
 
 // 只读访问器: 当前同步目标 IP（UI 显示用；不参与任何协议/状态机逻辑）
 const char *progressSyncTargetIp() { return gTarget.c_str(); }
+
+// 设备静态 IP 设定（"" = 用 DHCP）与当前本机 IP 文本（屏幕显示用；只读，不改协议）
+const char *syncStaticDevIp() { bindLoad(); return gSyncDevIp; }
+const char *syncLocalIpText() {
+  static char buf[16];
+  IPAddress ip = WiFi.localIP();
+  if (!ip.isSet() || ip == IPAddress(0, 0, 0, 0)) { buf[0] = '\0'; return buf; }
+  snprintf(buf, sizeof(buf), PSTR("%s"), ip.toString().c_str());
+  return buf;
+}
 
 // 成功连上手机后调用：记 last_ok；若本次是"扫描发现"得到的，则顺带更新绑定（自动绑定/自动失效恢复）
 static void bindMarkOk(const String &ip, bool fromDiscovery) {
@@ -876,31 +894,42 @@ void progressSyncLoop() {
       break;   // 等按键: 见 progressSyncHandleKeys (右长=开热点, 短按/中长=退出)
     }
     case SYNC_DISCOVER: {
-      // STA 模式手机发现，两段式（2026-09-12 实机定稿）：
-      //   ① 广播 + 已配置 IP 的单播探测 → 紧循环轮询 1s；
-      //   ② 失败则**逐 IP 单播扫描**（254 个小包 ≈1s）→ 再轮询 1.5s。
-      // 为什么要②：用户的路由器**过滤"无线→无线"广播**（实测：手机对 PC 的广播秒回、
-      // 对设备的广播连日志都没有），而单播与 TCP 同一通路、完全可达。
-      // 为什么必须紧循环轮询：早期"主 loop 每 100ms 轮询"的形态收不到包（同 socket 同网络，
-      // 仅轮询形态不同），`-DUDP_DISC_TEST=1` 钩子的紧循环 50/50 全中。
-      if (gDiscStarted) break;     // 本状态一次性完成，不再分帧
-      gDiscStarted = true;
-      gStatus = F("正在发现手机…");
-      progressSyncRender((int)gState);
-      discoverySendPings();
-      bool found = discoveryPollAck(1000);
-      if (!found) {
-        discoveryUnicastSweep();
-        found = discoveryPollAck(1500);
+      // STA 模式手机发现（2026-09-12 用户拍板版）：
+      //   广播 + 已配置 IP 单播 → **紧循环**轮询 1.5s；失败则逐 IP 单播扫描。
+      //   ★ 与之前不同：**整个"找手机"过程持续最多 60 秒**（手机可能正在切网/刚连上 WiFi；
+      //     期间手机还可以用 LUMIBIND 主动上报，设备立即采用 gOfferIp）。
+      //   紧循环轮询是必须的（早期"主 loop 每 100ms 轮询"收不到包，同 socket 同网络仅形态不同）。
+      if (!gDiscStarted) {
+        gDiscStarted = true;
+        gDiscDeadline = millis() + 60000UL;   // 1 分钟窗口
+        gDiscPollMs = 0;
+        gDiscSweepMs = 0;
+        gStatus = F("正在寻找手机…");
+        syncDbg(PSTR("DISCOVER 窗口 60s, 本机 ip=%s"), syncLocalIpText());
+        progressSyncRender((int)gState);
       }
-      gConnectAttempt = 0; gRetryAtMs = 0;
-      if (found) {
+      // 广播每 3s 重发；逐 IP 单播扫描每 15s 一次（避免 253 包刷太频）
+      {
+        uint32_t now = millis();
+        if (gDiscPollMs == 0 || (uint32_t)(now - gDiscPollMs) >= 3000) {
+          gDiscPollMs = now;
+          discoverySendPings();
+        }
+        if (gDiscSweepMs == 0 || (uint32_t)(now - gDiscSweepMs) >= 15000) {
+          gDiscSweepMs = now;
+          discoveryUnicastSweep();
+        }
+      }
+      if (discoveryPollAck(1500)) {
+        gConnectAttempt = 0; gRetryAtMs = 0;
         gStatus = F("正在连接手机…");
         setState(SYNC_CONNECT);
-      } else {
-        // 候选 1)~3) 与扫描都失败了 → 直接报错（不再回退到某个旧目标，避免"配置看似成功其实打不通"）
-        syncDbg(PSTR("DISCOVER timeout -> 候选已试完"));
-        gStatus = F("没找到手机");
+        break;
+      }
+      if ((int32_t)(millis() - gDiscDeadline) >= 0) {
+        syncDbg(PSTR("DISCOVER 60s 窗口超时"));
+        // P0-6: 提示"可能是网络不可互通/客户端隔离"，这不是算法能解决的
+        gStatus = F("没找到手机(需同一网段)");
         setState(SYNC_ERROR);
       }
       break;
