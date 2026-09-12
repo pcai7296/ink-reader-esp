@@ -249,6 +249,21 @@ python esp_dev.py --dry-run --boot-ap      # 打印命令不执行
   本次开机 BL 解析失败、RX 成功 → `epoch=1789199464` = **2026-09-12**（正确）。加固思路：把
   **星期寄存器**（parse 目前忽略的 `buf[off+3]`）与"由日期算出的星期"交叉校验，或在两布局都成功时
   优先 RX —— 需要一个判据把"偶然合法"排除掉。
+- **🌐 B粉接口不可用的根因与修法（2026-09-12 用户要求实测，已修 + 设备端验证）**：
+  `bili_fans.cpp::fetchBiliFollower` 原用**明文 HTTP** `http://api.bilibili.com/x/relation/stat?...`，
+  而该域名**现在强制 HTTPS**：PC 实测该 HTTP 请求 → **307**（加 `jsonp=jsonp`、换 UA 都一样），
+  ESP8266 `HTTPClient` **不跨协议跟随重定向** → 只能拿到 `HTTP307` → 永远失败。
+  **修法**：改用 B 站**接口镜像** `api.biliapi.net`（PC 实测明文 HTTP **200**，JSON 与原域名同形：
+  `{"code":0,...,"data":{...,"follower":1428204,...}}`），失败再试 `.com` 兜底 —— 都不需要 TLS，
+  省掉 ESP8266 上约 20KB 的 BearSSL 握手堆（实测整个请求 heap 只掉 440B）。
+  **设备端实测**（钩子 `-DBILI_FANS_TEST=1`：开机拉起 STA → 真打接口 → 打印）：
+  `BILI_TEST sta=1 ip=192.168.0.12` → `result ok=1 val=1428212 err=[]` ✓ 真实粉丝数；同一次还打了
+  `HITOKOTO_TEST ok=1 text=[错过了雪花，我就等你看雪落。]` ✓ ——**一言本来就是明文 HTTP 200
+  （v1.hitokoto.cn 不跳 HTTPS），无需改**。连带确认 `WIFI_CRED has=1 ssid=[11A] passlen=13`（"未配网误报"已修）。
+- **⚠️ 流程教训（2026-09-12 踩过，代价=用户白测一轮）**：`python esp_dev.py --steps flash` **只烧不编译**
+  （只有不带 `--steps` 的全流程才编译）。我改完 `formatHhmm()` 只把它编进了 `build_wtest/`，然后用
+  `--steps flash` 烧了**旧的 `build/`**（bin 15:45 vs 源码 15:49）→ 用户看到"修复无效"。
+  **纪律：先 `arduino-cli compile --build-path build`，再烧，并核对 `build/*.bin` 时间戳 > 源码时间戳。**
 - **⛔ 伪装模式是"出不来"的高危状态（2026-09-12 用户报"KEY1 后按 KEY3 回不了首页"，已加固）**：
   `APP_CLOCK_DISGUISE`(11) 由**阅读界面中长**(老板快捷键 `enterClockDisguise()`)进入，并经
   `saveSleepRecord()` 写进睡眠记录 → **跨复位/跨固件烧录保留**。该模式**按设计停用全部按键**（含组合键），
