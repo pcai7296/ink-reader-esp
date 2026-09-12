@@ -162,7 +162,38 @@ python esp_dev.py --dry-run --boot-ap      # 打印命令不执行
   ④**误提交清理（本次修复）**：`.zcode/plans/plan-sess-*.md`（agent 计划文件）`git rm --cached` + `.gitignore` 加 `.zcode/` `.omo/`。
   ⑤**文档纠偏**：§15 标"已废弃"、§16 与本文档阅读架构条目改述 `readerImportFromSd()` **已删**（原文仍写"可选能力存在"，与代码矛盾）。
   ⑥**代价与余量**：两处栈→BSS 迁移使 RAM 51088→**51908**（+820B = 560+260），换掉深链 ~1.7KB 栈峰值与 SD 扫描 ~780B 栈；IROM 960328→960532。**flash 应用区余量 ≈58KB**（960.5KB/1MB，PSTR 扫荡换来 8.3KB RAM）——后续加功能先看这个数。
-  ⑦**未采纳/待决**：`enum AppMode` 在 `globals.h:68` 与 ino `:594` 重复（值一致，需手工同步）；arena 跨模块裸共享（`file_api.cpp` 的 `gApiParent = gWebArena` 依赖 `file_api_fs.cpp` 顶部槽位表约定，无编译期保证）；`1ec9806` 把整轮审查修复打包进一个 `mem(P0)` 提交（追溯性弱，要点已存本文件）。
+  ⑦**未采纳/待决**：`1ec9806` 把整轮审查修复打包进一个 `mem(P0)` 提交（追溯性弱，要点已存本文件）。
+- **⛔⛔ PSTR(flash) 文案只能经"安全通道"消费（2026-09-12 实机崩溃定位；P5 扫荡的系统性回归，已修）**：
+  `PSTR(s)` 把字面量放进段 `.irom0.pstr.<file>.<line>.<n>` @progbits,1 = **flash 映射区(IROM0)**；
+  **flash 只支持 32 位对齐读**，直接逐字节数据访问会编译成 `l8ui` → **Exception 3 (LoadStoreError) 重启**
+  （实测：读 PSTR 首字节即崩，`excvaddr` 正好等于该字面量地址；普通字面量在 `.rodata`(DRAM) 逐字节读没问题，
+  所以此坑此前一直潜伏）。**现象**：进"章节目录"必崩重启循环（`epc1`=…`utf8Truncate` 的 `l8ui`，
+  `excvaddr`= 文案 "章节目录" 的 flash 地址）——P5 把 ~46 处 `drawTextUTF8(..., "文案", ...)` 改成
+  `PSTR("文案")`，而这些站点经 `utf8Truncate` 逐字节读 flash。
+  **安全通道（只能用这几种）**：① printf 家族（`snprintf`/`printf`/`vsnprintf_P`，newlib 内部走对齐读）；
+  ② `_P` 变体（`strlen_P`/`memcpy_P`/`strncpy_P`…）；③ `pgm_read_byte`（=对齐读+移位）；
+  ④ `F()`/`FPSTR()` → `__FlashStringHelper*`（`Print::print` 与 `drawTextUTF8` 的该重载内部用 `_P`）。
+  **禁止**：`*p`、`p[i]`、`strlen/strcmp/memcpy`、`String(PSTR)`、`Serial.print(const char*)`、
+  把 PSTR 当 `const char*` 交给任何会逐字节读的函数。
+  **本次修复**：`utf8Width()`/`utf8Truncate()` 加 `isFlashPtr()` + `flashSafeStr()`（pgm_read_byte 搬进栈缓冲）
+  → 全部 `drawTextUTF8(..., PSTR(..))` / `showMsg(PSTR(..))` 站点一次性安全；`showMsg` 的 `msg2[0]` 改
+  `flashCharAt`；`Serial.println(PSTR(..))` ×2 改 `F(..)`。新文案优先用普通字面量（DRAM 天然安全），
+  确要省 RAM 再用 PSTR 且只走安全通道。
+- **2026-09-12 审查修复轮 #3（实机取证 + 两个系统性问题收口）**：
+  ① **审查 #1 实机验收 PASS**（`-DCOMBO_SESSION_TEST=1` 钩子走真实菜单路径 + 真实 comboHome 分发）：
+  `COMBO_HOME from mode=3 heap=19856` → `COMBO_HOME close session mode=3 keepBuild=0 heap=25448`
+  → `COMBO_TEST_OUT mode=0 delta=5592 PASS`（4.5KB 章节缓冲归还堆 + `PROG_FLUSH reason=close` + 关句柄 + 统计收口）；
+  mode=2 阅读页路径 Δ=+1080B，且**不再多刷一次文件管理器界面**（原实现 2×全刷 ≈3s）。
+  ② **章节目录崩溃已修**（PSTR 规则见上）：修复后 `CHAPTER_ENTER → CH_TABLE built pages=826 → RENDER_FULL →
+  COMBO_TEST_IN mode=3 chapters=6`，标题 hex 解出 "第一卷 崛起凌…" ✓ 真实数据。
+  ③ 审查 #4：arena 改访问器 `webArenaRequestPathSlot/webArenaStreamSlot` + 槽位表 `static_assert` 编译期自检；
+  审查 #6：`AppMode` 收敛到新头文件 `app_mode.h`（globals.h 与 ino 都 include，不再两处并列）。
+  ④ **实机测试环境坑（下次勿踩）**：pyserial 打开 COM 会经 DTR/RTS **触发 ESP 自动复位**（脚本须等启动完成
+  心跳再操作）；CH340 在"长时间只读不发命令"后**读管道会静默停摆**（日志停止增长）→ 关键步骤用"单次注入 +
+  短窗口读取"，且只认本次窗口内的新行；盲注入按键穿阅读菜单会**误触休眠(深睡不可逆)/重建索引(删 14 万页索引)**
+  → 需要确定性场景一律走 `#if COMBO_SESSION_TEST` 这类钩子（默认 0，零成本）。
+  ⑤ 钩子用法：`python esp_dev.py --serial-remote -D COMBO_SESSION_TEST=1 --build-path build_remote --steps build`
+  然后烧录 build_remote，上电读串口（打印 COMBO_TEST_BEGIN/IN/OUT）；验收脚本 `combo_home_test.py` 为交互版。
 ## 文件管理 HTTP API（2026-08 新增, 契约见 docs/file-api.md）
 
 - 统一 API: Web/Android/Legado 都是客户端; 服务器复用配网会话的 ESP8266WebServer
