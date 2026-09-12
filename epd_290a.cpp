@@ -138,7 +138,7 @@ void EPD_290A::waitBusy(int timeout) {
     while (digitalRead(EPD_BUSY_PIN) == HIGH) {
         if (millis() - start > timeout) {
 #if EPD_DEBUG
-            Serial.println(PSTR("EPD busy timeout!"));
+            Serial.println(F("EPD busy timeout!"));
 #endif
             break;
         }

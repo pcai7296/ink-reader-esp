@@ -34,6 +34,7 @@
 #include "nav_icons.h"   // 首页导航 13x13 图标: 文件/时钟/天气/配网/设置/返回
 #include "hitokoto.h"
 #include "bili_fans.h"
+#include "app_mode.h"   // AppMode 唯一定义 (globals.h 亦 include; 审查 #6 去重)
 
 // ===== P7 A/B 编译开关 (2026-09) =====
 // 0 = 阅读页局刷后保持面板上电 (现状; 连续局刷最稳)
@@ -83,6 +84,19 @@ EPD_290A epd;
 // =0 时恢复标准硬件按键, 不影响正常使用。编译可覆盖: -DSERIAL_REMOTE=0。
 #ifndef SERIAL_REMOTE
 #define SERIAL_REMOTE 0
+#endif
+// ===== 审查 #1 专用验收钩子 (仅测试固件; 默认 0=完全不参与编译) =====
+// 背景: 验证"组合键从阅读族界面(章节目录/历史标记)回首页会收尾阅读会话(章节缓冲 4.5KB 归还堆)"
+// 需要"在 APP_CHAPTERS 里按组合键"这一步, 而盲注入按键要穿过阅读菜单 12 项
+// (菜单项 8=休眠 / 11=重建索引, 注入丢失时误触会深睡或删掉用户的书索引)。
+// 本钩子改为确定性驱动, 仍走**真实**的 loop 组合键分发路径(注入 gInjR2/gInjR3):
+//   t=4s : 打印 COMBO_TEST_BEGIN(索引建完才进章节目录, 未建完继续等)
+//   进章节目录 → 打印 COMBO_TEST_IN mode=3 heap=<含 4.5KB 章节缓冲>
+//   注入组合键(中短+右短, 同一轮 → ≤1s 判据成立) → loop 走 comboHome 分支
+//   3s 后打印 COMBO_TEST_OUT mode=0 heap=<收尾后> 并按 Δ 打印 PASS/FAIL(阈值 4096B)
+// 前提: 设备能被睡眠记录恢复到阅读页(或自行先打开一本书), 用 -DCOMBO_SESSION_TEST=1 编译。
+#ifndef COMBO_SESSION_TEST
+#define COMBO_SESSION_TEST 0
 #endif
 // 调试行缓冲: DIAG_LINE_MAX 供 diagLog 栈上格式化 (P0 内存审计: 原常驻 diagRing[2][128]
 // 只写不读, 已删——静态 BSS 每减 1B 可用堆增 1B, 省下的 RAM 全部让给堆)
@@ -244,14 +258,61 @@ void initTextRenderer() {
     textRendererReady = true;
 }
 
+// ---------- PSTR(flash) 文案的安全消费 (2026-09-12 审查 #3: P5 扫荡引入的系统性崩溃) ----------
+// 实测事实 (core 3.1.2 + xtensa-lx106-elf-gcc 10.3, 本机):
+//   · `PSTR(s)` 把字面量放进 `.irom0.pstr.<file>.<line>.<n>` @progbits,1 = **flash 映射区**;
+//   · flash(IROM0) 只支持 **32 位对齐** 读 —— 直接逐字节数据访问(`*p`/`p[i]`/memcpy/strlen/…)
+//     编译成 `l8ui` → **Exception 3 (LoadStoreError) 重启** (实测: 读 PSTR 首字节即崩,
+//     excvaddr 正好等于该字面量地址);
+//   · 免崩的通道: printf 家族(含 snprintf/printf_P, newlib 内部走对齐读)、`*_P` 变体
+//     (strlen_P/memcpy_P)、`pgm_read_byte`(32 位对齐读 + 移位, 见 newlib pgmspace.h §SRC/SRL)、
+//     `F()`/`FPSTR()`(转 __FlashStringHelper*, Print::print 与 drawTextUTF8 的该重载内部用 _P)。
+// P5 RODATA 扫荡把 ~46 处 `drawTextUTF8(..., "文案", ...)` 改成 `PSTR("文案")`, 而
+// `drawTextUTF8(const char*)` → `utf8Truncate` 是**逐字节**读 src 的 → 这些界面(章节目录/校准页/
+// 统计页/图标文案…)一进就重启。普通字面量在 .rodata(DRAM) 逐字节读没问题, 所以此前未暴露。
+// 修复策略: 保留 flash 存放(不牺牲 P5 换来的 RAM), 只在**消费入口**用 pgm_read_byte 搬进 RAM。
+static inline bool isFlashPtr(const void *p) {
+    uint32_t a = (uint32_t)p;
+    return a >= 0x40200000u && a < 0x40300000u;   // IROM0 映射窗口
+}
+// 把可能位于 flash 的 C 字符串搬进 RAM(dst, 容量 cap); RAM 源走 memcpy 快路径。返回 dst。
+static char *flashSafeStr(const char *src, char *dst, size_t cap) {
+    if (!dst || cap == 0) return dst;
+    if (!src) { dst[0] = '\0'; return dst; }
+    if (!isFlashPtr(src)) { strncpy(dst, src, cap - 1); dst[cap - 1] = '\0'; return dst; }
+    size_t i = 0;
+    while (i + 1 < cap) {
+        char c = (char)pgm_read_byte(src + i);
+        dst[i] = c;
+        if (c == '\0') return dst;
+        i++;
+    }
+    dst[i] = '\0';
+    return dst;
+}
+// 单个字符读(用于判断非空等): flash 走对齐读, RAM 直接读
+static inline char flashCharAt(const char *p, size_t i) {
+    return isFlashPtr(p) ? (char)pgm_read_byte(p + i) : p[i];
+}
+
 int utf8Width(const char *s) {
-    if (!textRendererReady) return 0;
+    if (!textRendererReady || !s) return 0;
+    if (isFlashPtr(s)) {                     // PSTR 文案: u8g2 内部逐字节读 flash → 必崩
+        char tmp[160];
+        return u8g2Fonts.getUTF8Width(flashSafeStr(s, tmp, sizeof(tmp)));
+    }
     return u8g2Fonts.getUTF8Width(s);
 }
 
 void utf8Truncate(const char *src, char *dst, int maxW, int capacity) {
-    if (!textRendererReady || maxW <= 0 || capacity <= 0) {
-        dst[0] = '\0';
+    if (!textRendererReady || maxW <= 0 || capacity <= 0 || !src) {
+        if (dst && capacity > 0) dst[0] = '\0';
+        return;
+    }
+    if (isFlashPtr(src)) {                   // PSTR 文案: 先搬进 RAM 再逐字节处理(否则 l8ui 崩)
+        char tmp[192];
+        flashSafeStr(src, tmp, sizeof(tmp));
+        utf8Truncate(tmp, dst, maxW, capacity);
         return;
     }
     char candidate[5] = {0};
@@ -460,7 +521,7 @@ void serialRemoteInject(char c) {
         else if (strcmp(gInjLine, "K3L") == 0) { gInjR3 = 2; }
         else if (strcmp(gInjLine, "B") == 0) { gInjR2 = 1; gInjR3 = 1; }
         else if (strcmp(gInjLine, "?") == 0) {
-            Serial.println(PSTR("REMOTE_CMDS: K2S|K2L|K3S|K3L|B|?  (换行结尾)"));
+            Serial.println(F("REMOTE_CMDS: K2S|K2L|K3S|K3L|B|?  (换行结尾)"));
         }
         else {
             traceFmt(PSTR("REMOTE_UNKNOWN cmd=%s"), gInjLine);
@@ -591,7 +652,8 @@ String currentPath = "/";
 struct SleepRecord;   // 休眠记录 (定义在休眠区) — Arduino 自动原型需要此前向声明
 void saveSleepRecord();
 bool readSleepRecord(SleepRecord &rec);
-enum AppMode { APP_HOME = 0, APP_BROWSER = 1, APP_READER = 2, APP_CHAPTERS = 3, APP_NETWORK = 4, APP_CLOCK_CONNECT = 5, APP_CLOCK = 6, APP_WEATHER = 7, APP_SETTINGS = 8, APP_BMP = 9, APP_MARKS = 10, APP_CLOCK_DISGUISE = 11, APP_STATS = 12 };
+// AppMode 定义在 app_mode.h（唯一定义, 见顶部 include; globals.h 也 include 它）:
+// 2026-09-12 审查 #6 去重——原先此处与 globals.h 各一份枚举, 靠注释手工同步, 加 APP_STATS 时踩过漂移坑
 int appMode = APP_HOME;
 bool sdAvailable = false;
 // ---- 天气页面状态（本次开机缓存）----
@@ -3028,7 +3090,7 @@ void showMsg(const char *msg, const char *msg2) {
         drawRect(x, y, w, h, true);
         int w1 = utf8Width(msg);
         drawTextUTF8(x + (w - w1) / 2, y + 7, msg, w - 8, true);
-        if (msg2 && msg2[0]) {
+        if (msg2 && flashCharAt(msg2, 0)) {   // ⚠️ 直接 msg2[0] 对 PSTR 会崩(见 flashSafeStr 注释)
             int w2 = utf8Width(msg2);
             drawTextUTF8(x + (w - w2) / 2, y + 27, msg2, w - 8, true);
         }
@@ -6337,6 +6399,52 @@ void loop() {
 #if SERIAL_REMOTE
     // 远程控制专用: 消费串口注入的按键事件, 覆盖物理扫描结果 → 走同一 appMode 分发。
     serialRemotePoll();
+#if COMBO_SESSION_TEST
+    // ---- 审查 #1 确定性验收钩子 (见文件头说明; 走真实 comboHome 分发路径) ----
+    static uint8_t comboT = 0;
+    static uint32_t comboTMs = 0;
+    static uint32_t comboTHeapIn = 0;
+    if (comboT == 0 && millis() > 4000) {
+        // 阶段 0: 确保停在阅读页(睡眠记录可能把设备恢复成首页 → 先打开最近阅读)
+        if (appMode != APP_READER) {
+            if ((millis() - comboTMs) > 4000) {   // 冷却: 打开失败(无记录/索引在建)时每 4s 重试
+                comboTMs = millis();
+                Serial.printf_P(PSTR("COMBO_TEST_OPEN_RECENT mode=%d\n"), appMode);
+                openRecentRead();
+            }
+        } else if (!txtIndexBuilding) {
+            Serial.printf_P(PSTR("COMBO_TEST_BEGIN mode=%d heap=%u\n"), appMode, (unsigned)ESP.getFreeHeap());
+            openReaderMenu();      // 真实菜单路径(与用户操作一致)
+            readerMenuSel = 6;     // 第 7 项 = 章节
+            execReaderMenu();      // → enterChapterList()
+            if (appMode == APP_CHAPTERS) {
+                comboTHeapIn = ESP.getFreeHeap();
+                Serial.printf_P(PSTR("COMBO_TEST_IN mode=%d heap=%u chapters=%d\n"),
+                                appMode, (unsigned)comboTHeapIn, chapterCountLoaded);
+                // 前两行标题按 hex 打出(标题若含异常字节, 直接打印会二次崩溃)
+                for (int i = 0; i < 2 && i < chapterCountLoaded; i++) {
+                    char hx[61];
+                    for (int k = 0; k < 20; k++) snprintf(hx + k * 3, 4, PSTR("%02X "), (uint8_t)chapterRows[i].title[k]);
+                    Serial.printf_P(PSTR("COMBO_TEST_ROW i=%d page=%lu hex=%s\n"), i,
+                                    (unsigned long)chapterRows[i].page, hx);
+                }
+                comboT = 1;
+                comboTMs = millis();
+            }
+        }
+    } else if (comboT == 1 && (millis() - comboTMs) > 1500) {
+        gInjR2 = 1;   // 中键短按
+        gInjR3 = 1;   // 右键短按(同一轮 → 组合键判据 ≤1s 成立)
+        comboT = 2;
+        comboTMs = millis();
+    } else if (comboT == 2 && (millis() - comboTMs) > 3000) {
+        uint32_t h = (uint32_t)ESP.getFreeHeap();
+        Serial.printf_P(PSTR("COMBO_TEST_OUT mode=%d heap=%u delta=%d %s\n"),
+                        appMode, (unsigned)h, (int)h - (int)comboTHeapIn,
+                        (h >= comboTHeapIn + 4096) ? "PASS" : "FAIL");
+        comboT = 3;
+    }
+#endif
     if (gInjR2) { r2 = gInjR2; traceFmt(PSTR("REMOTE_INJ key2=%d"), gInjR2); gInjR2 = 0; }
     if (gInjR3) { r3 = gInjR3; traceFmt(PSTR("REMOTE_INJ key3=%d"), gInjR3); gInjR3 = 0; }
 #endif
