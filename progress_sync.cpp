@@ -96,7 +96,12 @@ static char gCfgPass[65];
 static char gCfgIp[16];
 
 // ---------- UDP 手机发现 (仅 STA 模式: 局域网/手机热点; AP 模式仍用固定 192.168.0.100) ----------
-static WiFiUDP  gDiscUdp;
+// ★★ 2026-09-12 根因（用户实测 + UDP_DISC_TEST 钩子对照）：
+//   手机日志证明它**收到了**设备的 LUMIDISC 并回了 3 次 LUMIACK，但设备始终 `DISCOVER timeout`。
+//   隔离实验（钩子用**新建** WiFiUDP 对象，12s 内 50/50 包全收，包括手机的 `LUMIACK 192.168.0.18`）：
+//   → 收包链路本身没问题，**问题在复用同一个 WiFiUDP 对象**：首次 stop() 之后同一个对象再 begin()
+//     能发不能收（lwip pcb 的收包回调没重新挂上）。修法：每次发现**新建对象**，结束即 delete。
+static WiFiUDP *gDiscUdp = nullptr;
 static bool     gDiscStarted = false;
 static uint32_t gDiscDeadline = 0;
 static uint32_t gDiscPollMs = 0;
@@ -318,36 +323,59 @@ static void loadSyncCfg() {
 
 // ---------- UDP 发现辅助 ----------
 // 广播顺序: 先子网定向广播, 再 255.255.255.255 (部分热点/路由器对两类广播处理不同)
+static bool discoveryBegin();      // 定义见下（每次发现新建 WiFiUDP 对象）
 static void discoverySendPings() {
   // 仅 STA(局域网/手机热点)模式进入本状态: 目标地址用 STA 子网广播; 热点模式走 SYNC_WAIT_CLIENT
   // (热点固定给手机分配 192.168.0.100 且客户端上限 1, 见 wifi_managerStartApOnly) —— 不需要发现。
-  if (!gDiscUdp.begin(DISC_PORT)) return;
+  if (!discoveryBegin()) return;
   IPAddress staIp = WiFi.localIP();
   if (staIp.isSet() && staIp != IPAddress(0, 0, 0, 0)) {
     IPAddress bcast(staIp[0], staIp[1], staIp[2], 255);
-    gDiscUdp.beginPacket(bcast, DISC_PORT);
-    gDiscUdp.write((const uint8_t*)"LUMIDISC", 8);
-    gDiscUdp.endPacket();
+    gDiscUdp->beginPacket(bcast, DISC_PORT);
+    gDiscUdp->write((const uint8_t*)"LUMIDISC", 8);
+    gDiscUdp->endPacket();
   }
   for (int i = 0; i < 2; i++) {
-    gDiscUdp.beginPacket(IPAddress(255, 255, 255, 255), DISC_PORT);
-    gDiscUdp.write((const uint8_t*)"LUMIDISC", 8);
-    gDiscUdp.endPacket();
+    gDiscUdp->beginPacket(IPAddress(255, 255, 255, 255), DISC_PORT);
+    gDiscUdp->write((const uint8_t*)"LUMIDISC", 8);
+    gDiscUdp->endPacket();
   }
   syncDbg(PSTR("DISCOVER ping ip=%s port=%u"), staIp.toString().c_str(), (unsigned)DISC_PORT);
 }
 
 // 返回 >0 且 ack 以 "LUMIACK " 开头 → 合法响应; 其余返回 0
 static int discoveryPoll(char* out, size_t cap) {
-  int sz = gDiscUdp.parsePacket();
-  if (sz <= 0 || sz > (int)cap - 1) return 0;
-  int n = gDiscUdp.read((char*)out, cap - 1);
+  if (!gDiscUdp) return 0;
+  int sz = gDiscUdp->parsePacket();
+  if (sz <= 0) return 0;
+  if (sz > (int)cap - 1) sz = (int)cap - 1;   // 超长包按上限读掉, 不留在缓冲里
+  int n = gDiscUdp->read((char*)out, sz);
+  if (n < 0) n = 0;
   out[n] = '\0';
-  if (memcmp(out, "LUMIACK ", 8) != 0) return 0;
+  if (n < 8 || memcmp(out, "LUMIACK ", 8) != 0) {
+    syncDbg(PSTR("DISCOVER rx-nonack len=%d [%s]"), n, out);
+    return 0;
+  }
   return n;
 }
 
-static void discoveryStop() { gDiscUdp.stop(); }
+static void discoveryStop() {
+  if (gDiscUdp) { gDiscUdp->stop(); delete gDiscUdp; gDiscUdp = nullptr; }
+}
+
+// 每次发现**新建** WiFiUDP 对象（复用同一对象 stop 后再 begin 会"能发不能收"，见 gDiscUdp 处注释）
+static bool discoveryBegin() {
+  discoveryStop();                       // 先释放上一次的（若有）
+  gDiscUdp = new WiFiUDP();
+  if (!gDiscUdp) { syncDbg(PSTR("DISCOVER new-fail")); return false; }
+  if (!gDiscUdp->begin(DISC_PORT)) {
+    syncDbg(PSTR("DISCOVER begin-fail"));
+    delete gDiscUdp; gDiscUdp = nullptr;
+    return false;
+  }
+  syncDbg(PSTR("DISCOVER localPort=%u"), (unsigned)gDiscUdp->localPort());
+  return true;
+}
 
 // ---------- v3 指纹快照生成 (复用已打开的 txtFile; 任一步失败 → 整组无效) ----------
 extern File txtFile;   // ink-reader-esp.ino 的全局 (当前打开 TXT 句柄; PREPARE 后已打开)
@@ -619,7 +647,18 @@ void progressSyncLoop() {
           syncDisconnect(); gStatus = F("手机数据异常"); setState(SYNC_ERROR);
         }
       } else if (code == 404) {
-        syncDisconnect(); gStatus = F("手机无此书进度"); setState(SYNC_ERROR);
+        // 404 细分（2026-09-12 用户拍板："书架上没有这书，就告诉 ESP 手机上没有这本书"）：
+        //   手机端 body: no-book=书架上没这本书; no-progress=书在架上但手机侧还没进度
+        char b[24] = "";
+        gBodyBuf = (uint8_t *)malloc(24);
+        if (gBodyBuf && phoneReadBody(gBodyBuf, 24)) {
+          snprintf(b, sizeof(b), "%s", (const char *)gBodyBuf);
+        }
+        free(gBodyBuf); gBodyBuf = NULL;
+        syncDbg(PSTR("GET 404 body=[%s]"), b);
+        syncDisconnect();
+        gStatus = (strstr(b, "no-book")) ? F("手机上没有这本书") : F("手机无此书进度");
+        setState(SYNC_ERROR);
       } else {
         syncDisconnect(); gStatus = F("连接失败 ✗"); setState(SYNC_ERROR);
       }
@@ -718,9 +757,23 @@ void progressSyncLoop() {
       gWiFi.print(req);
       int code = phoneReadStatus();
       syncDbg(PSTR("PUT code=%d heap=%lu"), code, (unsigned long)ESP.getFreeHeap());
+      // 404 细分同上：no-book=手机书架上没有这本书（2026-09-12 用户拍板：这种情况要明确告知）
+      char b404[24] = "";
+      if (code == 404) {
+        gBodyBuf = (uint8_t *)malloc(24);
+        if (gBodyBuf && phoneReadBody(gBodyBuf, 24)) {
+          snprintf(b404, sizeof(b404), "%s", (const char *)gBodyBuf);
+        }
+        free(gBodyBuf); gBodyBuf = NULL;
+        syncDbg(PSTR("PUT 404 body=[%s]"), b404);
+      }
       syncDisconnect();
       if (code == 200) { gStatus = F("同步成功 ✓"); setState(SYNC_FINISH); }
       else if (code == 400) { gStatus = F("手机拒绝进度"); setState(SYNC_ERROR); }
+      else if (code == 404) {
+        gStatus = (strstr(b404, "no-book")) ? F("手机上没有这本书") : F("手机无此书进度");
+        setState(SYNC_ERROR);
+      }
       else { gStatus = F("连接失败 ✗"); setState(SYNC_ERROR); }
       break;
     }

@@ -934,6 +934,51 @@ static void biliFansTestRun() {
 
 // (文件夹递归删除自检钩子 FOLDER_DEL_TEST 见文件后部 deleteFolderNow 之后 —— 需要 browseFs/deleteFolderNow 已声明)
 
+// ===== UDP 发现收发自检钩子 (仅测试固件; 默认 0) =====
+// 背景(2026-09-12): 手机日志证明它收到了设备的 LUMIDISC 并回了 3 次 LUMIACK，
+// 但设备端 `DISCOVER timeout -> fallback` —— 即**收包**环节有问题。本钩子把收发单独隔离：
+// 绑 8390 → 发广播 → 12s 内打印收到的**每一个**包（长度/来源/内容），
+// 期间可用 PC 手动发一包验证接收，并看手机的自动应答是否到达。
+#ifndef UDP_DISC_TEST
+#define UDP_DISC_TEST 0
+#endif
+#if UDP_DISC_TEST
+#include <WiFiUdp.h>
+static void udpDiscTestRun() {
+    bool sta = wifiManagerEnsureSta(12000);
+    Serial.printf_P(PSTR("UDPDISC sta=%d ip=%s heap=%u\n"), sta ? 1 : 0,
+                    WiFi.localIP().toString().c_str(), (unsigned)ESP.getFreeHeap());
+    if (!sta) return;
+    WiFiUDP u;
+    bool ok = u.begin(8390);
+    Serial.printf_P(PSTR("UDPDISC begin=%d localPort=%u\n"), ok ? 1 : 0, (unsigned)u.localPort());
+    if (!ok) return;
+    IPAddress sta2 = WiFi.localIP();
+    IPAddress bcast(sta2[0], sta2[1], sta2[2], 255);
+    u.beginPacket(bcast, 8390); u.write((const uint8_t *)"LUMIDISC", 8); u.endPacket();
+    u.beginPacket(IPAddress(255, 255, 255, 255), 8390); u.write((const uint8_t *)"LUMIDISC", 8); u.endPacket();
+    Serial.printf_P(PSTR("UDPDISC pings sent bcast=%s\n"), bcast.toString().c_str());
+    uint32_t dl = millis() + 12000UL;
+    int got = 0;
+    while (millis() < dl) {
+        int sz = u.parsePacket();
+        if (sz > 0) {
+            char b[64];
+            int n = u.read((unsigned char *)b, sizeof(b) - 1);
+            if (n < 0) n = 0;
+            b[n] = '\0';
+            got++;
+            Serial.printf_P(PSTR("UDPDISC RX #%d len=%d from=%s:%u data=[%s]\n"), got, sz,
+                            u.remoteIP().toString().c_str(), (unsigned)u.remotePort(), b);
+        }
+        delay(20);
+        ESP.wdtFeed();
+    }
+    Serial.printf_P(PSTR("UDPDISC done got=%d -> %s\n"), got, got > 0 ? "RX-OK" : "RX-FAIL(收不到任何包)");
+    u.stop();
+    wifiManagerRfOff("udpd_test");
+}
+#endif
 
 uint8_t batPercent(int v_mV) {
     // 官方 V14 getBatVolBfb 四阶拟合曲线 (A7 同为多项式, 6 阶系数未完全还原, 用已验证的官方 4 阶):
@@ -7115,6 +7160,14 @@ void loop() {
     if (!syncWifiTestDone && millis() > 5000) {
         syncWifiTestDone = true;
         syncWifiTestRun();
+    }
+#endif
+#if UDP_DISC_TEST
+    // UDP 发现收发自检 (仅测试固件, 见 udpDiscTestRun 注释)
+    static bool udpDiscTestDone = false;
+    if (!udpDiscTestDone && millis() > 4000) {
+        udpDiscTestDone = true;
+        udpDiscTestRun();
     }
 #endif
 #if FOLDER_DEL_TEST
