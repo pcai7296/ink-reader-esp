@@ -179,6 +179,13 @@ python esp_dev.py --dry-run --boot-ap      # 打印命令不执行
   → 全部 `drawTextUTF8(..., PSTR(..))` / `showMsg(PSTR(..))` 站点一次性安全；`showMsg` 的 `msg2[0]` 改
   `flashCharAt`；`Serial.println(PSTR(..))` ×2 改 `F(..)`。新文案优先用普通字面量（DRAM 天然安全），
   确要省 RAM 再用 PSTR 且只走安全通道。
+- **章节目录自动定位到当前章（2026-09-12 用户需求，已实机验收）**：阅读菜单 → 章节时，列表直接翻到
+  "当前阅读页所属章节"所在页 + 光标停在该行（不再每次从第 1 页第 1 行开始）。实现：`chapterBuildPageTable()`
+  扫描 .z1 时**顺带**解析每行页号，记录最后一条 `page <= txtPage` 的章序号（`chapterCurIdx`，.z1 页号单调
+  不减 → 必为当前章），零额外 I/O；`enterChapterList()` 用 `chapterPageOffsets[章序号/CHAPTER_ROWS]` 定位
+  列表页、`章序号%CHAPTER_ROWS` 定光标（越界/低堆降级/当前页在首章之前 → 退回第 1 页）。trace
+  `CHAPTER_AUTOJUMP readPage=.. curCh=.. listPage=.. row=..`。实机：《武炼巅峰》readPage=70000 →
+  listPage=499 sel=5，本页页码 69844…69960 ✓。回归钩子 `#if CHAPTER_AUTOJUMP_TEST`（默认 0）。
 - **2026-09-12 审查修复轮 #3（实机取证 + 两个系统性问题收口）**：
   ① **审查 #1 实机验收 PASS**（`-DCOMBO_SESSION_TEST=1` 钩子走真实菜单路径 + 真实 comboHome 分发）：
   `COMBO_HOME from mode=3 heap=19856` → `COMBO_HOME close session mode=3 keepBuild=0 heap=25448`
