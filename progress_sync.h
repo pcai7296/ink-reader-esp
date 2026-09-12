@@ -51,7 +51,8 @@ void espBindTick();                                  // 主 loop 每圈调用 (�
 bool syncBindSet(const char *ip, uint16_t port);     // 写绑定目标 (手机 LUMIBIND / 配网页)
 bool syncBindClear();                                // 清除绑定 (配网页)
 bool syncBindGet(char *ipOut, size_t cap, uint16_t &portOut);   // 读绑定目标 ("" = 未绑定)
-const char *syncBindLastOk();                        // 上次成功 IP ("" = 无)
+const char *syncBindLastOk();                        // 上次成功 IP (" = 无)
+const char *progressSyncTargetIp();                  // 当前同步目标 IP (只读访问器, 供 UI 显示)
 
 // ---- 纯工具（LUMI1，实现见 progress_lumi.h/cpp，PC 可测）----
 

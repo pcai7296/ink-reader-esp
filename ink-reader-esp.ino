@@ -5244,6 +5244,20 @@ void progressSyncRender(int state) {
     drawTextUTF8(MX + 4, y, name.c_str(), MW - 8, false); y += 18;
     char line[40];
 
+    // 手机(目标)状态：**只在同步页已有刷新里顺带显示**，不额外刷屏；
+    // 比较页本身已显示"本地/手机"两组数字，就不再占位（避免整屏溢出）。
+    if (state != SYNC_COMPARE) {
+        char bip[16]; uint16_t bport = 8384;
+        if (progressSyncTargetIp()[0] != 0) {
+            snprintf(line, sizeof(line), PSTR("手机：%s"), progressSyncTargetIp());
+        } else if (syncBindGet(bip, sizeof(bip), bport)) {
+            snprintf(line, sizeof(line), PSTR("手机：%s"), bip);
+        } else {
+            snprintf(line, sizeof(line), PSTR("手机：未绑定"));
+        }
+        drawTextUTF8(MX + 4, y, line, MW - 8, false); y += 16;
+    }
+
     if (state == SYNC_COMPARE) {
         snprintf(line, sizeof(line), PSTR("本地 %.2f%%"), (double)progressSyncLocalPercent());
         drawTextUTF8(MX + 4, y, line, MW - 8, true); y += 16;

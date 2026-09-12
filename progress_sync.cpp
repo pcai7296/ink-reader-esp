@@ -530,6 +530,9 @@ bool syncBindGet(char *ipOut, size_t cap, uint16_t &portOut) {
 
 const char *syncBindLastOk() { bindLoad(); return gBindLastOk; }
 
+// 只读访问器: 当前同步目标 IP（UI 显示用；不参与任何协议/状态机逻辑）
+const char *progressSyncTargetIp() { return gTarget.c_str(); }
+
 // 成功连上手机后调用：记 last_ok；若本次是"扫描发现"得到的，则顺带更新绑定（自动绑定/自动失效恢复）
 static void bindMarkOk(const String &ip, bool fromDiscovery) {
   bindLoad();
