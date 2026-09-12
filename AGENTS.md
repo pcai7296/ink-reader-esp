@@ -179,6 +179,22 @@ python esp_dev.py --dry-run --boot-ap      # 打印命令不执行
   → 全部 `drawTextUTF8(..., PSTR(..))` / `showMsg(PSTR(..))` 站点一次性安全；`showMsg` 的 `msg2[0]` 改
   `flashCharAt`；`Serial.println(PSTR(..))` ×2 改 `F(..)`。新文案优先用普通字面量（DRAM 天然安全），
   确要省 RAM 再用 PSTR 且只走安全通道。
+- **🔎 板载传感器普查（2026-09-12，对照官方开源硬件 + 实机探针）**：官方 PCB 工程 =
+  立创开源「[专业版] V2.43-2.9寸SD墨水屏阅读器」（作者 jie326513988 = 甘草酸不酸，与 V14 源码 commit 的
+  326513988@qq.com 同一人）；其 1.54 寸工程页写明整机配置：**SHT30 温湿度 + RX8025T 时钟 + 前置光 LED 恒流
+  驱动 + 1000 万次静音按键 + SD（≤32G）+ Type-C，休眠电流 31µA**。**本板实测 I²C 总线（GPIO13/14）
+  只有两颗器件：`0x32`=BL8025T 时钟、`0x44`=SHT30 温湿度**（0x01..0x7F 全扫，4/5 引脚对无器件）。
+  **SHT30 读法（官方 V14 `Get_bat_vcc.ino::get_dht30_data()` 同款，实机验证通过）**：
+  ① `pinMode(12,OUTPUT); digitalWrite(12,HIGH)` —— **传感器由 `bat_switch_pin`=GPIO12(MOS 供电门) 供电，
+  不上电就扫不到**（这正是此前一直没发现它的原因：项目原有 I2C 扫描没拉高 GPIO12）；
+  ② 稳定 ≥100ms → `SPI.end()` 释放 13/14 → `pinMode(15/5,OUTPUT)+HIGH`(CS 全高) → `Wire.begin(13,14)`;
+  ③ 软复位 `0x30A2` + 5ms（省这步会读失败）→ 读序列号 `0x3780` → 单次测量 `0x2400` + 25ms → `requestFrom(6)`；
+  ④ 结果：`raw 0x6E24 → 30.3℃`、`0x9464 → 58.0%RH`，两段 CRC8(poly 0x31) 均 ok；
+  ⑤ 收尾：`digitalWrite(12,LOW); pinMode(12,INPUT)` 断供电防漏电 → `SPI.begin()` + `reinitSdBus()`。
+  **供电门 = 零静态成本**（不读时传感器完全断电），按需唤醒读取对续航无影响。
+  探针钩子：`-DSENSOR_SCAN=1`（默认 0；开机 2.5s 跑一次，打印 found 列表 + 序列号 + 温湿度）。
+  **未实现功能**：官方主页/配网页会显示室内温湿度（V14 有 `Bitmap_tempSHT30`/`Bitmap_humiditySHT30` 图标 +
+  `dht30_temp/dht30_humi`），本复刻固件还没有——**A7 是否也显示待复核**（问用户/再反编译）。
 - **⛔ 伪装模式是"出不来"的高危状态（2026-09-12 用户报"KEY1 后按 KEY3 回不了首页"，已加固）**：
   `APP_CLOCK_DISGUISE`(11) 由**阅读界面中长**(老板快捷键 `enterClockDisguise()`)进入，并经
   `saveSleepRecord()` 写进睡眠记录 → **跨复位/跨固件烧录保留**。该模式**按设计停用全部按键**（含组合键），

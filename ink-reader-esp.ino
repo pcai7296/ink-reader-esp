@@ -593,6 +593,108 @@ int readBatteryMV() {
     traceFmt(PSTR("BAT_DIAG sum=0 mv=0 all-fail"));
     return 0;
 }
+// ===== 传感器普查钩子 (仅测试固件; 默认 0) =====
+// 背景 (2026-09-12 对照官方开源硬件 oshwhub jie326513988「V2.43-2.9寸SD墨水屏阅读器」):
+//   官方 V14 源码 Get_bat_vcc.ino::get_dht30_data() 读一颗 **SHT30 温湿度传感器**:
+//     I2C 地址 0x44, 总线 GPIO13(SDA)/14(SCL)  —— 与 BL8025T 时钟同一总线 (与 SPI 共用!)
+//     供电 = `bat_switch_pin` (=GPIO12, 就是电池分压开关) 拉高, 读完拉低并置 INPUT 防漏电
+//   本项目的时钟扫描只扫 0x30..0x77 且**没拉高 GPIO12** → 传感器不上电, 从来看不到 0x44。
+// 探针: SPI.end() 释放 13/14 → CS 全高 → GPIO12 供电 → 扫 0x01..0x7F (13/14 与 4/5 两套)
+//       → 对 0x44/0x45 单次测量 (0x24 0x00 无时钟拉伸) + CRC8 校验 → 断供电 → 恢复 SPI/SD。
+#ifndef SENSOR_SCAN
+#define SENSOR_SCAN 0
+#endif
+#if SENSOR_SCAN
+// SHT3x CRC8: poly 0x31, init 0xFF
+static uint8_t shtCrc8(const uint8_t *d, uint8_t n) {
+    uint8_t crc = 0xFF;
+    for (uint8_t i = 0; i < n; i++) {
+        crc ^= d[i];
+        for (uint8_t b = 0; b < 8; b++) crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x31) : (uint8_t)(crc << 1);
+    }
+    return crc;
+}
+static void sensorScanProbe() {
+    Serial.printf_P(PSTR("SENSOR_SCAN begin heap=%u\n"), (unsigned)ESP.getFreeHeap());
+    SPI.end();                                     // 释放 GPIO13/14 (SD/EPD 初始化后被 SPI 占用)
+    pinMode(15, OUTPUT); digitalWrite(15, HIGH);   // EPD CS 高
+    pinMode(5, OUTPUT);  digitalWrite(5, HIGH);    // SD CS 高
+    pinMode(BAT_SWITCH_PIN, OUTPUT);
+    digitalWrite(BAT_SWITCH_PIN, HIGH);            // ★ 给 SHT30 供电 (官方 V14 同款, 关键一步)
+    delay(100);                                    // 供电稳定 (MOS + RC 缓起, 官方仅 1ms 但那是 V2.x 板)
+    const int pairs[2][2] = {{13, 14}, {4, 5}};
+    for (int p = 0; p < 2; p++) {
+        int sdaPin = pairs[p][0], sclPin = pairs[p][1];
+        Wire.begin(sdaPin, sclPin);
+        Wire.setClock(100000);
+        delay(2);
+        uint8_t n = 0;
+        char list[72];
+        list[0] = '\0';
+        for (uint8_t a = 0x01; a <= 0x7F; a++) {
+            Wire.beginTransmission(a);
+            if (Wire.endTransmission() == 0) {
+                n++;
+                size_t len = strlen(list);
+                if (len + 6 < sizeof(list)) snprintf(list + len, sizeof(list) - len, PSTR(" 0x%02X"), a);
+            }
+        }
+        Serial.printf_P(PSTR("SENSOR_SCAN bus=%d/%d found=%u%s\n"), sdaPin, sclPin, n, list);
+        for (uint8_t k = 0; k < 2; k++) {          // SHT30 可能在 0x44 或 0x45
+            uint8_t addr = k ? 0x45 : 0x44;
+            // ① 官方 V14 等价流程: 软复位 0x30A2 → 读序列号 0x3780 (ClosedCube_SHT31D::begin 做的事)
+            Wire.beginTransmission(addr);
+            Wire.write(0x30); Wire.write(0xA2);    // soft reset
+            uint8_t w1 = Wire.endTransmission();
+            if (w1 != 0) continue;                 // 该地址无器件
+            delay(5);
+            Wire.beginTransmission(addr);
+            Wire.write(0x37); Wire.write(0x80);    // read serial number
+            Wire.endTransmission();
+            delay(3);
+            uint8_t sn = Wire.requestFrom((int)addr, 6);
+            char snhex[24];
+            snhex[0] = '\0';
+            if (sn == 6) {
+                uint8_t s6[6];
+                for (uint8_t i = 0; i < 6; i++) s6[i] = (uint8_t)Wire.read();
+                snprintf(snhex, sizeof(snhex), PSTR("%02X%02X%02X"), s6[0], s6[1], s6[3]);
+            }
+            Serial.printf_P(PSTR("SENSOR_SCAN sht30 0x%02X serial(n=%u)=%s\n"), addr, sn, snhex);
+            // ② 单次测量: 先试 0x2400 (低重复性/无拉伸, ~4ms), 失败再试 0x2C06 (高重复性/时钟拉伸)
+            static const uint8_t cmds[2][2] = {{0x24, 0x00}, {0x2C, 0x06}};
+            static const int waits[2] = {25, 20};
+            for (uint8_t c = 0; c < 2; c++) {
+                Wire.beginTransmission(addr);
+                Wire.write(cmds[c][0]); Wire.write(cmds[c][1]);
+                if (Wire.endTransmission() != 0) { Serial.printf_P(PSTR("SENSOR_SCAN sht30 write-fail c=%u\n"), c); continue; }
+                delay(waits[c]);
+                uint8_t got = Wire.requestFrom((int)addr, 6);
+                if (got != 6) {
+                    Serial.printf_P(PSTR("SENSOR_SCAN sht30 read-fail addr=0x%02X cmd=%02X%02X n=%u\n"),
+                                    addr, cmds[c][0], cmds[c][1], got);
+                    continue;
+                }
+                uint8_t d[6];
+                for (uint8_t i = 0; i < 6; i++) d[i] = (uint8_t)Wire.read();
+                uint8_t cT = shtCrc8(d, 2), cH = shtCrc8(d + 3, 2);
+                float t = -45.0f + 175.0f * (float)((uint16_t)((d[0] << 8) | d[1])) / 65535.0f;
+                float rh = 100.0f * (float)((uint16_t)((d[3] << 8) | d[4])) / 65535.0f;
+                Serial.printf_P(PSTR("SENSOR_SCAN SHT30 addr=0x%02X cmd=%02X%02X raw=%02X%02X/%02X %02X%02X/%02X crcT=%s crcH=%s temp=%.1fC humi=%.1f%%\n"),
+                                addr, cmds[c][0], cmds[c][1], d[0], d[1], d[2], d[3], d[4], d[5],
+                                (cT == d[2]) ? "ok" : "BAD", (cH == d[5]) ? "ok" : "BAD", t, rh);
+                break;   // 成功即止
+            }
+        }
+    }
+    digitalWrite(BAT_SWITCH_PIN, LOW);             // 断传感器供电
+    pinMode(BAT_SWITCH_PIN, INPUT);                // 防漏电 (官方同款)
+    SPI.begin();                                   // 收回 GPIO13/14 (Wire 无需 end, 时钟探测同款)
+    reinitSdBus("sensor_scan");
+    Serial.printf_P(PSTR("SENSOR_SCAN done heap=%u\n"), (unsigned)ESP.getFreeHeap());
+}
+#endif
+
 uint8_t batPercent(int v_mV) {
     // 官方 V14 getBatVolBfb 四阶拟合曲线 (A7 同为多项式, 6 阶系数未完全还原, 用已验证的官方 4 阶):
     //   bfb = 497.50976·x⁴ - 7442.07254·x³ + 41515.70648·x² - 102249.34377·x + 93770.99821
@@ -6443,6 +6545,14 @@ static void readerAutotestRun() {
 #endif
 
 void loop() {
+#if SENSOR_SCAN
+    // 传感器普查 (仅测试固件, 见 sensorScanProbe 注释): 开机后一次性跑
+    static bool sensorScanDone = false;
+    if (!sensorScanDone && millis() > 2500) {
+        sensorScanDone = true;
+        sensorScanProbe();
+    }
+#endif
     uint32_t loopStarted = millis();
     clockManagerCompTick();   // 时钟手动补偿结算 (内部按分钟闸门, 芯片在场改写芯片秒)
     progressTick();           // P6: 阅读进度节流落盘 (50 页 / 5 分钟)
