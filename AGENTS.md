@@ -179,6 +179,17 @@ python esp_dev.py --dry-run --boot-ap      # 打印命令不执行
   → 全部 `drawTextUTF8(..., PSTR(..))` / `showMsg(PSTR(..))` 站点一次性安全；`showMsg` 的 `msg2[0]` 改
   `flashCharAt`；`Serial.println(PSTR(..))` ×2 改 `F(..)`。新文案优先用普通字面量（DRAM 天然安全），
   确要省 RAM 再用 PSTR 且只走安全通道。
+- **⛔ 进度落盘与"KEY1 硬复位回首页"的冲突（2026-09-12 用户报 bug，已修）**：用户回首页的习惯是
+  **KEY1 硬复位 + 1 秒内按 KEY3**（boot `key3Held` 分支直接回首页）——硬复位**不经过**
+  `closeTxtReader`/`enterSleepMode`/`saveSleepRecord`，所以 `progressFlushForce()`（退出/换书/休眠落盘）
+  永不执行；而"显式跳转"原先只调 `writeProgress()`（登记到 RAM，50 页/5 分钟阈值才落盘）→ 复位瞬间待写偏移
+  消失 → `.i1` 记录[0] 仍是旧偏移 → 重进书回到跳转前（用户实测："菜单章节/跳转跳转后回首页进度消失"）。
+  **修复**：① `writeProgressNow(off, reason)` = 登记 + 立即落盘，用于全部显式跳转（`jumpToPage`=菜单跳转键盘 /
+  章节目录行跳转 / 标签跳转 / 进度同步应用）；② 节流 50 页/5 分钟 → **10 页/60 秒**
+  （宏 `PROG_FLUSH_PAGES`/`PROG_FLUSH_MS`）。**实机验收**（`-DPROGRESS_RESET_TEST=1` 钩子）：
+  `PROG_FLUSH reason=jump_chapter off=20618636` → 直读 `.i1` 一致 → `ESP.restart()`(等价 KEY1) →
+  `TXT restored page=50043 offset=20618636`（与跳转前完全一致）✓。
+  **推论（写新代码时记住）**：任何"用户会立刻断电/复位"的关键状态，不能只放在 RAM 里等节流落盘。
 - **章节目录自动定位到当前章（2026-09-12 用户需求，已实机验收）**：阅读菜单 → 章节时，列表直接翻到
   "当前阅读页所属章节"所在页 + 光标停在该行（不再每次从第 1 页第 1 行开始）。实现：`chapterBuildPageTable()`
   扫描 .z1 时**顺带**解析每行页号，记录最后一条 `page <= txtPage` 的章序号（`chapterCurIdx`，.z1 页号单调
