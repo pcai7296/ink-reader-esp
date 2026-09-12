@@ -193,7 +193,7 @@ static int phoneReadStatus() {
   line.reserve(64);   // 一次到位: 阅读期低堆, 逐字节 += 的多次 realloc 碎片化
   gRespCL = -1;
   uint32_t t0 = millis();
-  while ((int32_t)(millis() - t0) < 3000) {
+  while ((int32_t)(millis() - t0) < 8000) {   // 8s: 手机侧 NanoHTTPD 首个响应偶发偏慢(实测 ~3s), 原 3s 会误判成"连接失败"
     while (gWiFi.available()) {
       int c = gWiFi.read();
       if (c < 0) break;
@@ -220,7 +220,7 @@ static bool phoneSkipHeaders() {
   String buf;
   buf.reserve(2048);   // 一次到位: 阅读期低堆, 逐字节 += 的多次 realloc 碎片化
   uint32_t t0 = millis();
-  while ((int32_t)(millis() - t0) < 3000) {
+  while ((int32_t)(millis() - t0) < 8000) {
     while (gWiFi.available()) {
       int c = gWiFi.read();
       if (c < 0) break;
@@ -260,7 +260,7 @@ static bool phoneReadBody(uint8_t *body, uint16_t max) {
   int want = (gRespCL >= 0) ? gRespCL : (int)max;
   if (want > (int)max) want = max;
   uint32_t t0 = millis();
-  while (gBufLen < (uint16_t)want && (int32_t)(millis() - t0) < 3000) {
+  while (gBufLen < (uint16_t)want && (int32_t)(millis() - t0) < 8000) {
     while (gWiFi.available() && gBufLen < (uint16_t)want) {
       int c = gWiFi.read();
       if (c < 0) break;
