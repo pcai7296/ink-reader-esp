@@ -96,12 +96,16 @@ static char gCfgPass[65];
 static char gCfgIp[16];
 
 // ---------- UDP 手机发现 (仅 STA 模式: 局域网/手机热点; AP 模式仍用固定 192.168.0.100) ----------
-// ★★ 2026-09-12 根因（用户实测 + UDP_DISC_TEST 钩子对照）：
-//   手机日志证明它**收到了**设备的 LUMIDISC 并回了 3 次 LUMIACK，但设备始终 `DISCOVER timeout`。
-//   隔离实验（钩子用**新建** WiFiUDP 对象，12s 内 50/50 包全收，包括手机的 `LUMIACK 192.168.0.18`）：
-//   → 收包链路本身没问题，**问题在复用同一个 WiFiUDP 对象**：首次 stop() 之后同一个对象再 begin()
-//     能发不能收（lwip pcb 的收包回调没重新挂上）。修法：每次发现**新建对象**，结束即 delete。
-static WiFiUDP *gDiscUdp = nullptr;
+// ★★ 2026-09-12 两轮实机定位（最后定稿方案）：
+//   ① 手机日志证明它**收到了** LUMIDISC 并回了 3 次 LUMIACK，设备却恒 `DISCOVER timeout`；
+//      钩子对照（`-DUDP_DISC_TEST=1`）显示**新建** WiFiUDP 收包 50/50 全中 ⇒ 收包链路没问题，
+//      **病根是"同一个对象 stop() 之后再 begin()"能发不能收**（lwip 收包回调没重新挂上）。
+//   ② 第一版修法"每次发现 new/delete 对象"虽能收包，但实测**会把设备卡死在 DISCOVER**
+//      （无任何日志、看门狗也不复位）⇒ 弃用动态分配。
+//   **定稿**：常驻一个静态对象，**每个同步会话只 begin() 一次并全程复用**（既不做 stop→begin 循环，
+//   也不 new/delete）；会话结束走 `discoveryReset()`，下次会话重新绑一次。
+static WiFiUDP  gDiscUdp;
+static bool     gDiscBound = false;    // 本会话是否已绑定 8390
 static bool     gDiscStarted = false;
 static uint32_t gDiscDeadline = 0;
 static uint32_t gDiscPollMs = 0;
@@ -322,34 +326,43 @@ static void loadSyncCfg() {
 }
 
 // ---------- UDP 发现辅助 ----------
-// 广播顺序: 先子网定向广播, 再 255.255.255.255 (部分热点/路由器对两类广播处理不同)
-static bool discoveryBegin();      // 定义见下（每次发现新建 WiFiUDP 对象）
+// ★ 全程**常驻绑定**：会话之间不 stop()（stop 后再 begin 同对象会"能发不能收"），
+//   仅在"一发都没发出去"时 discoveryRebind() 重绑一次。
+static bool discoveryBegin();
+static void discoveryRebind();
 static void discoverySendPings() {
   // 仅 STA(局域网/手机热点)模式进入本状态: 目标地址用 STA 子网广播; 热点模式走 SYNC_WAIT_CLIENT
   // (热点固定给手机分配 192.168.0.100 且客户端上限 1, 见 wifi_managerStartApOnly) —— 不需要发现。
   if (!discoveryBegin()) return;
   IPAddress staIp = WiFi.localIP();
+  int sent = 0;
   if (staIp.isSet() && staIp != IPAddress(0, 0, 0, 0)) {
     IPAddress bcast(staIp[0], staIp[1], staIp[2], 255);
-    gDiscUdp->beginPacket(bcast, DISC_PORT);
-    gDiscUdp->write((const uint8_t*)"LUMIDISC", 8);
-    gDiscUdp->endPacket();
+    gDiscUdp.beginPacket(bcast, DISC_PORT);
+    gDiscUdp.write((const uint8_t*)"LUMIDISC", 8);
+    if (gDiscUdp.endPacket() > 0) sent++;
   }
   for (int i = 0; i < 2; i++) {
-    gDiscUdp->beginPacket(IPAddress(255, 255, 255, 255), DISC_PORT);
-    gDiscUdp->write((const uint8_t*)"LUMIDISC", 8);
-    gDiscUdp->endPacket();
+    gDiscUdp.beginPacket(IPAddress(255, 255, 255, 255), DISC_PORT);
+    gDiscUdp.write((const uint8_t*)"LUMIDISC", 8);
+    if (gDiscUdp.endPacket() > 0) sent++;
   }
-  syncDbg(PSTR("DISCOVER ping ip=%s port=%u"), staIp.toString().c_str(), (unsigned)DISC_PORT);
+  syncDbg(PSTR("DISCOVER ping ip=%s port=%u sent=%d"), staIp.toString().c_str(), (unsigned)DISC_PORT, sent);
+  if (sent == 0) {                       // 一发都没出去 → 旧 socket 失效(换网/重连), 重绑后再发一次
+    discoveryRebind();
+    gDiscUdp.beginPacket(IPAddress(255, 255, 255, 255), DISC_PORT);
+    gDiscUdp.write((const uint8_t*)"LUMIDISC", 8);
+    gDiscUdp.endPacket();
+  }
 }
 
 // 返回 >0 且 ack 以 "LUMIACK " 开头 → 合法响应; 其余返回 0
 static int discoveryPoll(char* out, size_t cap) {
-  if (!gDiscUdp) return 0;
-  int sz = gDiscUdp->parsePacket();
+  if (!gDiscBound) return 0;
+  int sz = gDiscUdp.parsePacket();
   if (sz <= 0) return 0;
   if (sz > (int)cap - 1) sz = (int)cap - 1;   // 超长包按上限读掉, 不留在缓冲里
-  int n = gDiscUdp->read((char*)out, sz);
+  int n = gDiscUdp.read((char*)out, sz);
   if (n < 0) n = 0;
   out[n] = '\0';
   if (n < 8 || memcmp(out, "LUMIACK ", 8) != 0) {
@@ -359,23 +372,30 @@ static int discoveryPoll(char* out, size_t cap) {
   return n;
 }
 
-static void discoveryStop() {
-  if (gDiscUdp) { gDiscUdp->stop(); delete gDiscUdp; gDiscUdp = nullptr; }
-}
 
-// 每次发现**新建** WiFiUDP 对象（复用同一对象 stop 后再 begin 会"能发不能收"，见 gDiscUdp 处注释）
+// 常驻绑定：全局只 begin() 一次，之后全程复用（不做 stop→begin 循环，也不用 new/delete）
 static bool discoveryBegin() {
-  discoveryStop();                       // 先释放上一次的（若有）
-  gDiscUdp = new WiFiUDP();
-  if (!gDiscUdp) { syncDbg(PSTR("DISCOVER new-fail")); return false; }
-  if (!gDiscUdp->begin(DISC_PORT)) {
-    syncDbg(PSTR("DISCOVER begin-fail"));
-    delete gDiscUdp; gDiscUdp = nullptr;
+  if (gDiscBound) return true;
+  if (!gDiscUdp.begin(DISC_PORT)) {
+    syncDbg(PSTR("DISCOVER begin-fail heap=%u"), (unsigned)ESP.getFreeHeap());
     return false;
   }
-  syncDbg(PSTR("DISCOVER localPort=%u"), (unsigned)gDiscUdp->localPort());
+  gDiscBound = true;
+  syncDbg(PSTR("DISCOVER bound localPort=%u"), (unsigned)gDiscUdp.localPort());
   return true;
 }
+
+// 仅"发包全失败"(换网/重连后旧 socket 失效)时重绑一次
+static void discoveryRebind() {
+  gDiscUdp.stop();
+  gDiscBound = false;
+  if (discoveryBegin()) syncDbg(PSTR("DISCOVER rebound"));
+}
+
+// 会话结束 = **什么都不做**：故意不 stop()。
+// (stop() 后再 begin() 同一对象会"能发不能收" —— 2026-09-12 DISCOVER 恒超时的真正原因；
+//  而上一版"每次 new/delete"会把设备卡死在 DISCOVER，已弃用)
+static void discoveryStop() { /* 保持绑定，勿 stop */ }
 
 // ---------- v3 指纹快照生成 (复用已打开的 txtFile; 任一步失败 → 整组无效) ----------
 extern File txtFile;   // ink-reader-esp.ino 的全局 (当前打开 TXT 句柄; PREPARE 后已打开)
@@ -548,52 +568,55 @@ void progressSyncLoop() {
       break;   // 等按键: 见 progressSyncHandleKeys (右长=开热点, 短按/中长=退出)
     }
     case SYNC_DISCOVER: {
-      // STA 模式手机发现: 广播 LUMIDISC → 收第一个合法 "LUMIACK <ip>" (≤2s), 失败回退
-      if (!gDiscStarted) {
-        gDiscStarted = true;
-        gDiscDeadline = millis() + DISC_TIMEOUT_MS;
-        gDiscPollMs = 0;
-        gStatus = F("正在发现手机…");
-        discoverySendPings();
-        break;
-      }
-      if ((int32_t)(millis() - gDiscPollMs) >= 100) {
-        gDiscPollMs = millis();
+      // STA 模式手机发现: 广播 LUMIDISC → **紧循环**轮询首个合法 "LUMIACK <ip>" (≤2s), 失败回退。
+      // ★ 2026-09-12 定稿原因：早期"主 loop 每 100ms 轮询"的写法**收不到包**（手机日志证明它已应答、
+      //   PC 广播实测手机应答正常，唯独设备收不到）；而 `-DUDP_DISC_TEST=1` 钩子用**紧循环**
+      //   (`while + delay(20)`) 收包 50/50 全中 ⇒ 采用与钩子同款形态。
+      if (gDiscStarted) break;     // 本状态一次性完成，不再分帧
+      gDiscStarted = true;
+      gStatus = F("正在发现手机…");
+      progressSyncRender((int)gState);
+      discoverySendPings();
+      {
         char ack[64];
-        if (discoveryPoll(ack, sizeof(ack)) > 0) {
-          char* sp = strchr(ack, ' ');
-          if (sp) {
-            // 容忍回包尾部空白/换行: IPAddress::fromString 遇非数字字符整串判失败,
-            // 曾致 LUMIACK "192.168.0.10\n" 永远解析不出 → 发现必超时白耗 2s
-            char* ips = sp + 1;
-            while (*ips == ' ' || *ips == '\r' || *ips == '\n') ips++;
-            size_t ilen = strlen(ips);
-            while (ilen > 0 && (ips[ilen - 1] == '\r' || ips[ilen - 1] == '\n' || ips[ilen - 1] == ' '))
-              ips[--ilen] = '\0';
-            IPAddress tip;
-            if (tip.fromString(ips)) {
-              gTarget = String(ips);
-              syncDbg(PSTR("DISCOVER ok ip=%s"), gTarget.c_str());
-              discoveryStop();
-              gConnectAttempt = 0; gRetryAtMs = 0;
-              gStatus = F("正在连接手机…");
-              setState(SYNC_CONNECT);
-              break;
+        bool found = false;
+        uint32_t t0 = millis();
+        int polls = 0;
+        while ((uint32_t)(millis() - t0) < DISC_TIMEOUT_MS) {
+          polls++;
+          if (discoveryPoll(ack, sizeof(ack)) > 0) {
+            char* sp = strchr(ack, ' ');
+            if (sp) {
+              // 容忍回包尾部空白/换行: IPAddress::fromString 遇非数字字符整串判失败
+              char* ips = sp + 1;
+              while (*ips == ' ' || *ips == '\r' || *ips == '\n') ips++;
+              size_t ilen = strlen(ips);
+              while (ilen > 0 && (ips[ilen - 1] == '\r' || ips[ilen - 1] == '\n' || ips[ilen - 1] == ' '))
+                ips[--ilen] = '\0';
+              IPAddress tip;
+              if (tip.fromString(ips)) {
+                gTarget = String(ips);
+                syncDbg(PSTR("DISCOVER ok ip=%s polls=%d"), gTarget.c_str(), polls);
+                found = true;
+                break;
+              }
             }
           }
+          delay(20);
+          ESP.wdtFeed();
+        }
+        gConnectAttempt = 0; gRetryAtMs = 0;
+        if (found) {
+          gStatus = F("正在连接手机…");
+          setState(SYNC_CONNECT);
+        } else {
+          syncDbg(PSTR("DISCOVER timeout -> fallback polls=%d"), polls);
+          gTarget = String(wifiManagerSyncTarget());
+          if (gTarget.length() == 0) { gStatus = F("未配置手机地址"); setState(SYNC_ERROR); break; }
+          gStatus = F("正在连接手机…");
+          setState(SYNC_CONNECT);
         }
       }
-      if ((int32_t)(millis() - gDiscDeadline) >= 0) {
-        discoveryStop();
-        syncDbg(PSTR("DISCOVER timeout -> fallback"));
-        gTarget = String(wifiManagerSyncTarget());
-        if (gTarget.length() == 0) { gStatus = F("未配置手机地址"); setState(SYNC_ERROR); break; }
-        gConnectAttempt = 0; gRetryAtMs = 0;
-        gStatus = F("正在连接手机…");
-        setState(SYNC_CONNECT);
-        break;
-      }
-      ESP.wdtFeed();
       break;
     }
     case SYNC_WAIT_CLIENT: {

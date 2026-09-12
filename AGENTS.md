@@ -347,3 +347,28 @@ python esp_dev.py --dry-run --boot-ap      # 打印命令不执行
   关无线调试（IP 也会变）；已 `settings put global wifi_sleep_policy 0`，并用 `adb tcpip 5555` 改成**固定端口**
   （`adb connect <ip>:5555`，重启手机前有效，不再受"无线调试"开关影响）；③ 授权：`adb pair <ip>:<配对端口> <配对码>`
   一次即可。
+
+- **✅ 进度同步端到端打通 + 最后一个根因（2026-09-12 深夜，两侧实测 PASS）**：
+  **设备侧最终形态**（`python esp_dev.py -D SYNC_AUTO_TEST=1 --build-path build_auto --steps build` 后烧 build_auto，
+  开机自动跑完整链路，免按键）实测：
+  `DISCOVER bound localPort=8390` → `DISCOVER ping ... sent=3` → **`DISCOVER ok ip=192.168.0.18 polls=12`**
+  → `CONNECT ok` → `GET code=200 body bytes=63` → `PARSE ok size=58418739 offset=50803872 pct=86.97`
+  → `COMPARE local=33978(0.06%) remote=50803872(86.97%)` → `APPLY use-offset 50803872`
+  → `STATUS 同步成功 ✓` → **`page=121757`（设备从第 81 页跳到 86.97% 位置）** ✓
+  **★ 最后一个根因 = UDP 收包的"轮询形态"**：手机日志证明它已应答（`UDP discovery reply -> /192.168.0.12`）、
+  PC 广播实测手机也秒回 `LUMIACK 192.168.0.18`，唯独设备收不到 ⇒ 把 DISCOVER 从"主 loop 每 100ms 轮询"
+  改成与自检钩子同款的**紧循环轮询**（`while (millis()-t0 < 2000) { poll(); delay(20); ESP.wdtFeed(); }`）
+  后立刻收到（polls=12 ≈ 240ms）✓。**教训：ESP8266 WiFiUDP 的收包在该项目里只有"紧循环"形态被验证可靠**
+  （同 socket、同网络，仅轮询形态不同 → 结果不同）。另：`WiFiUDP` 对象**不要 stop() 后复用**（收包回调不重挂），
+  也别每次 new/delete（实测把设备**卡死在 DISCOVER**、看门狗都不复位）→ 采用"常驻绑定 + 发包全失败才重绑"。
+  **手机侧（J:\code\Android\legado）**：`EspBookMatch` 只按 `originName` 精确 + `bookUrl` 路径形态校验
+  （**删掉 `File.exists()` 探测**：分区存储下 `/storage/emulated/0/Download/xxx.txt` 存在却 `isFile=false`，
+  曾把已导入的书误判成 `no-book`）；GET 取数顺序 = ESP 位置快照 → **手机自身 DB 进度**（`durChapterIndex/Pos`
+  经 `bytesBeforeCharInFile` 换算字节偏移，实测 `offset=50803872 pct=86.97` 与 DB chapter 5235/6020 吻合），
+  **绝不用设备推回的历史进度兜底**（那正是"删旧书→导新书后被旧进度覆写"的根因）；PUT 同样先核实书架，
+  不在架上直接 `404 no-book`。
+- **🛠 自检钩子 `SYNC_AUTO_TEST`（默认 0，仅测试固件）**：开机 4s 自动"打开最近阅读 → 等 1.5s 句柄就绪 →
+  `readerSyncOpen=true` 后 `progressSyncBegin()` → 到 COMPARE 自动执行 APPLY（`-DSYNC_AUTO_APPLY=0` 可只到比较页）
+  → 打印 `SYNCAUTO open/ready/begin/compare/DONE ... PASS|FAIL`。**坑：必须自己置 `readerSyncOpen = true`**
+  （loop 只在该标记为真时喂 `progressSyncLoop`，不置位则状态机永远停在 PREPARE）；`startTxtReader` 是异步的，
+  必须等句柄就绪再发起同步。**这个钩子让"编译→烧录→自动验完整链路"成为一轮操作，无需用户按键。**

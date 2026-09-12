@@ -5095,6 +5095,78 @@ static void syncWifiTestRun() {
     }
     wifiManagerRfOff("syncwifi_test");
 }
+
+#endif
+
+
+// ===== 开机自动跑一次完整进度同步 (仅测试固件; 默认 0) =====
+// 用户 2026-09-12 要求：免按键复现整条链路（效率高）——编译→烧录→自动打开最近阅读→发起同步→
+// 到比较页后自动执行"同步(手机→本地)"→打印关键节点；PC 端读串口即可判断成败。
+// 用法：python esp_dev.py -D SYNC_AUTO_TEST=1 --build-path build_auto --steps build
+//       再烧 build_auto（-D SYNC_AUTO_APPLY=0 可只走到比较页不自动应用）
+#ifndef SYNC_AUTO_TEST
+#define SYNC_AUTO_TEST 0
+#endif
+#ifndef SYNC_AUTO_APPLY
+#define SYNC_AUTO_APPLY 1
+#endif
+#if SYNC_AUTO_TEST
+static void syncAutoTick() {
+    static bool started = false, applied = false, reported = false;
+    static uint32_t openAt = 0;
+    if (!started) {
+        if (millis() < 4000) return;
+        started = true;
+        reinitSdBus("sync_auto");
+        if (recentReadPath.length() == 0) {
+            Serial.printf_P(PSTR("SYNCAUTO no-recent-read\n"));
+            return;
+        }
+        startTxtReader(recentReadPath.c_str(), false);
+        openAt = millis();
+        Serial.printf_P(PSTR("SYNCAUTO open mode=%d page=%lu off=%lu heap=%u path=[%s]\n"),
+                        (int)appMode, (unsigned long)txtPage, (unsigned long)txtPageStart,
+                        (unsigned)ESP.getFreeHeap(), recentReadPath.c_str());
+        return;
+    }
+    // startTxtReader 是异步的(渲染/索引恢复要一会儿): 等句柄真正就绪再发起同步
+    if (openAt && !applied && progressSyncState() == SYNC_IDLE) {
+        if ((uint32_t)(millis() - openAt) < 1500) return;
+        openAt = 0;
+        Serial.printf_P(PSTR("SYNCAUTO ready txtFile=%d index=%u heap=%u -> begin\n"),
+                        (int)(txtFile ? 1 : 0), (unsigned)txtIndexPath.length(),
+                        (unsigned)ESP.getFreeHeap());
+        // ★ 关键: 菜单路径会先置 readerSyncOpen —— loop 只在该标记为真时喂 progressSyncLoop，
+        //   不置位则状态机永远停在 PREPARE (2026-09-12 钩子实测踩坑)
+        readerMenuOpen = false;
+        readerSyncOpen = true;
+        progressSyncBegin(recentReadPath);
+        Serial.printf_P(PSTR("SYNCAUTO begin state=%d syncOpen=%d\n"),
+                        progressSyncState(), (int)(readerSyncOpen ? 1 : 0));
+        return;
+    }
+    int st = progressSyncState();
+    if (!applied && st == SYNC_COMPARE) {
+        applied = true;
+        Serial.printf_P(PSTR("SYNCAUTO compare local=%lu(%.2f%%) remote=%lu(%.2f%%) sel=%d\n"),
+                        (unsigned long)progressSyncLocalOffset(), (double)progressSyncLocalPercent(),
+                        (unsigned long)progressSyncRemoteOffset(), (double)progressSyncRemotePercent(),
+                        progressSyncCompareSel());
+#if SYNC_AUTO_APPLY
+        Serial.printf_P(PSTR("SYNCAUTO -> APPLY phone->local\n"));
+        progressSyncHandleKeys(0, 2);      // 比较页 sel=0 时"右长"=执行同步(手机→本地)
+#endif
+        return;
+    }
+    if (!reported && applied && (st == SYNC_IDLE || st == SYNC_ERROR)) {
+        reported = true;
+        Serial.printf_P(PSTR("SYNCAUTO DONE state=%d status=[%s] page=%lu off=%lu txtSize=%lu -> %s\n"),
+                        st, progressSyncStatusText(), (unsigned long)txtPage,
+                        (unsigned long)txtPageStart,
+                        (unsigned long)(txtFile ? txtFile.size() : 0UL),
+                        (st == SYNC_IDLE) ? "PASS" : "FAIL");
+    }
+}
 #endif
 
 bool progressSyncApplyRemote(uint32_t offset) {
@@ -7129,6 +7201,10 @@ static void readerAutotestRun() {
 }
 #endif
 
+#if SYNC_AUTO_TEST
+static void syncAutoTick();   // 前向声明: 定义在 progressSyncRestoreReaderHeap 之后(处于条件编译内, 原型生成器看不到)
+#endif
+
 void loop() {
 #if SENSOR_SCAN
     // 传感器普查 (仅测试固件, 见 sensorScanProbe 注释): 开机后一次性跑
@@ -7169,6 +7245,9 @@ void loop() {
         udpDiscTestDone = true;
         udpDiscTestRun();
     }
+#endif
+#if SYNC_AUTO_TEST
+    syncAutoTick();   // 开机自动跑一次完整进度同步 (仅测试固件, 见 syncAutoTick 注释)
 #endif
 #if FOLDER_DEL_TEST
     // 文件夹递归删除自检 (仅测试固件, 见 folderDelTestRun 注释)
