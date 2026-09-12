@@ -81,7 +81,10 @@ static int fsCacheScanOne(const char *dir, int depth, int *dirCount,
     bool isDir = root.isDirectory();
     uint64_t sz = isDir ? 0 : (uint64_t)root.fileSize();
     if (!ofsEntryVisibleEx(nm.c_str(), isDir, false)) continue;
-    char nameEsc[260];   // 容得下 FAT LFN 255 字节 + 转义余量（原 160 截断长名且可能切在 UTF-8 中间）
+    // ⚠️ 审查 #5: nameEsc 曾为栈局部(260B) → 递归 3 层共压 780B; 它只在"转义→printf"之间存活,
+    //    其间无递归(子目录递归用的是 child) → 改 static 共享（单线程, 与 sd_file_ops 的
+    //    gPagedEntry/gPagedFull 同款约定）。child 必须留在栈上(它就是递归入参)。
+    static char nameEsc[260];   // 容得下 FAT LFN 255 字节 + 转义余量（原 160 截断长名且可能切在 UTF-8 中间）
     fsJsonEscape(nm.c_str(), nameEsc, sizeof(nameEsc));
     if (first) { cache.printf("["); first = false; } else { cache.printf(","); }
     if (isDir) cache.printf("{\"type\":\"dir\",\"name\":\"%s\"}", nameEsc);

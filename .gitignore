@@ -41,3 +41,7 @@ __pycache__/
 .vscode/
 *.swp
 .DS_Store
+
+# ===== 工具/agent 工作区（非固件产物; 审查 #3: 曾误提交 .zcode/plans/*.md）=====
+.zcode/
+.omo/
