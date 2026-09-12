@@ -2520,22 +2520,38 @@ void renderWeatherPage(bool full) {
         drawTextUTF8(x + 2, y + dh - 16, PSTR("℃"), 20, true);
         x += 24;
         drawWeatherIcon(x + 4, y + (dh - 24) / 2, weatherIconIndex(wActual.weatherCode), true);
-        // ===== 双横线 y=56/74 + 中间一行（电量百分比；夜间跳过时提示）=====
+        // ===== 双横线 y=56/74 + 中间条 =====
         fillRect(0, 56, SCR_W, 1, true);
         fillRect(0, 74, SCR_W, 1, true);
-        if (wNightSkip) {
-            snprintf(line, sizeof(line), PSTR("夜间不更新"));
-        } else {
-            snprintf(line, sizeof(line), PSTR("%d%%"), batPercent(readBatteryMV()));   // 电池图标已表意, 去掉"电量"文字
+        // 左端: 电量(电池图标 + 百分比)。
+        // ⚠️ 2026-09-12 用户反馈"天气页最中心是与天气无关的电量" → 正中改为 InAWord(官方同款),
+        //    电量挪到本行左端(紧凑); 官方 V14 也是把电量放角落(左下角 21x12 电池位图 + 4px 字体),
+        //    我们的三列预报占满底部故借用中间条左端。顺带修掉原"闪电画在文字上方 14px"的错位。
+        int subLeft = 4;
+        {
+            char bbuf[12];
+            snprintf(bbuf, sizeof(bbuf), PSTR("%d%%"), batPercent(readBatteryMV()));
+            drawClockIcon(4, 58, isCharging() ? CK_ICON_BATTERY_CHG : CK_ICON_BATTERY, true);
+            drawTextUTF8(24, 58, bbuf, 34, true);
+            subLeft = 64;
         }
-        // 图标(16x16) + 数字整体居中: 文本基线 y=58 → 字形占 58..74, 图标同高对齐在 y=58。
-        // ⚠️ 修复(用户报"电量旁闪电错位"): 原先 drawLightningIcon(tx-10, 58-13) 把 13 高的闪电画到
-        //    y=45..58, 比文字整整高 14px; 且充电时才画、与"电量"文字还有重叠。现改为电池/带闪电电池图标。
-        int tx = (SCR_W - textWidth(line) + (wNightSkip ? 0 : 22)) / 2;
-        if (!wNightSkip) {
-            drawClockIcon(tx - 22, 58, isCharging() ? CK_ICON_BATTERY_CHG : CK_ICON_BATTERY, true);
+        // 正中: 一言 / 自定义句 / 倒计时 / B粉 —— 对齐官方 V14 DisplayMain.ino:259-301(该处即 InAWord);
+        //        事件类型用图标(旗子/B站)表意, 内容仍是文本。夜间跳过且无文案时提示"夜间不更新"。
+        {
+            char sub[96];
+            clockBuildSubText(sub, sizeof(sub), true);
+            if (!sub[0] && wNightSkip) snprintf(sub, sizeof(sub), PSTR("夜间不更新"));
+            if (sub[0]) {
+                int si = clockSubIcon();
+                int sw = utf8Width(sub);
+                int avail = SCR_W - 4 - subLeft;
+                int total = (si >= 0) ? 16 + 6 + sw : sw;
+                int sx = subLeft + (avail - total) / 2;
+                if (sx < subLeft) sx = subLeft;
+                if (si >= 0) { drawClockIcon(sx, 58, si, true); sx += 16 + 6; }
+                drawTextUTF8(sx, 58, sub, SCR_W - 4 - sx, true);
+            }
         }
-        drawTextUTF8(tx, 58, line, 200, true);
         // ===== 底部 3 天预报：三列对齐（今/明/后 + MM-DD | 星期+天气 | 高/低）=====
         // 星期由 RTC 时间推算（date0=今天，date1=明天，date2=后天）
         int wd0 = -1;

@@ -65,12 +65,13 @@ def icon_uvi():
     return img
 
 
-# 4 湿度: 水滴 (上圆 + 下尖)
+# 4 湿度: 水滴 (⚠️ 2026-09-12 用户反馈修正: 原实现"上圆 + 下尖"= 倒过来的水滴;
+#          正确应为**尖朝上、圆身在下方**, 与 clock_icons.h 的 16x16 水滴一致)
 def icon_humidity():
     img = new_img()
     d = ImageDraw.Draw(img)
-    d.polygon([(3, 5), (9, 5), (6, 11)], fill=BLACK)  # 尖
-    d.ellipse([4, 2, 8, 6], fill=BLACK)              # 圆头
+    d.polygon([(6, 1), (3, 6), (9, 6)], fill=BLACK)  # 尖朝上
+    d.ellipse([3, 5, 9, 11], fill=BLACK)            # 圆身在下
     return img
 
 
