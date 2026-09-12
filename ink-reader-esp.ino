@@ -593,6 +593,103 @@ int readBatteryMV() {
     traceFmt(PSTR("BAT_DIAG sum=0 mv=0 all-fail"));
     return 0;
 }
+// ---------- 室内温湿度 (板载 SHT30, I²C 0x44, 供电门 GPIO12) ----------
+// 对照官方开源硬件 + V14 源码 Get_bat_vcc.ino::get_dht30_data():
+//   · 传感器在 I²C 总线 GPIO13(SDA)/14(SCL) —— 与 BL8025T 时钟**同一总线**, 该总线又与 SPI 共用;
+//   · **供电由 bat_switch_pin(=GPIO12, 就是电池分压开关) 经 MOS 管控制** —— 不拉高就没这个器件
+//     (这正是此前一直没发现它的原因); 读完拉低并置 INPUT, 所以"不读=零静态功耗"。
+// 读法(实测通过): SPI.end() 放引脚 → CS 全高 → GPIO12 高 → 软复位 0x30A2 + 5ms
+//   → 单次测量 0x2400 + 25ms → requestFrom(6) → 两段 CRC8 校验 → 断电 → SPI.begin()+重挂 SD。
+// 节流: 5 分钟一次 (与电池检测同节奏; 单次耗时 ~35ms)。
+// SHT3x CRC8: poly 0x31, init 0xFF
+static uint8_t shtCrc8(const uint8_t *d, uint8_t n) {
+    uint8_t crc = 0xFF;
+    for (uint8_t i = 0; i < n; i++) {
+        crc ^= d[i];
+        for (uint8_t b = 0; b < 8; b++) crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x31) : (uint8_t)(crc << 1);
+    }
+    return crc;
+}
+static bool gIndoorValid = false;     // 传感器存在且读到有效值
+static int16_t gIndoorTemp10 = 0;     // 温度 ×10 (整数运算, 避免 printf 浮点)
+static uint16_t gIndoorHumi10 = 0;    // 湿度 ×10
+static uint32_t gIndoorLastMs = 0;    // 上次读取时刻 (0 = 还没读过)
+static bool sht30Read(int16_t *t10, uint16_t *h10) {
+    SPI.end();                                     // 释放 GPIO13/14 (SD/EPD 初始化后被 SPI 占用)
+    pinMode(15, OUTPUT); digitalWrite(15, HIGH);   // EPD CS 高
+    pinMode(5, OUTPUT);  digitalWrite(5, HIGH);    // SD CS 高
+    pinMode(BAT_SWITCH_PIN, OUTPUT);
+    digitalWrite(BAT_SWITCH_PIN, HIGH);            // ★ 传感器供电
+    delay(20);
+    Wire.begin(13, 14);
+    Wire.setClock(100000);
+    bool ok = false;
+    Wire.beginTransmission(0x44);
+    Wire.write(0x30); Wire.write(0xA2);            // 软复位 (省这一步实测读失败)
+    if (Wire.endTransmission() == 0) {
+        delay(5);
+        Wire.beginTransmission(0x44);
+        Wire.write(0x24); Wire.write(0x00);        // 单次测量, 低重复性, 无时钟拉伸
+        if (Wire.endTransmission() == 0) {
+            delay(25);
+            if (Wire.requestFrom(0x44, 6) == 6) {
+                uint8_t d[6];
+                for (uint8_t i = 0; i < 6; i++) d[i] = (uint8_t)Wire.read();
+                if (shtCrc8(d, 2) == d[2] && shtCrc8(d + 3, 2) == d[5]) {
+                    float t = -45.0f + 175.0f * (float)((uint16_t)((d[0] << 8) | d[1])) / 65535.0f;
+                    float rh = 100.0f * (float)((uint16_t)((d[3] << 8) | d[4])) / 65535.0f;
+                    *t10 = (int16_t)(t * 10.0f + (t >= 0 ? 0.5f : -0.5f));
+                    *h10 = (uint16_t)(rh * 10.0f + 0.5f);
+                    ok = true;
+                }
+            }
+        }
+    }
+    digitalWrite(BAT_SWITCH_PIN, LOW);             // 断电 (零静态功耗)
+    pinMode(BAT_SWITCH_PIN, INPUT);                // 防漏电
+    SPI.begin();
+    reinitSdBus("sht30");
+    return ok;
+}
+void sht30Tick() {
+    if (gIndoorLastMs && (millis() - gIndoorLastMs) < 300000UL) return;
+    gIndoorLastMs = millis();
+    int16_t t10 = 0;
+    uint16_t h10 = 0;
+    if (sht30Read(&t10, &h10)) {
+        gIndoorTemp10 = t10;
+        gIndoorHumi10 = h10;
+        if (!gIndoorValid) {
+            gIndoorValid = true;
+            char ui[24];
+            indoorTHText(ui, sizeof(ui));
+            traceFmt(PSTR("SHT30_OK t=%d.%dC h=%u.%u%% ui=%s"),
+                     gIndoorTemp10 / 10, abs(gIndoorTemp10 % 10),
+                     (unsigned)(gIndoorHumi10 / 10), (unsigned)(gIndoorHumi10 % 10), ui);
+        }
+    } else if (!gIndoorValid) {
+        traceFmt(PSTR("SHT30_ABSENT (无传感器/读取失败, 回落网络温湿度)"));
+    }
+}
+// 室内温湿度紧凑文本 "室28℃64%" (整数; 简洁时钟页底部那行宽度有限, 会从尾部截断, 故不带小数)
+// 无传感器返回 false (调用方回落网络值)
+static bool indoorTHText(char *out, size_t cap) {
+    if (!gIndoorValid) return false;
+    int ti = gIndoorTemp10 / 10;
+    int tf = abs(gIndoorTemp10 % 10);
+    // 四舍五入到整数度/整百分 (0.5 进位)
+    if (tf >= 5) ti += (gIndoorTemp10 < 0 ? -1 : 1);
+    snprintf(out, cap, PSTR("室%d℃%u%%"), ti, (unsigned)((gIndoorHumi10 + 5) / 10));
+    return true;
+}
+// 带一位小数的详细文本 "室内28.3℃64.3%" (留给主页等有空间的位置)
+static bool indoorTHTextPrecise(char *out, size_t cap) {
+    if (!gIndoorValid) return false;
+    snprintf(out, cap, PSTR("室内%d.%d℃%u.%u%%"), gIndoorTemp10 / 10, abs(gIndoorTemp10 % 10),
+             (unsigned)(gIndoorHumi10 / 10), (unsigned)(gIndoorHumi10 % 10));
+    return true;
+}
+
 // ===== 传感器普查钩子 (仅测试固件; 默认 0) =====
 // 背景 (2026-09-12 对照官方开源硬件 oshwhub jie326513988「V2.43-2.9寸SD墨水屏阅读器」):
 //   官方 V14 源码 Get_bat_vcc.ino::get_dht30_data() 读一颗 **SHT30 温湿度传感器**:
@@ -604,16 +701,9 @@ int readBatteryMV() {
 #ifndef SENSOR_SCAN
 #define SENSOR_SCAN 0
 #endif
+void renderClockPage(bool full);   // 前置声明 (冒烟渲染用; 正式声明在后面)
+
 #if SENSOR_SCAN
-// SHT3x CRC8: poly 0x31, init 0xFF
-static uint8_t shtCrc8(const uint8_t *d, uint8_t n) {
-    uint8_t crc = 0xFF;
-    for (uint8_t i = 0; i < n; i++) {
-        crc ^= d[i];
-        for (uint8_t b = 0; b < 8; b++) crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x31) : (uint8_t)(crc << 1);
-    }
-    return crc;
-}
 static void sensorScanProbe() {
     Serial.printf_P(PSTR("SENSOR_SCAN begin heap=%u\n"), (unsigned)ESP.getFreeHeap());
     SPI.end();                                     // 释放 GPIO13/14 (SD/EPD 初始化后被 SPI 占用)
@@ -691,6 +781,19 @@ static void sensorScanProbe() {
     pinMode(BAT_SWITCH_PIN, INPUT);                // 防漏电 (官方同款)
     SPI.begin();                                   // 收回 GPIO13/14 (Wire 无需 end, 时钟探测同款)
     reinitSdBus("sensor_scan");
+    // 冒烟: 时钟页"简洁/精美"两风格各渲染一次 (验证新接入的室内温湿度渲染路径不炸; 仅测试固件)
+    {
+        char ui[24];
+        Serial.printf_P(PSTR("SENSOR_SCAN ui=%s\n"), indoorTHText(ui, sizeof(ui)) ? ui : "(none)");
+        uint8_t mod0 = settingsGetClockMod();
+        settingsSetClockMod(0);
+        renderClockPage(true);
+        renderClockPage(false);
+        settingsSetClockMod(1);
+        renderClockPage(true);
+        settingsSetClockMod(mod0);
+        Serial.printf_P(PSTR("SENSOR_SCAN clock-render ok (简洁+精美, 已还原 clockMod=%u)\n"), (unsigned)mod0);
+    }
     Serial.printf_P(PSTR("SENSOR_SCAN done heap=%u\n"), (unsigned)ESP.getFreeHeap());
 }
 #endif
@@ -1958,9 +2061,11 @@ void renderClockPage(bool full) {
         // 底部 A 行: 左 校准 + 小温湿度 (紧凑), 右 日期
         snprintf(line, sizeof(line), PSTR("%04d年%02d月%02d日"), tmNow->tm_year + 1900, tmNow->tm_mon + 1, tmNow->tm_mday);
         char left[72];
-        char th[32];
+        char th[40];
         th[0] = '\0';
-        if (clockThText(th, sizeof(th))) snprintf(left, sizeof(left), PSTR("%s %s"), clockCalibText(), th);
+        // 温湿度优先用**板载 SHT30(室内)**; 无传感器才回落网络(城市)值 (行为与之前一致)
+        if (!indoorTHText(th, sizeof(th))) clockThText(th, sizeof(th));
+        if (th[0]) snprintf(left, sizeof(left), PSTR("%s %s"), clockCalibText(), th);
         else snprintf(left, sizeof(left), PSTR("%s"), clockCalibText());
         while (utf8Width(left) > 168 && strlen(left) > 1) utf8ChopOne(left);   // 不压右侧日期
         drawTextUTF8(4, 96, left, 168, true);
@@ -1988,22 +2093,35 @@ void renderClockPage(bool full) {
         snprintf(line, sizeof(line), PSTR("%02d:%02d"), dispH, tmNow->tm_min);
         drawClockTimeDigits(x, y, dw, dh, dt, gap, colonW, line);
         // 温湿度: 7 段小号数字大字感 (标签+温度+℃ / 标签+湿度+%), 顺序排布不重叠; 缺失则留空
-        if (wDataValid) {
-            const int mdw = 22, mdh = 24, mdt = 4, mgap = 4;
-            const int gy = 84;   // 温湿度区 84..108, 为下方副文本行让位
-            const char *tp = wActual.temp[0] ? wActual.temp : "--";
-            const char *hum = wActual.humidity[0] ? wActual.humidity
-                              : (wFuture.humidity[0] ? wFuture.humidity : "--");
-            int gx = 42;
-            drawTextUTF8(gx, gy + 6, PSTR("温"), 20, true);
-            gx += 16 + 8;
-            gx += drawMini7Seq(gx, gy, mdw, mdh, mdt, mgap, tp, true);
-            drawTextUTF8(gx + 4, gy + 6, PSTR("℃"), 20, true);
-            gx += 24 + 18;
-            drawTextUTF8(gx, gy + 6, PSTR("湿"), 20, true);
-            gx += 16 + 8;
-            gx += drawMini7Seq(gx, gy, mdw, mdh, mdt, mgap, hum, true);
-            drawTextUTF8(gx + 4, gy + 6, PSTR("%"), 20, true);
+        // 数据源优先**板载 SHT30(室内, 整数化显示)**; 无传感器回落网络(城市)值 (原行为)
+        {
+            char tpBuf[8] = "", humBuf[8] = "";
+            bool haveTH = false;
+            if (gIndoorValid) {
+                snprintf(tpBuf, sizeof(tpBuf), PSTR("%d"), (int)(gIndoorTemp10 / 10));
+                snprintf(humBuf, sizeof(humBuf), PSTR("%u"), (unsigned)(gIndoorHumi10 / 10));
+                haveTH = true;
+            } else if (wDataValid) {
+                snprintf(tpBuf, sizeof(tpBuf), PSTR("%s"), wActual.temp[0] ? wActual.temp : "--");
+                snprintf(humBuf, sizeof(humBuf), PSTR("%s"), wActual.humidity[0] ? wActual.humidity
+                                 : (wFuture.humidity[0] ? wFuture.humidity : "--"));
+                haveTH = true;
+            }
+            if (haveTH) {
+                const int mdw = 22, mdh = 24, mdt = 4, mgap = 4;
+                const int gy = 84;   // 温湿度区 84..108, 为下方副文本行让位
+                int gx = 42;
+                drawTextUTF8(gx, gy + 6, PSTR("温"), 20, true);
+                gx += 16 + 8;
+                gx += drawMini7Seq(gx, gy, mdw, mdh, mdt, mgap, tpBuf, true);
+                drawTextUTF8(gx + 4, gy + 6, PSTR("℃"), 20, true);
+                gx += 24 + 18;
+                drawTextUTF8(gx, gy + 6, PSTR("湿"), 20, true);
+                gx += 16 + 8;
+                gx += drawMini7Seq(gx, gy, mdw, mdh, mdt, mgap, humBuf, true);
+                drawTextUTF8(gx + 4, gy + 6, PSTR("%"), 20, true);
+                if (gIndoorValid) drawTextUTF8(4, gy + 6, PSTR("室"), 16, true);   // 标明是室内(板载传感器)
+            }
         }
         // 副文本行: 一言/自定义句(仅精美) 与 倒计时/B粉(两风格共用入口); 无分割线避免与温湿度区交错
         char sub[96];
@@ -6196,6 +6314,10 @@ void setup() {
     debugFmt(PSTR("BOOT partial-restore=%d mode=%d mv=%d"), gBootPartialRefresh ? 1 : 0,
              (int)bootRec.mode, lastBatteryMV);
 
+    // 室内温湿度: 首次读取放在重绘之前 (gIndoorLastMs=0 → 立即读), 这样开机首屏就带上数值;
+    // 之后由主 loop 的 sht30Tick() 每 5 分钟刷新。
+    sht30Tick();
+
     // ---------- 先重绘恢复界面 (内容页, 必要重绘; 不画白/黑画面) ----------
     // 阅读器重绘当前进度页, 其他界面重绘当前页面。
     // KEY3 已按 (优化④b): 直接一次全刷回首页, 跳过恢复渲染 —
@@ -6555,8 +6677,9 @@ void loop() {
 #endif
     uint32_t loopStarted = millis();
     clockManagerCompTick();   // 时钟手动补偿结算 (内部按分钟闸门, 芯片在场改写芯片秒)
-    progressTick();           // P6: 阅读进度节流落盘 (50 页 / 5 分钟)
+    progressTick();           // P6: 阅读进度节流落盘 (10 页 / 60 秒)
     statsTick();              // P6b: 阅读统计节流落盘 (50 页 / 5 分钟)
+    sht30Tick();              // 室内温湿度 (板载 SHT30): 5 分钟读一次, 传感器不读时断电零功耗
     // 每天 23:30 静默联网校准 (仅空闲界面且非构建/非配网; 官方: 开=失败停机休眠 / 关=不睡次日再试)
     if (!txtIndexBuilding && (appMode == APP_HOME || appMode == APP_CLOCK)) {
         int sc = clockManagerSilentCalTick();
