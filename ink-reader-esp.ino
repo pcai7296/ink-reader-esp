@@ -7260,6 +7260,7 @@ void loop() {
     uint32_t loopStarted = millis();
     clockManagerCompTick();   // 时钟手动补偿结算 (内部按分钟闸门, 芯片在场改写芯片秒)
     progressTick();           // P6: 阅读进度节流落盘 (10 页 / 60 秒)
+    espBindTick();            // 手机绑定(方案 D-1): 常驻轻量 UDP 监听(LUMIWHO/LUMIBIND/LUMIPING), 微秒级
     statsTick();              // P6b: 阅读统计节流落盘 (50 页 / 5 分钟)
     sht30Tick();              // 室内温湿度 (板载 SHT30): 5 分钟读一次, 传感器不读时断电零功耗
     // 每天 23:30 静默联网校准 (仅空闲界面且非构建/非配网; 官方: 开=失败停机休眠 / 关=不睡次日再试)

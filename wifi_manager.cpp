@@ -1,4 +1,5 @@
 #include "wifi_manager.h"
+#include "progress_sync.h"   // 方案 D-1/D-2: 手机绑定状态(syncBindGet/Set/Clear)
 #include "file_api.h"
 #include "file_api_fs.h"
 #include <LittleFS.h>
@@ -2419,10 +2420,19 @@ void handleTargetAny() {
 void handleTargetGet() {
   TargetConfig t;
   loadTargetConfig(t);
+  char bindIp[16] = "";
+  uint16_t bindPort = 8384;
+  bool bound = syncBindGet(bindIp, sizeof(bindIp), bindPort);   // 方案 D-1 的绑定状态（手机 LUMIBIND 写入）
   String json = F("{\"staIp\":\"");
   json += jsonEscape(t.staIp);
   json += F("\",\"apIp\":\"");
   json += jsonEscape(t.apIp);
+  json += F("\",\"bound\":");
+  json += bound ? "true" : "false";
+  json += F(",\"port\":");
+  json += String((unsigned)bindPort);
+  json += F(",\"lastOk\":\"");
+  json += jsonEscape(syncBindLastOk());
   json += F("\"}");
   server.send(200, "application/json; charset=utf-8", json);
 }
@@ -2434,6 +2444,17 @@ void handleTargetSave() {
   sta.trim();
   String ap = server.arg("apIp");
   ap.trim();
+  String portArg = server.arg("port");
+  portArg.trim();
+  bool doClear = server.hasArg("clear") && server.arg("clear") != "0";
+  if (doClear) {                                  // D-2: 清除绑定
+    syncBindClear();
+    Serial.println(F("TARGET_WEB_CLEAR"));
+    server.send_P(200, PSTR("text/html; charset=utf-8"), PSTR("<meta charset='utf-8'><p>绑定已清除。</p><a href='/'>返回</a>"));
+    webNotifyReset();
+    webNotifyAdd("连接对象=已清除 ");
+    return;
+  }
   if (!sta.isEmpty() && !validIpv4(sta)) {
     server.send_P(400, PSTR("text/plain; charset=utf-8"), PSTR("局域网 IP 无效"));
     return;
@@ -2448,7 +2469,11 @@ void handleTargetSave() {
     server.send_P(400, PSTR("text/plain; charset=utf-8"), PSTR("保存失败"));
     return;
   }
-  Serial.printf_P(PSTR("TARGET_WEB_SAVE sta=[%s] ap=[%s]\n"), t.staIp, t.apIp);
+  // D-2/D-1: 端口经 syncBindSet 落盘（/sync_bind.dat），与手机 LUMIBIND 同一份数据
+  uint16_t port = portArg.isEmpty() ? 8384 : (uint16_t)portArg.toInt();
+  if (port < 1 || port > 65535) port = 8384;
+  syncBindSet(sta.isEmpty() ? NULL : sta.c_str(), port);
+  Serial.printf_P(PSTR("TARGET_WEB_SAVE sta=[%s] ap=[%s] port=%u\n"), t.staIp, t.apIp, (unsigned)port);
   wifiManagerPushDeviceInfo();   // 保存后立即推送设备信息给选中 App (App 收到自动更新设备地址)
   server.send_P(200, PSTR("text/html; charset=utf-8"), PSTR("<meta charset='utf-8'><p>连接对象已保存。</p><a href='/'>返回</a>"));
   webNotifyReset();

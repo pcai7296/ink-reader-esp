@@ -106,6 +106,7 @@ static char gCfgIp[16];
 //   也不 new/delete）；会话结束走 `discoveryReset()`，下次会话重新绑一次。
 static WiFiUDP  gDiscUdp;
 static bool     gDiscBound = false;    // 本会话是否已绑定 8390
+static char     gOfferIp[16] = "";     // 手机刚通过 LUMIBIND 主动上报的 IP（当次同步立即采用）
 static bool     gDiscStarted = false;
 static uint32_t gDiscDeadline = 0;
 static uint32_t gDiscPollMs = 0;
@@ -122,6 +123,34 @@ static int      gFileFpState = FINGERPRINT_UNKNOWN;   // 最近一次 PARSE 三�
 static uint8_t  gFileMismatch = 0;                    // bit0=size bit1=head bit2=middle bit3=tail
 
 static uint16_t gTargetPort = 8384;  // 手机进度服务器端口 (默认 8384; /sync.cfg port= 可覆盖, 供联调/换端口)
+
+// ★ 目标解析顺序（用户 2026-09-12 批准的修正版，**全部"优先尝试、不锁死"**）：
+//   1) `/sync.cfg ip=`       手工（最高优先；失败继续往下，不被错误配置永久锁死）
+//   2) 绑定目标 TargetConfig.staIp（手机 LUMIBIND 写入 / 配网页手改；出厂默认不算已绑定）
+//   3) 上次成功 IP（sync_bind.dat 里的 last_ok，快速回退）
+//   4) 广播 + 逐 IP 单播扫描（最终恢复；成功后回写 2)/3)）
+static uint8_t gTargetStage = 0;      // 0=未开始 1=cfg 2=绑定 3=上次成功 4=扫描发现
+static bool nextTarget() {
+  for (;;) {
+    gTargetStage++;
+    if (gTargetStage == 1) {
+      if (gCfgIp[0]) { gTarget = String(gCfgIp); syncDbg(PSTR("TARGET[1] cfg ip=%s"), gTarget.c_str()); return true; }
+      continue;
+    }
+    if (gTargetStage == 2) {
+      char ip[16]; uint16_t p = 8384;
+      if (syncBindGet(ip, sizeof(ip), p)) { gTarget = String(ip); gTargetPort = p;
+        syncDbg(PSTR("TARGET[2] bound ip=%s port=%u"), gTarget.c_str(), (unsigned)gTargetPort); return true; }
+      continue;
+    }
+    if (gTargetStage == 3) {
+      const char *lo = syncBindLastOk();
+      if (lo && lo[0]) { gTarget = String(lo); syncDbg(PSTR("TARGET[3] last-ok ip=%s"), gTarget.c_str()); return true; }
+      continue;
+    }
+    return false;      // 4 = 交给扫描发现
+  }
+}
 
 // ---------- 手动 HTTP (单次 TCP 连接, Connection: close, 明文) ----------
 // 每个请求独立连接: GET 完成后断开 (服务器按 Connection: close 关闭),
@@ -177,7 +206,10 @@ static int syncConnectPhase() {
     return 1;
   }
   syncDbg(PSTR("CONNECT fail attempt=%d"), gConnectAttempt);
-  if (gConnectAttempt < 2) {
+  // 用户 2026-09-12 批准的"快速回退"：非最终候选（cfg/绑定/上次成功）只试 1 次就换下一个，
+  // 只有扫描发现的目标（stage=4，最可能正确）才重试 2 次；避免错误配置让同步白等 15s×N。
+  uint8_t maxRetry = (gTargetStage >= 4) ? 2 : 0;
+  if (gConnectAttempt < maxRetry) {
     gConnectAttempt++;
     gRetryAtMs = millis() + 2000UL;   // 2s 后重试
     return 0;
@@ -374,6 +406,14 @@ static bool discoveryPollAck(uint32_t windowMs) {
   char ack[64];
   uint32_t t0 = millis();
   while ((uint32_t)(millis() - t0) < windowMs) {
+    if (gOfferIp[0]) {                       // 手机 LUMIBIND 主动上报（可能在窗口内任意时刻到达）
+      gTarget = String(gOfferIp);
+      gOfferIp[0] = '\0';
+      gTargetStage = 4;
+      syncDbg(PSTR("DISCOVER 采用手机上报 ip=%s"), gTarget.c_str());
+      rememberPhoneIp(gTarget);
+      return true;
+    }
     if (discoveryPoll(ack, sizeof(ack)) > 0) {
       char* sp = strchr(ack, ' ');
       if (sp) {
@@ -386,6 +426,7 @@ static bool discoveryPollAck(uint32_t windowMs) {
         IPAddress tip;
         if (tip.fromString(ips)) {
           gTarget = String(ips);
+          gTargetStage = 4;                 // 4 = 扫描发现（成功后 bindMarkOk 会自动回写绑定/上次成功）
           syncDbg(PSTR("DISCOVER ok ip=%s"), gTarget.c_str());
           rememberPhoneIp(gTarget);
           return true;
@@ -398,9 +439,164 @@ static bool discoveryPollAck(uint32_t windowMs) {
   return false;
 }
 
+// ==================== 手机绑定 (方案 D-1, 用户 2026-09-12 批准) ====================
+// 常驻轻量 UDP 监听（与发现**共用同一个 socket**，避免 8390 端口冲突），只处理三种消息：
+//   LUMIWHO                     → 回 "LUMIHERE <设备IP>"     手机扫网发现设备
+//   LUMIBIND [ip=x] [port=n]    → 以**数据包来源 IP 为准**保存, 回 "LUMIOK <ip>:<port>"
+//   LUMIPING                    → 回 "LUMIPONG"              在线测试
+// 约束（用户批准的实现边界）：只校验 + 回复 + 置"待落盘"标记；
+// **不做** 文件/SD/扫描/进度同步/大块 JSON/阻塞等待/刷屏。落盘延后到下一圈主循环。
+#define BIND_FILE "/sync_bind.dat"
+static const char *SYNC_BIND_FILE = BIND_FILE;
+static bool     gBindLoaded = false;
+static char     gBindIp[16] = "";        // 绑定目标 IP（权威副本；同步写入 TargetConfig.staIp）
+static uint16_t gBindPort = 8384;
+static char     gBindLastOk[16] = "";    // 上次成功 IP
+static bool     gBindPendingSave = false;   // 待落盘（主循环下一圈执行，监听器本身零 I/O）
+
+static bool bindIsDefaultIp(const char *ip) {      // 出厂默认不算"已绑定"
+  return ip == NULL || ip[0] == '\0' || strcmp(ip, "192.168.0.10") == 0;
+}
+
+static void bindLoad() {
+  if (gBindLoaded) return;
+  gBindLoaded = true;
+  File f = LittleFS.open(SYNC_BIND_FILE, "r");
+  if (f) {
+    while (f.available()) {
+      String line = f.readStringUntil('\n');
+      line.trim();
+      int eq = line.indexOf('=');
+      if (eq <= 0) continue;
+      String k = line.substring(0, eq), v = line.substring(eq + 1);
+      if (k == "port") { long p = v.toInt(); if (p >= 1 && p <= 65535) gBindPort = (uint16_t)p; }
+      else if (k == "last_ok") snprintf(gBindLastOk, sizeof(gBindLastOk), PSTR("%s"), v.c_str());
+    }
+    f.close();
+  }
+  // 绑定 IP 的权威来源 = TargetConfig.staIp（配网页可看/可改）
+  TargetConfig t;
+  if (loadTargetConfig(t) && !bindIsDefaultIp(t.staIp))
+    snprintf(gBindIp, sizeof(gBindIp), PSTR("%s"), t.staIp);
+  syncDbg(PSTR("BIND load ip=[%s] port=%u lastOk=[%s]"),
+          gBindIp[0] ? gBindIp : "(未绑定)", (unsigned)gBindPort, gBindLastOk[0] ? gBindLastOk : "-");
+}
+
+static void bindSaveFile() {
+  File f = LittleFS.open(SYNC_BIND_FILE, "w");
+  if (!f) { syncDbg(PSTR("BIND save fail")); return; }
+  f.printf("port=%u\nlast_ok=%s\n", (unsigned)gBindPort, gBindLastOk);
+  f.close();
+  syncDbg(PSTR("BIND saved port=%u lastOk=[%s]"), (unsigned)gBindPort, gBindLastOk);
+}
+
+bool syncBindSet(const char *ip, uint16_t port) {
+  bindLoad();
+  if (ip == NULL || ip[0] == '\0') return false;
+  IPAddress chk;
+  if (!chk.fromString(ip)) return false;
+  snprintf(gBindIp, sizeof(gBindIp), PSTR("%s"), ip);
+  if (port >= 1) gBindPort = port;
+  TargetConfig t;
+  if (loadTargetConfig(t)) {                    // 只改目标 IP，其余字段原样保留（绝不碰 Wi-Fi 配置）
+    snprintf(t.staIp, sizeof(t.staIp), PSTR("%s"), gBindIp);
+    saveTargetConfig(t);
+  }
+  gBindPendingSave = true;
+  syncDbg(PSTR("BIND set ip=%s port=%u"), gBindIp, (unsigned)gBindPort);
+  return true;
+}
+
+bool syncBindClear() {
+  bindLoad();
+  gBindIp[0] = '\0';
+  gBindLastOk[0] = '\0';
+  TargetConfig t;
+  if (loadTargetConfig(t)) {
+    snprintf(t.staIp, sizeof(t.staIp), PSTR("192.168.0.10"));   // 回出厂默认语义
+    saveTargetConfig(t);
+  }
+  gBindPendingSave = true;
+  syncDbg(PSTR("BIND cleared"));
+  return true;
+}
+
+bool syncBindGet(char *ipOut, size_t cap, uint16_t &portOut) {
+  bindLoad();
+  if (ipOut && cap) snprintf(ipOut, cap, PSTR("%s"), gBindIp);
+  portOut = gBindPort;
+  return gBindIp[0] != '\0';
+}
+
+const char *syncBindLastOk() { bindLoad(); return gBindLastOk; }
+
+// 成功连上手机后调用：记 last_ok；若本次是"扫描发现"得到的，则顺带更新绑定（自动绑定/自动失效恢复）
+static void bindMarkOk(const String &ip, bool fromDiscovery) {
+  bindLoad();
+  if (ip.length() == 0) return;
+  bool changed = strcmp(gBindLastOk, ip.c_str()) != 0;
+  snprintf(gBindLastOk, sizeof(gBindLastOk), PSTR("%s"), ip.c_str());
+  if (fromDiscovery && strcmp(gBindIp, ip.c_str()) != 0) {
+    syncBindSet(ip.c_str(), gBindPort);
+    changed = true;
+  }
+  if (changed) gBindPendingSave = true;
+}
+
+// 常驻监听（主 loop 每圈调用；同步会话进行中不抢 socket，由发现逻辑自己轮询）
+void espBindTick() {
+  if (progressSyncActive()) return;          // 同步中：socket 归发现流程使用
+  if (gBindPendingSave) { gBindPendingSave = false; bindSaveFile(); }
+  if (!discoveryBegin()) return;             // 复用同一个 8390 socket（一次绑定，常驻）
+  for (int guard = 0; guard < 4; guard++) {  // 每圈最多处理 4 包，避免被刷爆主循环
+    int sz = gDiscUdp.parsePacket();
+    if (sz <= 0) break;
+    char buf[64];
+    int n = (sz > (int)sizeof(buf) - 1) ? (int)sizeof(buf) - 1 : sz;
+    int r = gDiscUdp.read((char *)buf, n);
+    if (r < 0) r = 0;
+    buf[r] = '\0';
+    IPAddress srcIp = gDiscUdp.remoteIP();
+    uint16_t srcPort = gDiscUdp.remotePort();
+    if (strcmp(buf, "LUMIWHO") == 0) {
+      IPAddress self = WiFi.localIP();
+      if (self.isSet() && self != IPAddress(0, 0, 0, 0)) {   // WiFi 已关时别回空 IP（否则手机误判）
+        char reply[48];
+        snprintf(reply, sizeof(reply), PSTR("LUMIHERE %s"), self.toString().c_str());
+        gDiscUdp.beginPacket(srcIp, srcPort);
+        gDiscUdp.write((const uint8_t *)reply, strlen(reply));
+        gDiscUdp.endPacket();
+        syncDbg(PSTR("BIND LUMIWHO from %s -> %s"), srcIp.toString().c_str(), reply);
+      } else {
+        syncDbg(PSTR("BIND LUMIWHO from %s -> 跳过(WiFi 已关)"), srcIp.toString().c_str());
+      }
+    } else if (strncmp(buf, "LUMIBIND", 8) == 0) {
+      // ★ 以数据包来源 IP 为准（payload 里的 ip= 仅作参考/显示，不采信任意地址）
+      char realIp[16];
+      snprintf(realIp, sizeof(realIp), PSTR("%u.%u.%u.%u"),
+               (unsigned)srcIp[0], (unsigned)srcIp[1], (unsigned)srcIp[2], (unsigned)srcIp[3]);
+      uint16_t port = 8384;
+      const char *pp = strstr(buf, "port=");
+      if (pp) { long v = atol(pp + 5); if (v >= 1 && v <= 65535) port = (uint16_t)v; }
+      syncBindSet(realIp, port);
+      char reply[48];
+      snprintf(reply, sizeof(reply), PSTR("LUMIOK %s:%u"), realIp, (unsigned)port);
+      gDiscUdp.beginPacket(srcIp, srcPort);
+      gDiscUdp.write((const uint8_t *)reply, strlen(reply));
+      gDiscUdp.endPacket();
+    } else if (strcmp(buf, "LUMIPING") == 0) {
+      const char *pong = "LUMIPONG";
+      gDiscUdp.beginPacket(srcIp, srcPort);
+      gDiscUdp.write((const uint8_t *)pong, strlen(pong));
+      gDiscUdp.endPacket();
+    } else {
+      syncDbg(PSTR("BIND ignore pkt from %s [%s]"), srcIp.toString().c_str(), buf);
+    }
+  }
+}
+
 static void discoverySendPings() {
-  // 仅 STA(局域网/手机热点)模式进入本状态: 目标地址用 STA 子网广播; 热点模式走 SYNC_WAIT_CLIENT
-  // (热点固定给手机分配 192.168.0.100 且客户端上限 1, 见 wifi_managerStartApOnly) —— 不需要发现。
+  // 仅 STA(局域网/手机热点)模式进入本状态: 目标地址用 STA 子网广播; 热点模式走 SYNC_WAIT_CLIENT  // (热点固定给手机分配 192.168.0.100 且客户端上限 1, 见 wifi_managerStartApOnly) —— 不需要发现。
   if (!discoveryBegin()) return;
   IPAddress staIp = WiFi.localIP();
   int sent = 0;
@@ -442,6 +638,30 @@ static int discoveryPoll(char* out, size_t cap) {
   int n = gDiscUdp.read((char*)out, sz);
   if (n < 0) n = 0;
   out[n] = '\0';
+  // 同步过程中手机也能绑定/发现（方案 D-1：同一个 socket 顺手处理，不额外开销）
+  if (n >= 8 && memcmp(out, "LUMIBIND", 8) == 0) {
+    IPAddress src = gDiscUdp.remoteIP();
+    char realIp[16];
+    snprintf(realIp, sizeof(realIp), PSTR("%u.%u.%u.%u"),
+             (unsigned)src[0], (unsigned)src[1], (unsigned)src[2], (unsigned)src[3]);
+    uint16_t port = 8384;
+    const char* pp = strstr(out, "port=");
+    if (pp) { long v = atol(pp + 5); if (v >= 1 && v <= 65535) port = (uint16_t)v; }
+    syncBindSet(realIp, port);
+    snprintf(gOfferIp, sizeof(gOfferIp), PSTR("%s"), realIp);   // 当次同步立即采用（不必等下一轮）
+    return 0;                                  // 不是 ACK，继续轮询
+  }
+  if (n >= 7 && memcmp(out, "LUMIWHO", 7) == 0) {
+    IPAddress self = WiFi.localIP();
+    if (self.isSet() && self != IPAddress(0, 0, 0, 0)) {
+      char reply[48];
+      snprintf(reply, sizeof(reply), PSTR("LUMIHERE %s"), self.toString().c_str());
+      gDiscUdp.beginPacket(gDiscUdp.remoteIP(), gDiscUdp.remotePort());
+      gDiscUdp.write((const uint8_t*)reply, strlen(reply));
+      gDiscUdp.endPacket();
+    }
+    return 0;
+  }
   if (n < 8 || memcmp(out, "LUMIACK ", 8) != 0) {
     syncDbg(PSTR("DISCOVER rx-nonack len=%d [%s]"), n, out);
     return 0;
@@ -580,7 +800,10 @@ void progressSyncLoop() {
         syncDbg(PSTR("WIFI sta-up ip=%s"), WiFi.localIP().toString().c_str());
         syncWifiNoSleep();
         gConnectAttempt = 0; gRetryAtMs = 0;
-        if (gCfgIp[0]) { gTarget = String(gCfgIp); setState(SYNC_CONNECT); break; }
+        gTargetStage = 0;
+        if (nextTarget()) { gConnectAttempt = 0; gRetryAtMs = 0; setState(SYNC_CONNECT); }
+        else setState(SYNC_DISCOVER);
+        break;
         setState(SYNC_DISCOVER);
         break;
       }
@@ -619,7 +842,10 @@ void progressSyncLoop() {
         gConnectAttempt = 0; gRetryAtMs = 0;
         syncDbg(PSTR("WIFI sta-up stage=%d ip=%s"), gStaStage, WiFi.localIP().toString().c_str());
         syncWifiNoSleep();
-        if (gCfgIp[0]) { gTarget = String(gCfgIp); setState(SYNC_CONNECT); break; }
+        gTargetStage = 0;
+        if (nextTarget()) { gConnectAttempt = 0; gRetryAtMs = 0; setState(SYNC_CONNECT); }
+        else setState(SYNC_DISCOVER);
+        break;
         setState(SYNC_DISCOVER);
         break;
       }
@@ -669,11 +895,10 @@ void progressSyncLoop() {
         gStatus = F("正在连接手机…");
         setState(SYNC_CONNECT);
       } else {
-        syncDbg(PSTR("DISCOVER timeout -> fallback"));
-        gTarget = String(wifiManagerSyncTarget());
-        if (gTarget.length() == 0) { gStatus = F("未配置手机地址"); setState(SYNC_ERROR); break; }
-        gStatus = F("正在连接手机…");
-        setState(SYNC_CONNECT);
+        // 候选 1)~3) 与扫描都失败了 → 直接报错（不再回退到某个旧目标，避免"配置看似成功其实打不通"）
+        syncDbg(PSTR("DISCOVER timeout -> 候选已试完"));
+        gStatus = F("没找到手机");
+        setState(SYNC_ERROR);
       }
       break;
     }
@@ -701,7 +926,14 @@ void progressSyncLoop() {
     case SYNC_CONNECT: {
       int r = syncConnectPhase();
       if (r == 0) break;                 // 等重试间隔 (保持本状态, 下一轮再试)
-      if (r < 0) { syncDisconnect(); gStatus = F("无法连接手机"); setState(SYNC_ERROR); break; }
+      if (r < 0) {
+        syncDisconnect();
+        // 用户批准的修正：目标"优先尝试、不锁死" —— 先试下一个候选，全试完才报错
+        if (nextTarget()) { gConnectAttempt = 0; gRetryAtMs = 0; gStatus = F("正在连接手机…"); break; }
+        // 候选 1)~3) 全失败 → 最终恢复：广播 + 逐 IP 单播扫描（本会话只做一次，防死循环）
+        if (!gDiscStarted) { gStatus = F("正在发现手机…"); setState(SYNC_DISCOVER); break; }
+        gStatus = F("无法连接手机"); setState(SYNC_ERROR); break;
+      }
       gStatus = F("已连接，获取进度中…");
       setState(SYNC_GET);
       break;
@@ -754,6 +986,7 @@ void progressSyncLoop() {
       free(body);
       if (!parsed) { syncDisconnect(); gStatus = F("手机进度无效"); setState(SYNC_ERROR); break; }
       if (cp.offset > gLocalSize) { syncDisconnect(); gStatus = F("手机进度无效"); setState(SYNC_ERROR); break; }
+      bindMarkOk(gTarget, gTargetStage >= 3);   // 记住成功目标（stage>=3 = 由 last_ok/扫描找到 → 同步更新绑定，实现"换 IP 自动恢复"）
       gCloudExists = true;
       gRemoteOffset = cp.offset;
       gRemoteSize = cp.size;
@@ -814,7 +1047,14 @@ void progressSyncLoop() {
         gStatus = F("正在连接手机…");
         int r = syncConnectPhase();
         if (r == 0) break;
-        if (r < 0) { syncDisconnect(); gStatus = F("无法连接手机"); setState(SYNC_ERROR); break; }
+        if (r < 0) {
+        syncDisconnect();
+        // 用户批准的修正：目标"优先尝试、不锁死" —— 先试下一个候选，全试完才报错
+        if (nextTarget()) { gConnectAttempt = 0; gRetryAtMs = 0; gStatus = F("正在连接手机…"); break; }
+        // 候选 1)~3) 全失败 → 最终恢复：广播 + 逐 IP 单播扫描（本会话只做一次，防死循环）
+        if (!gDiscStarted) { gStatus = F("正在发现手机…"); setState(SYNC_DISCOVER); break; }
+        gStatus = F("无法连接手机"); setState(SYNC_ERROR); break;
+      }
       }
       gStatus = F("正在推送进度…");
       char lumi[320];

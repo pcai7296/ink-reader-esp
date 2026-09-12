@@ -44,6 +44,15 @@ bool     progressSyncConfirmUploadPending();  // 覆盖是否已进入二次确�
 int      progressSyncFileFingerprintState();
 uint8_t  progressSyncFileMismatch();
 
+// ---- 手机绑定 (方案 D-1: 常驻轻量 UDP 监听 + 绑定/上次成功 IP 记忆) ----
+// 用户 2026-09-12 批准：常驻监听**只**处理 LUMIWHO / LUMIBIND / LUMIPING，
+// 非阻塞、不做文件/SD/扫描/同步/刷屏；绑定写入延后到主循环执行。
+void espBindTick();                                  // 主 loop 每圈调用 (极轻量, 微秒级)
+bool syncBindSet(const char *ip, uint16_t port);     // 写绑定目标 (手机 LUMIBIND / 配网页)
+bool syncBindClear();                                // 清除绑定 (配网页)
+bool syncBindGet(char *ipOut, size_t cap, uint16_t &portOut);   // 读绑定目标 ("" = 未绑定)
+const char *syncBindLastOk();                        // 上次成功 IP ("" = 无)
+
 // ---- 纯工具（LUMI1，实现见 progress_lumi.h/cpp，PC 可测）----
 
 // ---- 宿主钩子 (ink-reader-esp.ino 实现) ----
