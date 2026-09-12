@@ -324,3 +324,26 @@ python esp_dev.py --dry-run --boot-ap      # 打印命令不执行
   - 删除打开的文件会失败 → 先关句柄
 - 性能基线(S4.5): SD 读写 ~1MB/s, 网络 ~0.2MB/s(P0 达标); 传输缓冲 4KB 动态
 - web_test(J:\code\esp8266\web_test 独立仓库) 是 PC 测试台(STA 连局域网 + /api + /bench)
+
+- **📡 进度同步"发现得到手机、却连不上"的根因与修法（2026-09-12 整轮实机定位，两侧都改）**：
+  **症状链**：① 阅读界面 P5 断言无条件 `RF_OFF("reader_assert")` 把刚建立的 WiFi 掐断（日志实证
+  `WIFI try-sta ok=1` 紧跟 `RF_OFF reason=reader_assert`）→ 修：同步会话期间放行 RF；② 手机 HTTP 服务
+  原先绑 **"当时的局域网 IP"**（`NetworkUtils.getLanServerIp`），手机换 IP 后 8384 停在旧地址（`/proc/net/tcp`
+  查无 20C0、UDP 8390 仍活 → "发现能答、HTTP 不通"极具误导）→ 修：绑 `0.0.0.0`；③ **UDP 发现收包**：
+  手机日志证明"收到 LUMIDISC 且回 3 次 LUMIACK"但设备恒 `DISCOVER timeout` → 用 `-DUDP_DISC_TEST=1` 钩子
+  （新建 WiFiUDP、12s 内打印每个包）隔离：**新建对象 50/50 包全收**（含手机 `LUMIACK 192.168.0.18`）⇒
+  **根因 = 复用同一个 `WiFiUDP` 对象**：`stop()` 后再 `begin()` 能发不能收（lwip 收包回调未重挂）。
+  修：`progress_sync.cpp` 改 `static WiFiUDP *gDiscUdp`，每次发现 `discoveryBegin()` 新建、`discoveryStop()` 释放。
+  修后实录：`DISCOVER localPort=8390` → `DISCOVER ok ip=192.168.0.18` → `CONNECT ok` → `GET code=404`。
+  **手机端（J:\code\Android\legado，独立仓库）**：用户拍板"**只按 txt 文件名/路径精确锁定**" ⇒
+  `EspBookMatch` 删掉全部"归一化/包含/按 size 择近"猜测逻辑，只做 `originName` 精确 + `bookUrl` 指向的 txt 存在校验；
+  GET/PUT 先核实书架：不在架上回 `404 no-book`（ESP 显示 **"手机上没有这本书"**），在架上但手机侧没进度回
+  `404 no-progress`；**GET 不再用 `deviceSnapshot`（设备推回的历史进度）兜底** —— 这是"删旧书→导同名新书后被旧进度
+  覆写"的真根因；服务启动时 `clearStaleDeviceEntries()` 清理书架上已删书的残留快照；UDP socket 提为类字段 +
+  `reuseAddress` + 失败重试（原进程被杀后 `EADDRINUSE` → 发现失效）。
+  **构建/联调备忘**：① 该项目 `assembleDebug` 在本机会因**跨盘 KSP 增量**失败（缓存 C: / 项目 J:），
+  用 `-Pksp.incremental=false` 可绕过（同 app/build.gradle 里 glide-svg 处理器被删是同类坑）；
+  ② 手机无线调试老自动关：`wifi_sleep_policy=2`（仅插电不睡）+ 不插电熄屏 → WiFi 休眠 → Android 11+ 随之
+  关无线调试（IP 也会变）；已 `settings put global wifi_sleep_policy 0`，并用 `adb tcpip 5555` 改成**固定端口**
+  （`adb connect <ip>:5555`，重启手机前有效，不再受"无线调试"开关影响）；③ 授权：`adb pair <ip>:<配对端口> <配对码>`
+  一次即可。
