@@ -8,8 +8,9 @@
 enum SyncState {
   SYNC_IDLE = 0,
   SYNC_PREPARE,     // 快照本地进度
-  SYNC_WIFI,        // STA 已连→局域网直用；未连→wifiManagerStartApOnly() 纯 AP
-  SYNC_DISCOVER,    // STA 模式 UDP 发现手机 (LUMIDISC/LUMIACK, ≤2s, 失败回退 TargetConfig)
+  SYNC_WIFI,        // STA 两阶段尝试: ① /sync.cfg 凭据 ② EEPROM 配网凭据 (各 20s)
+  SYNC_STA_FAILED,  // 两种网络都没连上 → 停在提示页**等用户决定**(右长=开热点, 短按/中长=退出)
+  SYNC_DISCOVER,    // UDP 发现手机 (LUMIDISC/LUMIACK, ≤2s; STA 与热点模式都用)
   SYNC_WAIT_CLIENT, // 热点模式：500ms 轮询 softAP station，15s 超时
   SYNC_CONNECT,     // TCP 连接手机:8384（5s 超时，失败重试 2 次间隔 2s）
   SYNC_GET,         // GET /progress?file=<RFC3986> 拉取手机进度

@@ -77,7 +77,8 @@ static bool       gCloudExists = false;
 static int        gCompareSel = 0;        // 0=同步 1=覆盖
 static bool       gConfirmUpload = false; // 覆盖二次确认 (防误触: 右长一次=提示, 两次=执行)
 static bool       gErrWifiStopped = false;// ERROR 进入后已停 Wi-Fi (省电)
-static bool       gStaAttempted = false; // SYNC_WIFI 是否已发起过 STA 连接尝试 (限时 20s 后切热点)
+static bool       gStaAttempted = false; // SYNC_WIFI 是否已发起过 STA 连接尝试
+static uint8_t    gStaStage = 0;         // STA 阶段: 0=未开始 1=/sync.cfg 凭据 2=EEPROM 配网凭据
 static uint32_t   gDeadline = 0;          // WAIT_CLIENT 15s 超时截止
 static uint32_t   gLastPollMs = 0;        // WAIT_CLIENT 500ms 轮询
 // P3 内存审计: 响应 body 缓冲原常驻 BSS(256B) → SYNC_GET 内 malloc、PARSE 消费完即 free
@@ -318,6 +319,8 @@ static void loadSyncCfg() {
 // ---------- UDP 发现辅助 ----------
 // 广播顺序: 先子网定向广播, 再 255.255.255.255 (部分热点/路由器对两类广播处理不同)
 static void discoverySendPings() {
+  // 仅 STA(局域网/手机热点)模式进入本状态: 目标地址用 STA 子网广播; 热点模式走 SYNC_WAIT_CLIENT
+  // (热点固定给手机分配 192.168.0.100 且客户端上限 1, 见 wifi_managerStartApOnly) —— 不需要发现。
   if (!gDiscUdp.begin(DISC_PORT)) return;
   IPAddress staIp = WiFi.localIP();
   if (staIp.isSet() && staIp != IPAddress(0, 0, 0, 0)) {
@@ -455,43 +458,56 @@ void progressSyncLoop() {
         setState(SYNC_DISCOVER);
         break;
       }
-      // 未连 STA：优先 /sync.cfg 凭据直连, 否则 EEPROM 配网页凭据 (均限时 20s, 失败切热点)
+      // 未连 STA：**两阶段**尝试 —— ① /sync.cfg 凭据 ② EEPROM 配网页凭据（各 20s）。
+      // 用户 2026-09-12："进度同步不应该先尝试连接 WiFi 而不是开热点" → 两条都试过仍失败，
+      // 才进 SYNC_STA_FAILED 停在提示页**等你按键决定**是否开热点（不再静默切热点）。
       if (!gStaAttempted) {
         gStaAttempted = true;
+        gStaStage = 1;
         gStatus = F("正在连接 Wi-Fi...");
         if (gCfgSsid[0]) {
           WiFi.persistent(false);        // 不把 /sync.cfg 凭据写进 flash 配网区
           WiFi.mode(WIFI_STA);
           WiFi.begin(gCfgSsid, gCfgPass);
-          syncDbg(PSTR("WIFI try-sta via /sync.cfg ssid=[%s]"), gCfgSsid);
+          syncDbg(PSTR("WIFI try-sta[1] via /sync.cfg ssid=[%s]"), gCfgSsid);
         } else {
-          wifiManagerStartSta();
+          bool ok = wifiManagerStartSta();
+          syncDbg(PSTR("WIFI try-sta[1] via EEPROM ok=%d"), ok ? 1 : 0);
         }
         gDeadline = millis() + 20000UL;
-        syncDbg(PSTR("WIFI try-sta start"));
         break;
       }
       if (wifiManagerIsStaUp()) {
         gStaAttempted = false;
+        gStaStage = 0;
         gConnectAttempt = 0; gRetryAtMs = 0;
+        syncDbg(PSTR("WIFI sta-up stage=%d ip=%s"), gStaStage, WiFi.localIP().toString().c_str());
         if (gCfgIp[0]) { gTarget = String(gCfgIp); setState(SYNC_CONNECT); break; }
         setState(SYNC_DISCOVER);
         break;
       }
       if ((int32_t)(millis() - gDeadline) >= 0) {
-        // 热点模式: 纯 AP (STA 断开, 规避 AP/STA 同子网路由歧义), 等手机连上热点
-        gStaAttempted = false;
-        syncDbg(PSTR("WIFI sta-timeout -> AP-only"));
-        if (!wifiManagerStartApOnly()) {
-          gStatus = F("热点启动失败"); setState(SYNC_ERROR); break;
+        if (gStaStage == 1 && gCfgSsid[0]) {
+          // ① /sync.cfg 失败 → ② 再试"你配网页里配好的网络"（而不是直接开热点）
+          gStaStage = 2;
+          bool ok = wifiManagerStartSta();
+          syncDbg(PSTR("WIFI try-sta[1] FAIL -> try-sta[2] EEPROM ok=%d"), ok ? 1 : 0);
+          gStatus = F("正在连接 Wi-Fi (2/2)...");
+          gDeadline = millis() + 20000UL;
+          break;
         }
-        gDeadline = millis() + 15000UL;   // 等手机接入超时 15s
-        gLastPollMs = 0;
-        gStatus = F("热点已开，等待手机连接…");
-        setState(SYNC_WAIT_CLIENT);
+        // 两种都没连上 → 交给你决定（右长开热点）
+        gStaAttempted = false;
+        gStaStage = 0;
+        syncDbg(PSTR("WIFI sta-fail -> 等用户决定(右长=开热点)"));
+        gStatus = F("未连上 Wi-Fi");
+        setState(SYNC_STA_FAILED);
         break;
       }
       break;
+    }
+    case SYNC_STA_FAILED: {
+      break;   // 等按键: 见 progressSyncHandleKeys (右长=开热点, 短按/中长=退出)
     }
     case SYNC_DISCOVER: {
       // STA 模式手机发现: 广播 LUMIDISC → 收第一个合法 "LUMIACK <ip>" (≤2s), 失败回退
@@ -704,6 +720,21 @@ void progressSyncLoop() {
 
 void progressSyncHandleKeys(int middleEvent, int rightEvent) {
   if (gState == SYNC_IDLE) return;
+  if (gState == SYNC_STA_FAILED) {
+    // STA 两阶段都失败 → **不再自动开热点**, 交给用户: 右长=开热点等手机接, 短按/中长=退出
+    if (rightEvent == 2) {
+      syncDbg(PSTR("STA_FAILED -> user start AP-only"));
+      if (!wifiManagerStartApOnly()) { gStatus = F("热点启动失败"); setState(SYNC_ERROR); return; }
+      gDeadline = millis() + 15000UL;   // 等手机接入超时 15s (热点固定给手机 192.168.0.100)
+      gLastPollMs = 0;
+      gStatus = F("热点已开，等待手机连接…");
+      setState(SYNC_WAIT_CLIENT);
+      progressSyncRender((int)gState);
+    } else if (middleEvent == 2 || middleEvent == 1 || rightEvent == 1) {
+      progressSyncCancel();
+    }
+    return;
+  }
   if (gState == SYNC_ERROR) {
     // 错误页: 中长/右长 返回
     if (middleEvent == 2 || rightEvent == 2) progressSyncCancel();

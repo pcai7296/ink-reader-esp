@@ -5120,6 +5120,12 @@ void progressSyncRender(int state) {
         drawTextUTF8(MX + 4, by - 16,
                      progressSyncConfirmUploadPending() ? "再按右长确认推送到手机" : "中短/右短 移动  中长取消 右长确认",
                      MW - 8, progressSyncConfirmUploadPending());
+    } else if (state == SYNC_STA_FAILED) {
+        // 两种网络都没连上 → 由用户决定是否开热点 (用户 2026-09-12: 不要自动开热点)
+        drawTextUTF8(MX + 4, y, PSTR("未连上 Wi-Fi"), MW - 8, true); y += 20;
+        drawTextUTF8(MX + 4, y, PSTR("请到配网页确认网络"), MW - 8, false); y += 16;
+        drawTextUTF8(MX + 4, y, PSTR("或长按开热点"), MW - 8, false);
+        drawTextUTF8(MX + 4, MY + MH - 26, PSTR("长按=开热点  短按=退出"), MW - 8, true);
     } else if (state == SYNC_ERROR) {
         drawTextUTF8(MX + 4, y, progressSyncStatusText(), MW - 8, true);
         drawTextUTF8(MX + 4, MY + MH - 26, PSTR("中长/右长 返回"), MW - 8, false);
