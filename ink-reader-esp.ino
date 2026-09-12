@@ -5015,33 +5015,55 @@ static void abortIndexBuild() {
     if (readerFs().exists(sidecarPath.c_str())) readerFs().remove(sidecarPath.c_str());
 }
 
-void closeTxtReader() {
-    chapterFreeBuffers();   // P1: 离开章节目录, 4.5KB 章节缓冲归还堆
+// 阅读会话收尾 (不渲染): 章节缓冲归还堆 + 待写进度落盘 + 关句柄 + 统计收尾。
+// ⚠️ 凡是"离开阅读族界面"的路径都必须走这里——组合键回首页原先只对 APP_READER 收尾,
+//    从章节目录/历史标记回首页会漏掉 4.5KB 章节缓冲(不归还堆)、txtFile/索引句柄常驻、
+//    进度不落盘、统计会话不收口 (全库审查 #1)。
+// appMode / 渲染 / 睡眠快照由调用方决定 (closeTxtReader 回文件管理器, 组合键回首页)。
+// 返回 true = 索引构建仍在后台继续 (句柄保留, loop 公共步进继续喂)。
+static bool endReaderSessionNoRender() {
+    chapterFreeBuffers();          // P1: 离开章节目录, 4.5KB 章节缓冲归还堆
     progressFlushForce("close");   // P6: 退出阅读落盘待写进度
+    // 进度同步弹窗/状态机仍在跑: 必须显式取消, 否则 WiFi 常开(续航)且状态机再无人喂
+    // (progressSyncLoop 只在 APP_READER 分支被调用) → readerSyncOpen 永久 true。
+    // progressSyncCancel 内部会重渲一次阅读页, 随后被调用方的 renderHome/renderAll 全刷覆盖。
+    if (readerSyncOpen || progressSyncActive()) progressSyncCancel();
+    // 会话级 UI 弹窗标记: 不清会在下次进书时残留 → 首个按键被当菜单/弹窗键处理(菜单未绘制)。
+    readerMenuOpen = false;
+    readerJumpOpen = false;
+    readerRotSelOpen = false;
+    readerSyncOpen = false;
+    readerMarkMenuOpen = false;
+    chapterSpeedPopup = false;
+    markActionOpen = false;
+    bool keepBuilding = txtIndexBuilding;
     if (txtIndexBuilding) {
         // 构建中退出: 保留构建句柄后台继续 (loop 公共 indexTaskStep 继续喂),
         // 只关 txtFile; finishTxtIndexBuild 用扫描句柄取 size, 不受影响。
         if (txtFile) txtFile.close();
-        statsOnSessionEnd();   // 阅读统计: 会话结束
-        appMode = APP_BROWSER;
-        listDir(currentPath.c_str());
-        renderAll();
-        refresh(true);
-        saveSleepRecord();
-        debugLine(PSTR("CLOSE keep index building in background"));
-        return;
+    } else {
+        if (txtIndexScanFile) txtIndexScanFile.close();
+        if (txtIndexBuildFile) txtIndexBuildFile.close();
+        if (txtChapterBuildFile) txtChapterBuildFile.close();
+        if (txtFile) txtFile.close();
     }
-    if (txtIndexScanFile) txtIndexScanFile.close();
-    if (txtIndexBuildFile) txtIndexBuildFile.close();
-    if (txtChapterBuildFile) txtChapterBuildFile.close();
-    txtIndexBuilding = false;
-    if (txtFile) txtFile.close();
-    statsOnSessionEnd();   // 阅读统计: 会话结束
+    statsOnSessionEnd();   // 阅读统计: 会话结束 (gInSession 内建幂等)
+    return keepBuilding;
+}
+
+// 组合键可回首页的"阅读族"界面 (三者都持有阅读会话: 正文/章节目录/历史标记)。
+static bool isReaderFamilyMode(int m) {
+    return m == APP_READER || m == APP_CHAPTERS || m == APP_MARKS;
+}
+
+void closeTxtReader() {
+    bool keepBuilding = endReaderSessionNoRender();
     appMode = APP_BROWSER;
     listDir(currentPath.c_str());
     renderAll();
     refresh(true);
     saveSleepRecord();
+    if (keepBuilding) debugLine(PSTR("CLOSE keep index building in background"));
 }
 
 void leaveReaderToBrowser() { closeTxtReader(); }
@@ -6427,8 +6449,16 @@ void loop() {
     }
     if (comboHome) {
         traceFmt(PSTR("COMBO_HOME from mode=%d"), appMode);
-        // 关闭阅读器会话(若有)加统计收尾, 再回首页
-        if (appMode == APP_READER) closeTxtReader();
+        // 关闭阅读会话(若有)加统计收尾, 再回首页。
+        // 审查 #1: 原先只收尾 APP_READER —— 从 APP_CHAPTERS/APP_MARKS 回首页会漏
+        // chapterFreeBuffers(4.5KB)/progressFlushForce/关句柄/statsOnSessionEnd。
+        // 且走"不渲染"收尾: 原路径先 closeTxtReader() 渲染文件管理器全刷、再 renderHome(true)
+        // 全刷一次 = 两次全刷(≈3s), 与"避免不必要全刷"策略冲突。
+        // APP_CLOCK_DISGUISE 已在上面排除(伪装契约=停用全部按键)。
+        if (isReaderFamilyMode(appMode)) {
+            bool keepBuilding = endReaderSessionNoRender();
+            traceFmt(PSTR("COMBO_HOME close session mode=%d keepBuild=%d"), appMode, keepBuilding ? 1 : 0);
+        }
         appMode = APP_HOME;
         renderHome(true);
         saveSleepRecord();
