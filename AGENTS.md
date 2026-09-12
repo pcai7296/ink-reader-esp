@@ -40,7 +40,7 @@ ink-reader-esp/
 ├── make_weather_icons.py     # 天气图标生成
 ├── make_nav_icons.py         # 导航图标生成
 ├── make_small_icons.py       # 小图标生成
-├── docs/                     # 协议/设计文档 (file-api.md, progress-lumi1.md)
+├── docs/                     # 协议/设计文档 (file-api.md, progress-lumi1.md, progress-sync-impl.md, ext-font.md)
 ├── data/                     # LittleFS 数据 (manager.htm — Web 管理页)
 ├── libraries/                # 本地库副本 (U8g2_for_Adafruit_GFX 等)
 └── build/                    # 编译输出 (ink-reader-esp.ino.bin)
@@ -146,7 +146,7 @@ python esp_dev.py --dry-run --boot-ap      # 打印命令不执行
 - **UI 方向两层分类**：Reader-Direction UI（阅读菜单/跳转键盘/进度同步弹窗/旋转弹窗/标签子菜单 —— 渲染前置 `fbRot = readerRot`）vs Fixed-Landscape UI（章节目录/倍速弹窗/文件管理器/时钟/天气/设置/BMP/**历史标记列表** —— 恒 90° 不置 fbRot）。新增 UI 时先归类再实现
 - 天气夜间判断用 `localtime` 本地小时（configTime +8），勿用 UTC 公式
 - 天气 KEY 存 EEPROM 明文，禁止写入 Serial/trace 调试输出
-- **进度同步直连手机（LUMI1，阅读菜单"进度同步"项）**：手机=进度服务器（端口 8384 明文 HTTP），协议规范 `docs/progress-lumi1.md`——`GET /progress?file=<RFC3986>`→200+LUMI1/404；`PUT /progress`（body=LUMI1+`file=` 原始 UTF-8 文件名）→200/400；载荷必填 `ts/size/offset/pct`（offset=原始 TXT 字节偏移、编码无关；未知 key 忽略可扩展）。状态机 `progress_sync.cpp`：PREPARE→WIFI→[DISCOVER]→[WAIT_CLIENT]→CONNECT→GET→PARSE→COMPARE→[APPLY|UPLOAD]→FINISH（每阶段阻塞≤6s、循环喂狗）；比较页两键双方向=同步(手机→本地)/覆盖(本地→手机，二次确认)。手机端服务器=Legado 改造（`J:\code\Android\legado` 新包 `io.legado.app.esp`，自 Lumi_Books 移植）；**目标选择优先级：`/sync.cfg` 的 `ip=` → UDP 发现（LUMIDISC/LUMIACK :8390，≤2s 首合法 ACK）→ TargetConfig.staIp/apIp**；STA 模式走发现，AP 模式固定 192.168.0.100；跨版本文件（size 不同）按 pct 换算兜底。**（两端 txt 字节一致即可精确对齐；历史遗留的"手机端 181 字节水印"问题**用户已自行解决**，相关临时脚本 fix_wulian.py/diff_wulian.py 已删）
+- **进度同步直连手机（LUMI1，阅读菜单"进度同步"项）**：手机=进度服务器（端口 8384 明文 HTTP），协议规范 `docs/progress-lumi1.md`——`GET /progress?file=<RFC3986>`→200+LUMI1/404；`PUT /progress`（body=LUMI1+`file=` 原始 UTF-8 文件名）→200/400；载荷必填 `ts/size/offset/pct`（offset=原始 TXT 字节偏移、编码无关；未知 key 忽略可扩展）。状态机 `progress_sync.cpp`：PREPARE→WIFI→[DISCOVER]→[WAIT_CLIENT]→CONNECT→GET→PARSE→COMPARE→[APPLY|UPLOAD]→FINISH（连接 3s / 读取 8s / 扫描窗口 60s，循环喂狗）；比较页两键双方向=同步(手机→本地)/覆盖(本地→手机，二次确认)。手机端服务器=Legado 改造（`J:\code\Android\legado` 新包 `io.legado.app.esp`，自 Lumi_Books 移植）；**目标选择（2026-09-13 定稿）：`/sync.cfg` 的 `ip=` → 绑定值 `TargetConfig.staIp` → 上次成功 `/sync_bind.dat:last_ok` → 广播 + 逐 IP 单播扫描（60s 窗口）；四项依次尝试且都不锁定，连上即写 `last_ok`（若由扫描命中则同时改绑）**；设备 STA 用**静态 `192.168.0.100`**（配网热点仍 `192.168.4.1`、同步热点仍 `192.168.0.1/24` + 固定租约 `.100`）；跨版本文件（size 不同）按 pct 换算兜底。细节见 `docs/progress-sync-impl.md`。**（两端 txt 字节一致即可精确对齐；历史遗留的"手机端 181 字节水印"问题**用户已自行解决**，相关临时脚本 fix_wulian.py/diff_wulian.py 已删）
 - **`/sync.cfg`（SD 根，可选）**：纯文本 `ssid=`/`password=`/`ip=`/`port=` 四行；存在且 ssid 非空 → 同步时直接 `WiFi.begin(ssid,pass)`（先 `WiFi.persistent(false)` 防写 flash 配网区），优先于 EEPROM 配网页凭据；`ip=` 时跳过 UDP 发现，`port=` 覆盖默认 8384（1..65535 纯数字，供联调/换端口，如 `port=38623`）；换网络（路由器/手机热点）改文件即可，不重烧、不动 EEPROM
 - **v3 文件指纹检测（2026-08）**：`docs/progress-lumi1.md §3.4`——`fs`+`h0/h1/h2`（头/中/尾各 1KB 的 SHA-1，纯 C 实现 `progress_lumi.cpp::lumiSha1`（RFC 3174 无依赖，pc_test 可测），区域公式 `lumiFingerprintRegions`；**发送方语义**：指纹永远描述发送方文件，接收方对比自己文件；**三态** MATCH/UNKNOWN/MISMATCH（4 位掩码 bit0=size bit1=head bit2=middle bit3=tail，仅 MISMATCH 有诊断意义）；**原子组**：四字段全存在且合法才有效（半组/非法/重复/溢出 → 整组视为不存在）；256B 编码预算硬上限（整组省略禁截断）。ESP 端：PREPARE 生成 SyncSnapshot（复用已开 `txtFile` 句柄：size→三处读 1KB→SHA-1→progress，**任一步失败整组省略**；`extern File txtFile` 在 progress_sync.cpp）；UPLOAD 用 `lumiMakeEx` 携带指纹；PARSE 后三态比较（`gFileFpState`/`gFileMismatch`）；比较页 MISMATCH 黑底白字警告（"！！文件不一致：大小/头部/中部/尾部"替换标题行，⚠ 不在 GB2312 字库用 !!）；手机端 GET 响应附指纹、PUT 弹窗按位警告。跨平台一致性由 pc_test（70 断言）与 Android `LumiProgressCodecTest`（Knuth 序列同预期）锚定
 - **⛔ 阅读架构（2026-09 定稿 → 同日按用户"抄官方"修正）**：**阅读数据源 = 当前介质**（官方 A7 `fsSetBySdState()` 同款：SD 启用→书/`.i1`/`.z1` 都在 SD，阅读直读 SD；内部模式→走 LittleFS）。实现：`readerFs()` = `browseFs()`；`readerBusReady(reason)` 在 SD 介质下 `reinitSdBus`（EPD/电池采样共用引脚），内部介质恒真；`SD.end()` 仅在**内部介质阅读**时执行（SD 介质阅读时 SD 是数据源必须在线）；`startTxtReader` 两种介质都直接可读。**不再有"SD 仅文件管理"拦截**（该拦截曾导致用户设备完全进不去书）。~~可选能力：`readerImportFromSd()`（>100MB 与容量前置校验 + 回读校验 + 旁带 `.i1/.z1` 复制）~~ → **该函数 2026-09-12 全库审查轮已删（死代码）**，当前没有"拷到内部"入口（docs §15 已标"已废弃"）。写入模式严格按 `fs::FS`：读 `"r"`/新建重写 `"w"`/**追加必须 `"a"`**（SD 的 `FILE_WRITE` 是追加语义，照搬会截断 `.i1/.z1/.bm`）。本轮稳定性/续航修复对两种介质同时生效。计划/验收见 `docs/reader-lfs-migration.md`（§16 为本次修正）。
@@ -325,50 +325,16 @@ python esp_dev.py --dry-run --boot-ap      # 打印命令不执行
 - 性能基线(S4.5): SD 读写 ~1MB/s, 网络 ~0.2MB/s(P0 达标); 传输缓冲 4KB 动态
 - web_test(J:\code\esp8266\web_test 独立仓库) 是 PC 测试台(STA 连局域网 + /api + /bench)
 
-- **📡 进度同步"发现得到手机、却连不上"的根因与修法（2026-09-12 整轮实机定位，两侧都改）**：
-  **症状链**：① 阅读界面 P5 断言无条件 `RF_OFF("reader_assert")` 把刚建立的 WiFi 掐断（日志实证
-  `WIFI try-sta ok=1` 紧跟 `RF_OFF reason=reader_assert`）→ 修：同步会话期间放行 RF；② 手机 HTTP 服务
-  原先绑 **"当时的局域网 IP"**（`NetworkUtils.getLanServerIp`），手机换 IP 后 8384 停在旧地址（`/proc/net/tcp`
-  查无 20C0、UDP 8390 仍活 → "发现能答、HTTP 不通"极具误导）→ 修：绑 `0.0.0.0`；③ **UDP 发现收包**：
-  手机日志证明"收到 LUMIDISC 且回 3 次 LUMIACK"但设备恒 `DISCOVER timeout` → 用 `-DUDP_DISC_TEST=1` 钩子
-  （新建 WiFiUDP、12s 内打印每个包）隔离：**新建对象 50/50 包全收**（含手机 `LUMIACK 192.168.0.18`）⇒
-  **根因 = 复用同一个 `WiFiUDP` 对象**：`stop()` 后再 `begin()` 能发不能收（lwip 收包回调未重挂）。
-  修：`progress_sync.cpp` 改 `static WiFiUDP *gDiscUdp`，每次发现 `discoveryBegin()` 新建、`discoveryStop()` 释放。
-  修后实录：`DISCOVER localPort=8390` → `DISCOVER ok ip=192.168.0.18` → `CONNECT ok` → `GET code=404`。
-  **手机端（J:\code\Android\legado，独立仓库）**：用户拍板"**只按 txt 文件名/路径精确锁定**" ⇒
-  `EspBookMatch` 删掉全部"归一化/包含/按 size 择近"猜测逻辑，只做 `originName` 精确 + `bookUrl` 指向的 txt 存在校验；
-  GET/PUT 先核实书架：不在架上回 `404 no-book`（ESP 显示 **"手机上没有这本书"**），在架上但手机侧没进度回
-  `404 no-progress`；**GET 不再用 `deviceSnapshot`（设备推回的历史进度）兜底** —— 这是"删旧书→导同名新书后被旧进度
-  覆写"的真根因；服务启动时 `clearStaleDeviceEntries()` 清理书架上已删书的残留快照；UDP socket 提为类字段 +
-  `reuseAddress` + 失败重试（原进程被杀后 `EADDRINUSE` → 发现失效）。
-  **构建/联调备忘**：① 该项目 `assembleDebug` 在本机会因**跨盘 KSP 增量**失败（缓存 C: / 项目 J:），
-  用 `-Pksp.incremental=false` 可绕过（同 app/build.gradle 里 glide-svg 处理器被删是同类坑）；
-  ② 手机无线调试老自动关：`wifi_sleep_policy=2`（仅插电不睡）+ 不插电熄屏 → WiFi 休眠 → Android 11+ 随之
-  关无线调试（IP 也会变）；已 `settings put global wifi_sleep_policy 0`，并用 `adb tcpip 5555` 改成**固定端口**
-  （`adb connect <ip>:5555`，重启手机前有效，不再受"无线调试"开关影响）；③ 授权：`adb pair <ip>:<配对端口> <配对码>`
-  一次即可。
 
-- **✅ 进度同步端到端打通 + 最后一个根因（2026-09-12 深夜，两侧实测 PASS）**：
-  **设备侧最终形态**（`python esp_dev.py -D SYNC_AUTO_TEST=1 --build-path build_auto --steps build` 后烧 build_auto，
-  开机自动跑完整链路，免按键）实测：
-  `DISCOVER bound localPort=8390` → `DISCOVER ping ... sent=3` → **`DISCOVER ok ip=192.168.0.18 polls=12`**
-  → `CONNECT ok` → `GET code=200 body bytes=63` → `PARSE ok size=58418739 offset=50803872 pct=86.97`
-  → `COMPARE local=33978(0.06%) remote=50803872(86.97%)` → `APPLY use-offset 50803872`
-  → `STATUS 同步成功 ✓` → **`page=121757`（设备从第 81 页跳到 86.97% 位置）** ✓
-  **★ 最后一个根因 = UDP 收包的"轮询形态"**：手机日志证明它已应答（`UDP discovery reply -> /192.168.0.12`）、
-  PC 广播实测手机也秒回 `LUMIACK 192.168.0.18`，唯独设备收不到 ⇒ 把 DISCOVER 从"主 loop 每 100ms 轮询"
-  改成与自检钩子同款的**紧循环轮询**（`while (millis()-t0 < 2000) { poll(); delay(20); ESP.wdtFeed(); }`）
-  后立刻收到（polls=12 ≈ 240ms）✓。**教训：ESP8266 WiFiUDP 的收包在该项目里只有"紧循环"形态被验证可靠**
-  （同 socket、同网络，仅轮询形态不同 → 结果不同）。另：`WiFiUDP` 对象**不要 stop() 后复用**（收包回调不重挂），
-  也别每次 new/delete（实测把设备**卡死在 DISCOVER**、看门狗都不复位）→ 采用"常驻绑定 + 发包全失败才重绑"。
-  **手机侧（J:\code\Android\legado）**：`EspBookMatch` 只按 `originName` 精确 + `bookUrl` 路径形态校验
-  （**删掉 `File.exists()` 探测**：分区存储下 `/storage/emulated/0/Download/xxx.txt` 存在却 `isFile=false`，
-  曾把已导入的书误判成 `no-book`）；GET 取数顺序 = ESP 位置快照 → **手机自身 DB 进度**（`durChapterIndex/Pos`
-  经 `bytesBeforeCharInFile` 换算字节偏移，实测 `offset=50803872 pct=86.97` 与 DB chapter 5235/6020 吻合），
-  **绝不用设备推回的历史进度兜底**（那正是"删旧书→导新书后被旧进度覆写"的根因）；PUT 同样先核实书架，
-  不在架上直接 `404 no-book`。
-- **🛠 自检钩子 `SYNC_AUTO_TEST`（默认 0，仅测试固件）**：开机 4s 自动"打开最近阅读 → 等 1.5s 句柄就绪 →
-  `readerSyncOpen=true` 后 `progressSyncBegin()` → 到 COMPARE 自动执行 APPLY（`-DSYNC_AUTO_APPLY=0` 可只到比较页）
-  → 打印 `SYNCAUTO open/ready/begin/compare/DONE ... PASS|FAIL`。**坑：必须自己置 `readerSyncOpen = true`**
-  （loop 只在该标记为真时喂 `progressSyncLoop`，不置位则状态机永远停在 PREPARE）；`startTxtReader` 是异步的，
-  必须等句柄就绪再发起同步。**这个钩子让"编译→烧录→自动验完整链路"成为一轮操作，无需用户按键。**
+
+## 进度同步（LUMI1）指针 · 2026-09-13 定稿
+
+实现要点、本轮 6 个根因、同伴端（手机/手表）改动、调试资产与实测结论：
+见 **`docs/progress-sync-impl.md`**；协议规范见 **`docs/progress-lumi1.md`**（§2.1 地址与目标选择 / §2.3 超时 / §2.4 状态流 / §2.6 UDP 发现与绑定）。
+
+三条最易写错的结论（先记住这三条，细节再查文档）：
+
+1. **地址三分别混**：STA = 静态 `192.168.0.100`；配网热点 = `192.168.4.1`；同步热点(纯AP) = `192.168.0.1/24` + 固定租约 `.100`。
+2. **同伴地址四项依次尝试且都不锁定**：`/sync.cfg ip=` → 绑定值 → 上次成功 → 广播 + 逐 IP 单播扫描（60s 窗口）；
+   连上即写 `last_ok`，扫描命中时**同时改绑**（换 IP 自愈）。
+3. **UDP 收包只能"紧循环轮询"、socket 常驻不 stop**：复用 `stop()` 后的对象能发不能收，每次 `new/delete` 会把设备卡死。
