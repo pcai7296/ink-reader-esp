@@ -5166,6 +5166,24 @@ static void syncAutoTick() {
                         (unsigned long)(txtFile ? txtFile.size() : 0UL),
                         (st == SYNC_IDLE) ? "PASS" : "FAIL");
     }
+    // ★ 用户要求（2026-09-12）：钩子必须能从"等待连接"里**退出**，不能把设备永远停在同步页
+    //   （设备此刻无法按键操作）。等待扫描超过 SYNC_AUTO_WAIT_MS 就自动取消回到阅读页并报 FAIL。
+    static uint32_t waitSince = 0;
+    if (st == SYNC_DISCOVER || st == SYNC_CONNECT || st == SYNC_WAIT_CLIENT || st == SYNC_STA_FAILED) {
+        if (waitSince == 0) waitSince = millis();
+#ifndef SYNC_AUTO_WAIT_MS
+#define SYNC_AUTO_WAIT_MS 45000UL
+#endif
+        if ((uint32_t)(millis() - waitSince) >= SYNC_AUTO_WAIT_MS) {
+            waitSince = 0;
+            reported = true;
+            Serial.printf_P(PSTR("SYNCAUTO WAIT-TIMEOUT %lums status=[%s] -> 取消回阅读\n"),
+                            (unsigned long)SYNC_AUTO_WAIT_MS, progressSyncStatusText());
+            progressSyncCancel();
+        }
+    } else {
+        waitSince = 0;
+    }
 }
 #endif
 
