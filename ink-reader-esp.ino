@@ -934,6 +934,7 @@ static void biliFansTestRun() {
 
 // (文件夹递归删除自检钩子 FOLDER_DEL_TEST 见文件后部 deleteFolderNow 之后 —— 需要 browseFs/deleteFolderNow 已声明)
 
+
 uint8_t batPercent(int v_mV) {
     // 官方 V14 getBatVolBfb 四阶拟合曲线 (A7 同为多项式, 6 阶系数未完全还原, 用已验证的官方 4 阶):
     //   bfb = 497.50976·x⁴ - 7442.07254·x³ + 41515.70648·x² - 102249.34377·x + 93770.99821
@@ -4994,6 +4995,63 @@ void progressSyncRestoreReaderHeap() {
     if (txtFile && txtPageStart <= txtFile.size()) readTxtPage(txtPageStart);
 }
 
+// ===== 进度同步"阅读器占用下连 WiFi"自检钩子 (仅测试固件; 默认 0) =====
+// 背景(2026-09-12): 用户报"时钟能校准(NTP 连得上), 进度同步却连不上 WiFi" —— 两者用的是同一份
+// EEPROM 凭据, 差异在**上下文**: 时钟页没有阅读会话(堆大、SD 总线空闲), 同步从阅读器里发起。
+// 本钩子分两阶段对同一路径做 A/B: ①阅读会话未开时连 STA ②打开最近阅读后再连 STA, 打印堆/结果。
+#ifndef SYNC_WIFI_TEST
+#define SYNC_WIFI_TEST 0
+#endif
+#if SYNC_WIFI_TEST
+static void syncWifiTestRun() {
+    reinitSdBus("syncwifi_test");
+    // ★ 先查 /sync.cfg(旧固件的同步**只用**它; 内容是旧网络 → 同步连不上而时钟(用 EEPROM)能校准)
+    {
+        char cfgSsid[40] = "", cfgIp[24] = "";
+        File f = LittleFS.open("/sync.cfg", "r");
+        const char *src = "littlefs";
+        if (!f) { f = SD.open("/sync.cfg", "r"); src = "sd"; }
+        if (f) {
+            while (f.available()) {
+                String line = f.readStringUntil('\n');
+                line.trim();
+                if (line.startsWith("ssid=")) snprintf(cfgSsid, sizeof(cfgSsid), PSTR("%s"), line.c_str() + 5);
+                else if (line.startsWith("ip=")) snprintf(cfgIp, sizeof(cfgIp), PSTR("%s"), line.c_str() + 3);
+            }
+            f.close();
+            Serial.printf_P(PSTR("SYNCWIFI_TEST sync.cfg EXISTS src=%s ssid=[%s] ip=[%s]\n"), src, cfgSsid, cfgIp);
+        } else {
+            Serial.printf_P(PSTR("SYNCWIFI_TEST sync.cfg 不存在(同步将直接用 EEPROM 凭据)\n"));
+        }
+        reinitSdBus("syncwifi_cfg_done");
+    }
+    Serial.printf_P(PSTR("SYNCWIFI_TEST phase1 heap=%u mode=%d cfg_ssid=[%s]\n"),
+                    (unsigned)ESP.getFreeHeap(), (int)WiFi.getMode(), wifiManagerCfgSsid());
+    bool ok1 = wifiManagerEnsureSta(15000);
+    Serial.printf_P(PSTR("SYNCWIFI_TEST phase1 sta=%d ip=%s heap=%u\n"), ok1 ? 1 : 0,
+                    WiFi.localIP().toString().c_str(), (unsigned)ESP.getFreeHeap());
+    wifiManagerRfOff("syncwifi_p1");
+    delay(300);
+    // ② 打开最近阅读(占堆 + 抢 SD 总线), 再用**进度同步同款**的非阻塞路径连
+    if (recentReadValid && recentReadPath.length()) {
+        startTxtReader(recentReadPath.c_str(), false);
+        ESP.wdtFeed();
+        Serial.printf_P(PSTR("SYNCWIFI_TEST reader-open mode=%d heap=%u\n"),
+                        (int)appMode, (unsigned)ESP.getFreeHeap());
+        bool started = wifiManagerStartSta();
+        uint32_t dl = millis() + 20000UL;
+        while (millis() < dl && WiFi.status() != WL_CONNECTED) { delay(100); ESP.wdtFeed(); }
+        bool up = (WiFi.status() == WL_CONNECTED);
+        Serial.printf_P(PSTR("SYNCWIFI_TEST phase2 start=%d sta=%d ip=%s heap=%u -> %s\n"),
+                        started ? 1 : 0, up ? 1 : 0, WiFi.localIP().toString().c_str(),
+                        (unsigned)ESP.getFreeHeap(), (started && up) ? "PASS" : "FAIL");
+    } else {
+        Serial.printf_P(PSTR("SYNCWIFI_TEST phase2 skip (无最近阅读)\n"));
+    }
+    wifiManagerRfOff("syncwifi_test");
+}
+#endif
+
 bool progressSyncApplyRemote(uint32_t offset) {
     readerBusReady("sync_apply");   // 网络阶段 GPIO12/GPIO5 可能被电量采样动过, 先恢复 SD 总线
     if (!txtFile) txtFile = readerFs().open(txtPath.c_str(), "r");   // 网络阶段 Free hook 可能已关闭, 重开
@@ -7049,6 +7107,14 @@ void loop() {
     if (!biliTestDone && millis() > 4000) {
         biliTestDone = true;
         biliFansTestRun();
+    }
+#endif
+#if SYNC_WIFI_TEST
+    // 进度同步 WiFi 自检 (仅测试固件, 见 syncWifiTestRun 注释)
+    static bool syncWifiTestDone = false;
+    if (!syncWifiTestDone && millis() > 5000) {
+        syncWifiTestDone = true;
+        syncWifiTestRun();
     }
 #endif
 #if FOLDER_DEL_TEST

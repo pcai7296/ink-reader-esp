@@ -1544,6 +1544,12 @@ bool wifiManagerHasCredentials() {
   return ok;
 }
 
+// 只读访问器: 当前配置的 SSID (给进度同步等模块打日志用; **绝不含密码**)
+const char *wifiManagerCfgSsid() {
+  if (config.ssid[0] == '\0') loadConfig();
+  return config.ssid;
+}
+
 bool wifiManagerEnsureSta(uint32_t timeoutMs) {
   // 天气页等路径可能未经过 wifiManagerBegin/clockManagerBegin，config 未加载，
   // 此时从 EEPROM 补读 WiFi 凭据，避免误报"未配置"。

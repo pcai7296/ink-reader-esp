@@ -464,6 +464,16 @@ void progressSyncLoop() {
       if (!gStaAttempted) {
         gStaAttempted = true;
         gStaStage = 1;
+        // 先腾堆 (关 txtFile + 清阅读行缓冲): 同步是从**阅读器**里发起的, 阅读会话占着几 KB,
+        // 而 WiFi 栈建立连接也吃堆 —— 时钟页能连上、同步连不上, 差距可能就在这。
+        // (connect 阶段本来也会调, 这里提前 + 用 gConnectFreed 去重, 不重复释放)
+        progressSyncFreeReaderHeap();
+        gConnectFreed = true;
+        syncDbg(PSTR("WIFI_PRE heap=%u mode=%d cred=%d eeprom_ssid=[%s] syncCfg_ssid=[%s]"),
+                (unsigned)ESP.getFreeHeap(), (int)WiFi.getMode(),
+                wifiManagerHasCredentials() ? 1 : 0,
+                wifiManagerCfgSsid() ? wifiManagerCfgSsid() : "(无)",
+                gCfgSsid[0] ? gCfgSsid : "(无)");
         gStatus = F("正在连接 Wi-Fi...");
         if (gCfgSsid[0]) {
           WiFi.persistent(false);        // 不把 /sync.cfg 凭据写进 flash 配网区
@@ -472,7 +482,7 @@ void progressSyncLoop() {
           syncDbg(PSTR("WIFI try-sta[1] via /sync.cfg ssid=[%s]"), gCfgSsid);
         } else {
           bool ok = wifiManagerStartSta();
-          syncDbg(PSTR("WIFI try-sta[1] via EEPROM ok=%d"), ok ? 1 : 0);
+          syncDbg(PSTR("WIFI try-sta[1] via EEPROM ok=%d ssid=[%s]"), ok ? 1 : 0, wifiManagerCfgSsid());
         }
         gDeadline = millis() + 20000UL;
         break;

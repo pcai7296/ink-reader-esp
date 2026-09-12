@@ -24,6 +24,7 @@ bool wifiManagerIsActive();
 const char *wifiManagerApSsid();
 const char *wifiManagerStateText();
 const char *wifiManagerStaIp();
+const char *wifiManagerCfgSsid();   // 当前配置 SSID (仅日志用, 无密码)
 bool wifiManagerIsStaOnly();    // 进配网已连 WiFi(局域网管理, 无热点)
 bool wifiManagerIsTryingSta();  // 正在试连 WiFi(无 AP/无 IP)
 
