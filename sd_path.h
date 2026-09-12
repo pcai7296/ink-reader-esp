@@ -32,6 +32,12 @@ bool sanitizeUploadName(const char *raw, char *out, size_t outSize);
 // 入参应为已规范化路径
 bool isProtectedPath(const char *path);
 
+// basename 保护判定（改名/移动的目标名用）: 只查扩展名 + ".tiemereader" 同名, 不看目录部分。
+// 用途 = 调用方已对目录部分单独调用 isProtectedPath 时, 免去"拼 560B 目标全路径只为看扩展名"
+// 的深链栈开销（ESP8266 循环栈 4KB; 原来 /api/rename,/api/move 各压一个 char[560]）。
+// 含 '/' 的入参返回 false（契约: 只接受 basename）。
+bool isProtectedBaseName(const char *baseName);
+
 // 上传临时文件识别: 以 ".uploading" 结尾
 // （.uploading 可删除、不可 rename/move/download, 由调用层按操作区分）
 bool isUploadingTemp(const char *path);

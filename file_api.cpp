@@ -370,6 +370,7 @@ static void sendSdErr(SdErr r) {
     case SD_NOT_EMPTY:  sendApiErr(409, F("not_empty")); break;
     case SD_PROTECTED:  sendApiErr(403, F("protected")); break;
     case SD_INVALID_MOVE: sendApiErr(409, F("invalid_move")); break;
+    case SD_INVALID_PATH: sendApiErr(400, F("invalid_path")); break;   // 审查 #2: 超长显式拒绝, 不静默截断
     default:            sendApiErr(500, F("internal_error")); break;
   }
 }
@@ -415,14 +416,9 @@ static void handleApiRename() {
   char name[256];
   if (!sanitizeUploadName(nameArg.c_str(), name, sizeof(name))) { sendApiErr(400, F("invalid_name")); return; }
   // 目标扩展名受保护（防改名生成索引类文件）→ 403
-  char target[560];
-  const char *slash = strrchr(path, '/');
-  if (slash && slash != path) {
-    snprintf(target, sizeof(target), PSTR("%.*s/%s"), (int)(slash - path), path, name);
-  } else {
-    snprintf(target, sizeof(target), PSTR("/%s"), name);
-  }
-  if (isProtectedPath(target)) { sendApiErr(403, F("protected")); return; }
+  // 审查 #2: 原实现拼 char target[560] 全路径再 isProtectedPath —— 目录部分就是 path(上面已查过),
+  // 只有 basename 的扩展名是新信息 → 改用 isProtectedBaseName(name), 深链少压 560B 栈。
+  if (isProtectedBaseName(name)) { sendApiErr(403, F("protected")); return; }
   if (!reinitSdBus("api_rename")) { sendApiErr(500, F("internal_error")); return; }
   SdErr r = sdRename(path, name);
   if (r == SD_OK) { apiInvalidateParentOf(path); sendApiOk(); } else sendSdErr(r);
@@ -445,11 +441,10 @@ static void handleApiMove() {
   if (isProtectedPath(dest)) { sendApiErr(403, F("protected")); return; }
   if (!sdMoveDestAllowed(path, dest)) { sendApiErr(409, F("invalid_move")); return; }
   // 目标文件名扩展名受保护 → 403
+  // 审查 #2: 同上, 目录(dest)与源(path)均已查过 isProtectedPath → 只查 basename 扩展名, 免 560B 栈。
   const char *base = strrchr(path, '/');
   base = base ? base + 1 : path;
-  char target[560];
-  snprintf(target, sizeof(target), PSTR("%s/%s"), dest, base);
-  if (isProtectedPath(target)) { sendApiErr(403, F("protected")); return; }
+  if (isProtectedBaseName(base)) { sendApiErr(403, F("protected")); return; }
   if (!reinitSdBus("api_move")) { sendApiErr(500, F("internal_error")); return; }
   SdErr r = sdMove(path, dest);
   if (r == SD_OK) {

@@ -219,19 +219,27 @@ SdErr sdMkdir(const char *path) {
   return SD.mkdir(path) ? SD_OK : SD_IO_FAIL;
 }
 
+// 改名/移动的目标全路径 scratch（2026-09 全库审查 #2）。
+// 背景: 原先是栈局部 char[560] —— /api/rename|move handler 各压一个 560B target, 本层再压一个,
+//   同一深链 ≈1.1~1.7KB, 而本项目实测深链余栈仅 0~100B（见 file_api.cpp 注释）。
+// 上限推导（保证 560 够用, 且不静默截断）: normalizeApiPath 出参 ≤299（调用方 path[300]）
+//   + '/' + sanitizeUploadName ≤240 + NUL = 541 < 560。
+// 单线程 HTTP 顺序调用, sdRename/sdMove 互不嵌套 → 共用一块 static 安全（与 gPagedEntry/
+//   gPagedFull 同款约定）; 超长入参显式返回 SD_INVALID_PATH, 绝不截断（截断过 = FAT 错名, 不可逆）。
+static char sPathScratch[560];
+
 SdErr sdRename(const char *oldPath, const char *newName) {
   // 同目录: 目标 = oldPath 的目录 + "/" + newName
-  // ⚠️ 缓冲须容得下「目录部分(≤300) + '/' + newName(≤240)」: 原 dir[300] 会 snprintf 静默截断
-  //   → SD.exists/rename 作用于被截断路径, FAT 上生成错名文件（不可逆）
-  char dir[560];
-  snprintf(dir, sizeof(dir), PSTR("%s"), oldPath);
+  if (strlen(oldPath) + 1 + strlen(newName) + 1 > sizeof(sPathScratch)) return SD_INVALID_PATH;
+  char *dir = sPathScratch;
+  snprintf(dir, sizeof(sPathScratch), PSTR("%s"), oldPath);
   char *slash = strrchr(dir, '/');
   if (!slash || slash == dir) {
-    snprintf(dir, sizeof(dir), PSTR("/%s"), newName);   // 根目录下文件
+    snprintf(dir, sizeof(sPathScratch), PSTR("/%s"), newName);   // 根目录下文件
   } else {
     slash[1] = '\0';
     size_t dlen = strlen(dir);
-    snprintf(dir + dlen, sizeof(dir) - dlen, PSTR("%s"), newName);
+    snprintf(dir + dlen, sizeof(sPathScratch) - dlen, PSTR("%s"), newName);
   }
   if (!SD.exists(oldPath)) return SD_NOT_FOUND;
   if (SD.exists(dir)) return SD_EXISTS;
@@ -247,10 +255,12 @@ SdErr sdMove(const char *path, const char *destDir) {
   }
   d.close();
   if (!SD.exists(path)) return SD_NOT_FOUND;
-  // ⚠️ 缓冲须容下 destDir(≤300) + '/' + basename(≤256): 原 target[320] 静默截断 → 错名 rename（不可逆）
-  char target[560];
   const char *base = baseNameOf(path);
-  snprintf(target, sizeof(target), PSTR("%s/%s"), destDir, base);
+  if (strlen(destDir) + 1 + strlen(base) + 1 > sizeof(sPathScratch)) return SD_INVALID_PATH;
+  char *target = sPathScratch;
+  // destDir="/" 时不再多出一个 '/'（"//name" 这种双斜杠路径在 FAT 上语义未定义）
+  if (strcmp(destDir, "/") == 0) snprintf(target, sizeof(sPathScratch), PSTR("/%s"), base);
+  else                          snprintf(target, sizeof(sPathScratch), PSTR("%s/%s"), destDir, base);
   if (SD.exists(target)) return SD_EXISTS;
   return SD.rename(path, target) ? SD_OK : SD_IO_FAIL;
 }

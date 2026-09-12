@@ -79,6 +79,16 @@ bool pathExtension(const char *path, char *extBuf, size_t extSize) {
   return true;
 }
 
+// 受保护扩展名表（唯一权威）: ext 形如 ".i1", 精确匹配大小写不敏感
+static bool extIsProtected(const char *ext) {
+  static const char *const kProt[SD_PATH_PROTECTED_EXTS] = {
+      ".i1", ".z1", ".i1p", ".v1", ".vz1", ".v1p", ".bm", ".bmt", ".i2", ".z2"};
+  for (int i = 0; i < SD_PATH_PROTECTED_EXTS; i++) {
+    if (strcasecmp(ext, kProt[i]) == 0) return true;
+  }
+  return false;
+}
+
 bool isProtectedPath(const char *path) {
   if (!path || path[0] != '/') return false;
   // 系统目录: 目录前缀边界（"/.tiemereader" 本身与 "/.tiemereader/..." 受保护,
@@ -92,12 +102,18 @@ bool isProtectedPath(const char *path) {
   // 索引/数据扩展名: 精确匹配（"test.i1.bak" 扩展名 .bak 不受保护）
   char ext[16];
   if (!pathExtension(path, ext, sizeof(ext))) return false;
-  static const char *const kProt[SD_PATH_PROTECTED_EXTS] = {
-      ".i1", ".z1", ".i1p", ".v1", ".vz1", ".v1p", ".bm", ".bmt", ".i2", ".z2"};
-  for (int i = 0; i < SD_PATH_PROTECTED_EXTS; i++) {
-    if (strcasecmp(ext, kProt[i]) == 0) return true;
-  }
-  return false;
+  return extIsProtected(ext);
+}
+
+bool isProtectedBaseName(const char *baseName) {
+  if (!baseName || !baseName[0]) return false;
+  if (strchr(baseName, '/')) return false;   // 契约: 只接受 basename（含分隔符即非本函数用途）
+  // 系统目录同名: 原实现拼全路径再查, 根目录改名为 ".tiemereader" 会被拒。basename 级保守保留
+  // （任何目录下都不允许改成这个名字——否则 API 立刻造出一个不可删/不可改的项）。
+  if (strcmp(baseName, ".tiemereader") == 0) return true;
+  char ext[16];
+  if (!pathExtension(baseName, ext, sizeof(ext))) return false;
+  return extIsProtected(ext);
 }
 
 bool isUploadingTemp(const char *path) {

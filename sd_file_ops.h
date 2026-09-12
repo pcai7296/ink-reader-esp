@@ -28,6 +28,7 @@ enum SdErr {
   SD_NOT_EMPTY,      // 目录非空
   SD_PROTECTED,      // 受保护路径（由调用层先查 isProtectedPath, 本层兜底）
   SD_INVALID_MOVE,   // 移动防环
+  SD_INVALID_PATH,   // 路径/名字超长（目标全路径放不下本层 scratch）
   SD_IO_FAIL,        // 底层失败（读/写/改名/挂载）
 };
 
