@@ -35,6 +35,7 @@
 #include "hitokoto.h"
 #include "bili_fans.h"
 #include "app_mode.h"   // AppMode 唯一定义 (globals.h 亦 include; 审查 #6 去重)
+#include "clock_icons.h"   // 16x16 时钟页/状态栏图标 (make_clock_icons.py 生成, 手工点阵)
 
 // ===== P7 A/B 编译开关 (2026-09) =====
 // 0 = 阅读页局刷后保持面板上电 (现状; 连续局刷最稳)
@@ -842,11 +843,25 @@ static const uint8_t bitmapLightning[13] PROGMEM = {
 };
 
 // 在指定坐标绘制闪电图标（宽8高13）
-void drawLightningIcon(int x, int y, bool black) {
-    for (int r = 0; r < 13; r++) {
+void drawLightningIcon(int x, int y, bool black) {    for (int r = 0; r < 13; r++) {
         uint8_t row = pgm_read_byte(&bitmapLightning[r]);
         for (int c = 0; c < 8; c++) {
             if (row & (0x80 >> c)) setPix(x + c, y + r, black);
+        }
+    }
+}
+
+// ---------- 时钟页/状态栏 16x16 图标 (clock_icons.h) ----------
+// 用户需求(2026-09-12): "时钟的页面各个变量尽可能使用图标表示, 而不是用文字" ——
+// 温/湿→温度计/水滴, 上午下午→太阳/月亮, 年月日→日历, 已校准未校准→对勾/感叹,
+// 倒计时→旗子, B粉→B站, 电量(+充电)→电池/带闪电电池, 室内→房子。
+// 点阵在 make_clock_icons.py 里逐像素手写 (PIL 画 1bit 会糊), 16 宽 = 2 字节/行, MSB left。
+void drawClockIcon(int x, int y, int idx, bool black) {
+    if (idx < 0 || idx >= CK_ICON_COUNT) return;
+    for (int r = 0; r < 16; r++) {
+        for (int c = 0; c < 16; c++) {
+            uint8_t byte = pgm_read_byte(&ckIcons[idx][r * 2 + c / 8]);
+            if (byte & (0x80 >> (c % 8))) setPix(x + c, y + r, black);
         }
     }
 }
@@ -1398,9 +1413,10 @@ void renderHome(bool full) {
     }
     int mv = readBatteryMV();
     char bbuf[12];
-    snprintf(bbuf, sizeof(bbuf), PSTR("电量%d%%"), batPercent(mv));
-    drawTextUTF8(228, 0, bbuf, 66, true);
-    if (isCharging()) drawLightningIcon(276, 1, true);  // 充电: 画闪电图标
+    snprintf(bbuf, sizeof(bbuf), PSTR("%d%%"), batPercent(mv));   // 电池图标表意, 去掉"电量"二字省 32px
+    // 充电时直接画"带闪电的电池"图标 (原先是文字 + 8x13 闪电叠加, 长文本时会互相压字)
+    drawClockIcon(240, 0, isCharging() ? CK_ICON_BATTERY_CHG : CK_ICON_BATTERY, true);
+    drawTextUTF8(260, 0, bbuf, 34, true);
     fillRect(0, 15, SCR_W, 1, true);
 
     // ── 主卡: 继续阅读 (y18-54, 高37, 仅信息展示) ──
@@ -1791,6 +1807,18 @@ static int drawMini7Seq(int x, int y, int dw, int dh, int dt, int gap, const cha
 static const char *clockCalibText() {
     return (clockManagerWasSkipped() || !clockManagerIsSynced()) ? "未校准" : "已校准";
 }
+// 校准状态图标化: true = 需注意(未校准/被跳过) → 感叹图标; false → 对勾图标
+static bool clockCalibWarn() {
+    return clockManagerWasSkipped() || !clockManagerIsSynced();
+}
+// 室内温湿度取整 (显示用)
+static int indoorTempInt() {
+    int ti = gIndoorTemp10 / 10;
+    if (abs(gIndoorTemp10 % 10) >= 5) ti += (gIndoorTemp10 < 0 ? -1 : 1);
+    return ti;
+}
+static unsigned indoorHumiInt() { return (unsigned)((gIndoorHumi10 + 5) / 10); }
+// 副文本行的事件类型图标见文件后部 (依赖 IAM_* 枚举): clockSubIcon()
 
 // 获取一言（仅 WiFi 已连、设置开启且时钟为精美类型时；失败静默不打扰时钟页）
 void fetchHitokotoFlow() {
@@ -1873,6 +1901,14 @@ static int classifyInAWord(const char *t) {
     if (n >= 3 && memcmp(t, UTF8_DAI, 3) == 0) return IAM_COUNTDOWN;
     if (n >= 4 && t[0] == 'B' && memcmp(t + 1, UTF8_FEN, 3) == 0) return IAM_FANS;
     return IAM_CUSTOM;
+}
+
+// 副文本行事件类型图标: 倒计时→旗子 / B粉→B站图标; 一言/自定义句返回 -1 (纯文字, 保持可读)
+static int clockSubIcon() {
+    int mode = classifyInAWord(settingsGetInAWord());
+    if (mode == IAM_COUNTDOWN) return CK_ICON_FLAG;
+    if (mode == IAM_FANS) return CK_ICON_BILI;
+    return -1;
 }
 
 // 解析 "倒" + 8 位 yyyymmdd + 事件(可为空); 成功返回 true
@@ -2058,48 +2094,66 @@ void renderClockPage(bool full) {
         drawClockTimeDigits(x, y, dw, dh, dt, gap, colonW, line);
         if (settingsGetClockFormat() == 1) drawTextUTF8(256, 4, isAm ? "上午" : "下午", 36, true);
         fillRect(0, 94, SCR_W, 1, true);
-        // 底部 A 行: 左 校准 + 小温湿度 (紧凑), 右 日期
-        snprintf(line, sizeof(line), PSTR("%04d年%02d月%02d日"), tmNow->tm_year + 1900, tmNow->tm_mon + 1, tmNow->tm_mday);
-        char left[72];
-        char th[40];
-        th[0] = '\0';
-        // 温湿度优先用**板载 SHT30(室内)**; 无传感器才回落网络(城市)值 (行为与之前一致)
-        if (!indoorTHText(th, sizeof(th))) clockThText(th, sizeof(th));
-        if (th[0]) snprintf(left, sizeof(left), PSTR("%s %s"), clockCalibText(), th);
-        else snprintf(left, sizeof(left), PSTR("%s"), clockCalibText());
-        while (utf8Width(left) > 168 && strlen(left) > 1) utf8ChopOne(left);   // 不压右侧日期
-        drawTextUTF8(4, 96, left, 168, true);
-        drawTextUTF8(180, 96, line, 112, true);
-        // 底部 B 行: 倒计时/B粉 简洁也支持 (一言/自定义句不显示)
+        // 底部 A 行: [校准图标] [温度计]29 [水滴]58 | 右侧 [日历]09-12 周五  (变量全部图标化)
+        {
+            int bx = 4;
+            drawClockIcon(bx, 96, clockCalibWarn() ? CK_ICON_WARN : CK_ICON_CHECK, true);
+            bx += 16 + 6;
+            char num[10];
+            if (gIndoorValid) {
+                snprintf(num, sizeof(num), PSTR("%d"), indoorTempInt());
+                drawClockIcon(bx, 96, CK_ICON_TEMP, true);
+                bx += 16 + 6;
+                drawTextUTF8(bx, 96, num, 40, true);
+                bx += utf8Width(num) + 12;
+                snprintf(num, sizeof(num), PSTR("%u"), indoorHumiInt());
+                drawClockIcon(bx, 96, CK_ICON_HUMI, true);
+                bx += 16 + 6;
+                drawTextUTF8(bx, 96, num, 40, true);
+            } else if (clockThText(num, sizeof(num))) {   // 无传感器: 回落网络(城市)温湿度文字
+                drawTextUTF8(bx, 96, num, 140, true);
+            }
+        }
+        // 右侧日期: [日历]09-12 周五
+        snprintf(line, sizeof(line), PSTR("%02d-%02d %s"), tmNow->tm_mon + 1, tmNow->tm_mday,
+                 weekdayCn(tmNow->tm_wday));
+        drawClockIcon(180, 96, CK_ICON_CAL, true);
+        drawTextUTF8(200, 96, line, 92, true);
+        // 底部 B 行: 倒计时/B粉 简洁也支持 (一言/自定义句不显示); 事件类型用图标表意
         char sub[96];
         clockBuildSubText(sub, sizeof(sub), false);
         if (sub[0]) {
+            int si = clockSubIcon();
             int sw = utf8Width(sub);
-            int sx = (SCR_W - sw) / 2;
+            int total = (si >= 0) ? 16 + 6 + sw : sw;
+            int sx = (SCR_W - total) / 2;
             if (sx < 0) sx = 0;
-            drawTextUTF8(sx, 114, sub, SCR_W - 2, true);
+            if (si >= 0) { drawClockIcon(sx, 113, si, true); sx += 16 + 6; }
+            drawTextUTF8(sx, 114, sub, SCR_W - 2 - sx, true);
         }
     } else {
         // ---------- 精美 (重新设计布局; 7 段数码管风格不变) ----------
-        // 顶行: 日期 | 校准 | (12h 上午/下午)
-        snprintf(line, sizeof(line), PSTR("%04d年%02d月%02d日"), tmNow->tm_year + 1900, tmNow->tm_mon + 1, tmNow->tm_mday);
-        drawTextUTF8(4, 2, line, 132, true);
-        drawTextUTF8(150, 2, clockCalibText(), 60, true);
-        if (settingsGetClockFormat() == 1) drawTextUTF8(258, 2, isAm ? "上午" : "下午", 36, true);
+        // 顶行: [日历]09-12 周五 | [对勾/感叹] 校准 | [太阳/月亮] 12h  (变量图标化)
+        snprintf(line, sizeof(line), PSTR("%02d-%02d %s"), tmNow->tm_mon + 1, tmNow->tm_mday,
+                 weekdayCn(tmNow->tm_wday));
+        drawClockIcon(4, 1, CK_ICON_CAL, true);
+        drawTextUTF8(24, 2, line, 118, true);
+        drawClockIcon(150, 1, clockCalibWarn() ? CK_ICON_WARN : CK_ICON_CHECK, true);
+        if (settingsGetClockFormat() == 1) drawClockIcon(274, 1, isAm ? CK_ICON_SUN : CK_ICON_MOON, true);
         // 中置时间数码管 (尺寸适中)
         const int dw = 46, dh = 60, dt = 6, gap = 6, colonW = 16;
         const int totalW = dw * 4 + gap * 3 + colonW;
         int x = (SCR_W - totalW) / 2, y = 16;
         snprintf(line, sizeof(line), PSTR("%02d:%02d"), dispH, tmNow->tm_min);
         drawClockTimeDigits(x, y, dw, dh, dt, gap, colonW, line);
-        // 温湿度: 7 段小号数字大字感 (标签+温度+℃ / 标签+湿度+%), 顺序排布不重叠; 缺失则留空
-        // 数据源优先**板载 SHT30(室内, 整数化显示)**; 无传感器回落网络(城市)值 (原行为)
+        // 温湿度: [温度计] 7段数字 [水滴] 7段数字 (无 ℃/% 文字, 图标已表意); 缺失则留空
+        // 数据源优先**板载 SHT30(室内)**; 无传感器回落网络(城市)值 (原行为)
         {
             char tpBuf[8] = "", humBuf[8] = "";
             bool haveTH = false;
             if (gIndoorValid) {
-                snprintf(tpBuf, sizeof(tpBuf), PSTR("%d"), (int)(gIndoorTemp10 / 10));
-                snprintf(humBuf, sizeof(humBuf), PSTR("%u"), (unsigned)(gIndoorHumi10 / 10));
+                snprintf(tpBuf, sizeof(tpBuf), PSTR("%d"), indoorTempInt());
+                snprintf(humBuf, sizeof(humBuf), PSTR("%u"), indoorHumiInt());
                 haveTH = true;
             } else if (wDataValid) {
                 snprintf(tpBuf, sizeof(tpBuf), PSTR("%s"), wActual.temp[0] ? wActual.temp : "--");
@@ -2110,23 +2164,26 @@ void renderClockPage(bool full) {
             if (haveTH) {
                 const int mdw = 22, mdh = 24, mdt = 4, mgap = 4;
                 const int gy = 84;   // 温湿度区 84..108, 为下方副文本行让位
-                int gx = 42;
-                drawTextUTF8(gx, gy + 6, PSTR("温"), 20, true);
-                gx += 16 + 8;
+                int gx = 44;
+                drawClockIcon(gx, gy + 4, CK_ICON_TEMP, true);
+                gx += 16 + 6;
                 gx += drawMini7Seq(gx, gy, mdw, mdh, mdt, mgap, tpBuf, true);
-                drawTextUTF8(gx + 4, gy + 6, PSTR("℃"), 20, true);
-                gx += 24 + 18;
-                drawTextUTF8(gx, gy + 6, PSTR("湿"), 20, true);
-                gx += 16 + 8;
+                gx += 22;                                            // 组间距
+                drawClockIcon(gx, gy + 4, CK_ICON_HUMI, true);
+                gx += 16 + 6;
                 gx += drawMini7Seq(gx, gy, mdw, mdh, mdt, mgap, humBuf, true);
-                drawTextUTF8(gx + 4, gy + 6, PSTR("%"), 20, true);
-                if (gIndoorValid) drawTextUTF8(4, gy + 6, PSTR("室"), 16, true);   // 标明是室内(板载传感器)
+                if (gIndoorValid) drawClockIcon(4, gy + 4, CK_ICON_HOUSE, true);   // 房子 = 室内(板载传感器)
             }
         }
-        // 副文本行: 一言/自定义句(仅精美) 与 倒计时/B粉(两风格共用入口); 无分割线避免与温湿度区交错
+        // 副文本行: 一言/自定义句(仅精美) 与 倒计时/B粉(两风格共用入口); 事件类型用图标表意
         char sub[96];
         clockBuildSubText(sub, sizeof(sub), true);
-        if (sub[0]) drawTextUTF8(4, 112, sub, 288, true);
+        if (sub[0]) {
+            int si = clockSubIcon();
+            int sx = 4;
+            if (si >= 0) { drawClockIcon(sx, 113, si, true); sx += 16 + 6; }
+            drawTextUTF8(sx, 114, sub, SCR_W - 4 - sx, true);
+        }
     }
     refresh(full);
 }
@@ -2468,10 +2525,15 @@ void renderWeatherPage(bool full) {
         if (wNightSkip) {
             snprintf(line, sizeof(line), PSTR("夜间不更新"));
         } else {
-            snprintf(line, sizeof(line), PSTR("电量%d%%"), batPercent(readBatteryMV()));
+            snprintf(line, sizeof(line), PSTR("%d%%"), batPercent(readBatteryMV()));   // 电池图标已表意, 去掉"电量"文字
         }
-        int tx = (SCR_W - textWidth(line)) / 2;
-        if (isCharging()) drawLightningIcon(tx - 10, 58 - 13, true);  // 充电：画闪电图标
+        // 图标(16x16) + 数字整体居中: 文本基线 y=58 → 字形占 58..74, 图标同高对齐在 y=58。
+        // ⚠️ 修复(用户报"电量旁闪电错位"): 原先 drawLightningIcon(tx-10, 58-13) 把 13 高的闪电画到
+        //    y=45..58, 比文字整整高 14px; 且充电时才画、与"电量"文字还有重叠。现改为电池/带闪电电池图标。
+        int tx = (SCR_W - textWidth(line) + (wNightSkip ? 0 : 22)) / 2;
+        if (!wNightSkip) {
+            drawClockIcon(tx - 22, 58, isCharging() ? CK_ICON_BATTERY_CHG : CK_ICON_BATTERY, true);
+        }
         drawTextUTF8(tx, 58, line, 200, true);
         // ===== 底部 3 天预报：三列对齐（今/明/后 + MM-DD | 星期+天气 | 高/低）=====
         // 星期由 RTC 时间推算（date0=今天，date1=明天，date2=后天）
