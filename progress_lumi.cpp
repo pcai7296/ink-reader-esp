@@ -7,6 +7,13 @@
 #include <string.h>
 #include <stdlib.h>
 
+// PC 测试（pc_tests/progress_lumi_test.cpp, 无 Arduino 环境）兼容: PSTR 退化为普通字面量。
+// ESP 上 PSTR 把字面量放 flash 段 —— 本文件里 PSTR 只进 printf/snprintf 家族（安全通道,
+// 见 AGENTS.md "PSTR 只能经安全通道消费"）, PC 端等价展开无行为差异。
+#ifndef ARDUINO
+#define PSTR(s) (s)
+#endif
+
 // ---------- 生成 ----------
 
 bool lumiMakeEx(char* out, size_t cap, uint64_t ts, uint32_t size, uint32_t offset, float pct,

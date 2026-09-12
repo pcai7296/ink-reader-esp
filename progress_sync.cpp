@@ -832,8 +832,6 @@ void progressSyncLoop() {
         if (nextTarget()) { gConnectAttempt = 0; gRetryAtMs = 0; setState(SYNC_CONNECT); }
         else setState(SYNC_DISCOVER);
         break;
-        setState(SYNC_DISCOVER);
-        break;
       }
       // 未连 STA：**两阶段**尝试 —— ① /sync.cfg 凭据 ② EEPROM 配网页凭据（各 20s）。
       // 用户 2026-09-12："进度同步不应该先尝试连接 WiFi 而不是开热点" → 两条都试过仍失败，
@@ -873,8 +871,6 @@ void progressSyncLoop() {
         gTargetStage = 0;
         if (nextTarget()) { gConnectAttempt = 0; gRetryAtMs = 0; setState(SYNC_CONNECT); }
         else setState(SYNC_DISCOVER);
-        break;
-        setState(SYNC_DISCOVER);
         break;
       }
       if ((int32_t)(millis() - gDeadline) >= 0) {
@@ -1024,7 +1020,12 @@ void progressSyncLoop() {
       bool parsed = (gBufLen > 0 && body) && lumiParse((const char*)body, gBufLen, cp);
       free(body);
       if (!parsed) { syncDisconnect(); gStatus = F("手机进度无效"); setState(SYNC_ERROR); break; }
-      if (cp.offset > gLocalSize) { syncDisconnect(); gStatus = F("手机进度无效"); setState(SYNC_ERROR); break; }
+      if (cp.offset > gLocalSize) {
+        // 手机侧文件比本地大/不同版本: offset 合法超出本地 size —— 不再报错(原硬门挡住了规范 §4.1 的
+        // pct 换算兜底), 交 APPLY 处理(offsetPct>100 必与 pct 差>1 → 强制走 pct 路径)
+        syncDbg(PSTR("PARSE off=%lu > localSize=%lu (跨版本/手机文件较大) -> APPLY 按 pct 换算"),
+                (unsigned long)cp.offset, (unsigned long)gLocalSize);
+      }
       bindMarkOk(gTarget, gTargetStage >= 3);   // 记住成功目标（stage>=3 = 由 last_ok/扫描找到 → 同步更新绑定，实现"换 IP 自动恢复"）
       gCloudExists = true;
       gRemoteOffset = cp.offset;
@@ -1059,12 +1060,15 @@ void progressSyncLoop() {
       //      直接用精确字节偏移(误差 <1 页)。
       //   2) 相差明显 -> 源文件与本机不同版本, 按 pct 换算(两位小数精度,
       //      14 万页规模误差约 ±14 页, 已是跨版本文件下的最优近似)。
+      //   3) offset > 本地 size(手机侧文件较大) -> 必走 pct(否则直读越界;
+      //      2026-09-13 前 PARSE 硬门把它误报成"手机进度无效", 与规范 §4.1 冲突)。
       uint32_t target = gRemoteOffset;
+      bool offBeyond = (gRemoteOffset > gLocalSize);   // 手机文件较大: offset 超出本地 → 必走 pct(否则 APPLY 直读越界)
       double offsetPct = (gLocalSize > 0)
           ? (double)gRemoteOffset * 100.0 / (double)gLocalSize : 0.0;
       double diff = offsetPct - (double)gRemotePercent;
       if (diff < 0.0) diff = -diff;
-      if (gLocalSize > 0 && gRemotePercent >= 0.0f && gRemotePercent <= 100.0f && diff > 1.0) {
+      if (gLocalSize > 0 && gRemotePercent >= 0.0f && gRemotePercent <= 100.0f && (diff > 1.0 || offBeyond)) {
         target = (uint32_t)((double)gRemotePercent / 100.0 * (double)gLocalSize);
         if (target > gLocalSize) target = gLocalSize;
         syncDbg(PSTR("APPLY pct-convert offset=%lu -> %lu (offPct=%.2f poPct=%.2f)"),
