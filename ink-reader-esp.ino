@@ -837,31 +837,49 @@ static void weatherRenderTest() {
     snprintf(wFuture.humidity, sizeof(wFuture.humidity), PSTR("62"));
     snprintf(wFuture.windScale, sizeof(wFuture.windScale), PSTR("2"));
     snprintf(wLife.uvi, sizeof(wLife.uvi), PSTR("中等"));
-    // 中间条布局自检 (与 renderWeatherPage 内同一算法: 室内温湿度优先 / 缺失回落 InAWord)
+    // 布局自检 (与 renderWeatherPage 内同一算法: 中间条=InAWord 全宽居中; 电量=左下角; 预报左边界 ≥62)
     {
-        const int subLeft = 64;
-        int avail = SCR_W - 4 - subLeft;
-        if (gIndoorValid) {
-            char n1[12], n2[12];
-            snprintf(n1, sizeof(n1), PSTR("%d℃"), indoorTempInt());
-            snprintf(n2, sizeof(n2), PSTR("%u%%"), indoorHumiInt());
-            int total = 20 + 20 + utf8Width(n1) + 10 + 20 + utf8Width(n2);
-            int sx = subLeft + (avail - total) / 2;
-            if (sx < subLeft) sx = subLeft;
-            Serial.printf_P(PSTR("WEATHER_TEST strip indoor battEnd=56 avail=%d total=%d sx=%d end=%d fit=%d\n"),
-                            avail, total, sx, sx + total, (total <= avail) ? 1 : 0);
-        } else {
-            char sub[96];
-            clockBuildSubText(sub, sizeof(sub), true);
-            if (!sub[0]) snprintf(sub, sizeof(sub), PSTR("测试一言内容"));
-            int si = clockSubIcon();
-            int sw = utf8Width(sub);
-            int total = (si >= 0) ? 16 + 6 + sw : sw;
-            int sx = subLeft + (avail - total) / 2;
-            if (sx < subLeft) sx = subLeft;
-            Serial.printf_P(PSTR("WEATHER_TEST strip inaword battEnd=56 avail=%d icon=%d tw=%d total=%d sx=%d end=%d fit=%d\n"),
-                            avail, si, sw, total, sx, sx + total, (total <= avail) ? 1 : 0);
+        char sub[96];
+        clockBuildSubText(sub, sizeof(sub), true);
+        if (!sub[0]) snprintf(sub, sizeof(sub), PSTR("测试一言内容"));
+        int si = clockSubIcon();
+        int sw = utf8Width(sub);
+        int avail = SCR_W - 8;
+        int total = (si >= 0) ? 16 + 6 + sw : sw;
+        int sx = 4 + (avail - total) / 2;
+        if (sx < 4) sx = 4;
+        Serial.printf_P(PSTR("WEATHER_TEST strip inaword icon=%d tw=%d avail=%d total=%d sx=%d end=%d fit=%d\n"),
+                        si, sw, avail, total, sx, sx + total, (total <= avail) ? 1 : 0);
+        // 三列预报左边界 (含 ≥62 预留), 与渲染同一算法
+        int wd0 = -1;
+        time_t nowT = clockManagerNow();
+        if (nowT > 1600000000UL) { struct tm *tmv = localtime(&nowT); if (tmv) wd0 = tmv->tm_wday; }
+        static const char *const dayTag[3] = {"今", "明", "后"};
+        char c0[3][16], c1[3][32], c2[3][16];
+        int c0max = 0, c1max = 0, c2w[3];
+        for (int i = 0; i < 3; i++) {
+            snprintf(c0[i], sizeof(c0[i]), PSTR("%s %s"), dayTag[i], wFuture.date[i]);
+            snprintf(c1[i], sizeof(c1[i]), PSTR("%s %s"), (wd0 >= 0) ? weekdayCn(wd0 + i) : "", wFuture.textNight[i]);
+            snprintf(c2[i], sizeof(c2[i]), PSTR("%s/%s"), wFuture.high[i], wFuture.low[i]);
+            int w0 = textWidth(c0[i]), w1 = textWidth(c1[i]);
+            c2w[i] = textWidth(c2[i]);
+            if (w0 > c0max) c0max = w0;
+            if (w1 > c1max) c1max = w1;
         }
+        int raw = 999;
+        for (int i = 0; i < 3; i++) {
+            int t = c0max + 5 + c1max + 5 + c2w[i];
+            int cx = (SCR_W - t) / 2;
+            if (cx < raw) raw = cx;
+        }
+        int clamped = (raw + 2 < 62) ? 62 : raw + 2;
+        int widest = 0;
+        for (int i = 0; i < 3; i++) {
+            int t = c0max + 5 + c1max + 5 + c2w[i];
+            if (t > widest) widest = t;
+        }
+        Serial.printf_P(PSTR("WEATHER_TEST corner batt=[2,18]x[112,128] txt8_x=20 fc_xmin_raw=%d fc_xmin=%d fc_widest=%d fc_right=%d\n"),
+                        raw + 2, clamped, widest, clamped + widest);
     }
     renderWeatherPage(true);
     renderWeatherPage(false);
@@ -2593,50 +2611,23 @@ void renderWeatherPage(bool full) {
         // ===== 双横线 y=56/74 + 中间条 =====
         fillRect(0, 56, SCR_W, 1, true);
         fillRect(0, 74, SCR_W, 1, true);
-        // 左端: 电量(电池图标 + 百分比)。
-        // ⚠️ 2026-09-12 用户反馈"天气页最中心是与天气无关的电量" → 正中改为 InAWord(官方同款),
-        //    电量挪到本行左端(紧凑); 官方 V14 也是把电量放角落(左下角 21x12 电池位图 + 4px 字体),
-        //    我们的三列预报占满底部故借用中间条左端。顺带修掉原"闪电画在文字上方 14px"的错位。
-        int subLeft = 4;
+        // 正中: **InAWord**（一言 / 自定义句 / 倒计时 / B粉）—— 官方 V14 `DisplayMain.ino:259-301`
+        //        双横线之间就是放这个; 事件类型用图标(旗子/B站)表意, 内容仍是文本。
+        //        ⚠️ 2026-09-12 用户拍板: "这一行默认显示 inAWord"（此前一度试过放室内温湿度/电量, 均撤下）。
+        //        电量改画屏幕左下角（官方同款位置, 见下方预报段）；室内温湿度只在时钟页显示。
         {
-            char bbuf[12];
-            snprintf(bbuf, sizeof(bbuf), PSTR("%d%%"), batPercent(readBatteryMV()));
-            drawClockIcon(4, 58, isCharging() ? CK_ICON_BATTERY_CHG : CK_ICON_BATTERY, true);
-            drawTextUTF8(24, 58, bbuf, 34, true);
-            subLeft = 64;
-        }
-        // 正中: 优先 **室内温湿度(板载 SHT30)** —— 与天气/气候相关, 且不与本页已有字段重复
-        //       (大号 7 段数字=室外温度, 右上角=室外湿度)。用户明确要求正中别放电量, 由我选内容;
-        //       无传感器时回落 InAWord(一言/自定义句/倒计时/B粉, 与官方 V14 该处一致)。
-        //       布局: [房子][温度计]29℃ [水滴]59% , 整体在 [subLeft(64), 292] 内居中。
-        {
-            if (gIndoorValid) {
-                char n1[12], n2[12];
-                snprintf(n1, sizeof(n1), PSTR("%d℃"), indoorTempInt());
-                snprintf(n2, sizeof(n2), PSTR("%u%%"), indoorHumiInt());
-                int total = 20 + 20 + utf8Width(n1) + 10 + 20 + utf8Width(n2);
-                int avail = SCR_W - 4 - subLeft;
-                int sx = subLeft + (avail - total) / 2;
-                if (sx < subLeft) sx = subLeft;
-                drawClockIcon(sx, 58, CK_ICON_HOUSE, true); sx += 20;
-                drawClockIcon(sx, 58, CK_ICON_TEMP, true); sx += 20;
-                drawTextUTF8(sx, 58, n1, 60, true); sx += utf8Width(n1) + 10;
-                drawClockIcon(sx, 58, CK_ICON_HUMI, true); sx += 20;
-                drawTextUTF8(sx, 58, n2, 40, true);
-            } else {
-                char sub[96];
-                clockBuildSubText(sub, sizeof(sub), true);
-                if (!sub[0] && wNightSkip) snprintf(sub, sizeof(sub), PSTR("夜间不更新"));
-                if (sub[0]) {
-                    int si = clockSubIcon();
-                    int sw = utf8Width(sub);
-                    int avail = SCR_W - 4 - subLeft;
-                    int total = (si >= 0) ? 16 + 6 + sw : sw;
-                    int sx = subLeft + (avail - total) / 2;
-                    if (sx < subLeft) sx = subLeft;
-                    if (si >= 0) { drawClockIcon(sx, 58, si, true); sx += 16 + 6; }
-                    drawTextUTF8(sx, 58, sub, SCR_W - 4 - sx, true);
-                }
+            char sub[96];
+            clockBuildSubText(sub, sizeof(sub), true);
+            if (!sub[0] && wNightSkip) snprintf(sub, sizeof(sub), PSTR("夜间不更新"));
+            if (sub[0]) {
+                int si = clockSubIcon();
+                int sw = utf8Width(sub);
+                int avail = SCR_W - 8;
+                int total = (si >= 0) ? 16 + 6 + sw : sw;
+                int sx = 4 + (avail - total) / 2;
+                if (sx < 4) sx = 4;
+                if (si >= 0) { drawClockIcon(sx, 58, si, true); sx += 16 + 6; }
+                drawTextUTF8(sx, 58, sub, SCR_W - 4 - sx, true);
             }
         }
         // ===== 底部 3 天预报：三列对齐（今/明/后 + MM-DD | 星期+天气 | 高/低）=====
@@ -2675,12 +2666,23 @@ void renderWeatherPage(bool full) {
             if (cx < xmin) xmin = cx;
         }
         xmin += 2;
+        // 左下角留给电量(官方 V14 同款位置: 电池位图 (0,115) + 小字百分比 setCursor(4,113));
+        // 我们的三列预报占满底部, 故把三行的公共左边界推到 62 —— 保住"三列跨行对齐"(V14 同法),
+        // 同时左下角 [2,58]×[112,128] 不与预报首列重叠。
+        if (xmin < 62) xmin = 62;
         int py = 77;   // 基线 90/108/126 → drawTextUTF8 y=77/95/113
         for (int i = 0; i < 3; i++) {
             drawTextUTF8(xmin, py, col0[i], c0max + 4, true);
             drawTextUTF8(xmin + c0max + 5, py, col1[i], c1max + 4, true);
             drawTextUTF8(xmin + c0max + 5 + c1max + 5, py, col2[i], 60, true);
             py += 18;
+        }
+        // 屏幕左下角电量: 16x16 电池/带闪电电池图标 + 8px 小字百分比（官方此处用 4px 字体, 我们用 8px）
+        {
+            char bbuf[8];
+            snprintf(bbuf, sizeof(bbuf), PSTR("%d%%"), batPercent(readBatteryMV()));
+            drawClockIcon(2, 112, isCharging() ? CK_ICON_BATTERY_CHG : CK_ICON_BATTERY, true);
+            drawText8(20, 116, bbuf, 40, true);   // 8px 字高, y=116 与 16px 图标 (112..128) 垂直居中
         }
     } else if (wFetching) {
         // 对齐 A7 天气获取提示文案（步骤回调实时更新）
