@@ -63,12 +63,9 @@ void showMsg(const char *msg, const char *msg2);
 void showMiniPrompt(const char *text);
 
 // ---------- 应用模式 ----------
-// ⚠️ 与 ink-reader-esp.ino 内部枚举保持数值一致（.ino 未 include 本头文件, 两处并列;
-// 新增模式必须同步两处, 否则其他 .cpp 引用会编译失败或范围判断漏项）
-enum AppMode { APP_HOME = 0, APP_BROWSER = 1, APP_READER = 2, APP_CHAPTERS = 3,
-               APP_NETWORK = 4, APP_CLOCK_CONNECT = 5, APP_CLOCK = 6,
-               APP_WEATHER = 7, APP_SETTINGS = 8, APP_BMP = 9,
-               APP_MARKS = 10, APP_CLOCK_DISGUISE = 11, APP_STATS = 12 };
+// 定义在 app_mode.h（唯一定义, 2026-09-12 审查 #6）: 原先此处与 ink-reader-esp.ino 各写一份,
+// 加 APP_STATS 时踩过"两处必须手工同步、且漂移是静默的"坑。
+#include "app_mode.h"
 extern int appMode;
 extern bool sdAvailable;
 

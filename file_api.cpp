@@ -339,14 +339,18 @@ static bool apiBusy() {
 }
 
 // ---- fs_cache 失效（/api 变更端点与 /fs/* 双轨一致; 否则 /fs/list 读旧快照含已删/缺新文件）----
-// 父目录暂存指向共享竞技场槽位@0 (P2, file_api_fs.cpp): 与各 /fs handler 跨请求互斥
-// （单线程 handleClient 顺序分发）; 不用栈局部（HTTP 深链剩余栈 0~100B 实测）
-extern char gWebArena[];
-static char *gApiParent = gWebArena;
-static const size_t kApiParentCap = 300;
+// 父目录暂存走共享竞技场槽位 0 (P2, 见 file_api_fs.cpp 槽位表): 与各 /fs handler 跨请求互斥
+// （单线程 handleClient 顺序分发）; 不用栈局部（HTTP 深链剩余栈 0~100B 实测）。
+// 审查 #4: 经访问器取缓冲（原先 `extern char gWebArena[]` 裸用偏移, 依赖口头约定）。
+static char *gApiParent = NULL;   // 首次使用时经 webArenaRequestPathSlot 绑定
+static const size_t kApiParentCap = WEB_ARENA_PATH_CAP;
 
 // 取 path 的父目录（"/a/b/c"→"/a/b", "/x"→"/"）并失效其缓存
 static void apiInvalidateParentOf(const char *path) {
+  if (!gApiParent) {
+    gApiParent = webArenaRequestPathSlot(kApiParentCap);
+    if (!gApiParent) return;   // 竞技场容量不符（理论上不可能, 访问器已打日志）
+  }
   const char *slash = strrchr(path, '/');
   if (!slash || slash == path) { gApiParent[0] = '/'; gApiParent[1] = '\0'; }
   else {
@@ -931,10 +935,10 @@ static void handleFmStatic(const String &uri) {
   srv.setContentLength(sz);
   srv.send(200, mime, "");
   // 分块流式发送（文件可达 10KB+, 一次性 String 会爆配网会话堆）
-  // (P2: 缓冲用共享竞技场 gWebArena 槽位@0(512), 与其他 /fs handler 跨请求互斥)
-  extern char gWebArena[];
-  uint8_t *buf = (uint8_t *)gWebArena;
-  const size_t kFmBufCap = 512;
+  // (P2: 缓冲用共享竞技场槽位 0 (512B); 审查 #4 起经访问器取, 不再裸 extern)
+  uint8_t *buf = (uint8_t *)webArenaStreamSlot(WEB_ARENA_STREAM_CAP);
+  if (!buf) { f.close(); return; }
+  const size_t kFmBufCap = WEB_ARENA_STREAM_CAP;
   while (true) {
     int n = f.read(buf, kFmBufCap);
     if (n <= 0) break;

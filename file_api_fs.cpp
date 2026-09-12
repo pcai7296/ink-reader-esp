@@ -165,10 +165,20 @@ bool ofsEntryVisible(const char *name, bool isDir) {
 //   A /fs/list  : lsPath@0(300) + lsBuf@300(640) + lsNameEsc@940(512) = 1452
 //   B /fs/edit  : opPath@0(300) opA@300 opB@600 opC@900 opLab@1200(220) = 1420
 //   C /fs/file  : filePath@0(300)      D 上传: upPath@0(300, 跨回调存活但无并发)
-//   E /fm       : fmBuf@0(512)         F /api/*: apiParent@0(300, file_api.cpp extern)
+//   E /fm       : fmBuf@0(512)         F /api/*: apiParent@0(300)
 // 原各组独立静态数组合计 ~4.6KB → 竞技场 1456B。槽位偏移固定, 不做运行时分配;
 // 绝不放栈 (HTTP 深链剩余栈 0~100B 实测, 见下方各 handler 注释)。
-char gWebArena[1456];   // P2: 外部可见 (file_api.cpp 的 apiParent/fmBuf 槽位也指向这里)
+//
+// ⚠️ 跨模块使用（2026-09-12 审查 #4: 原先 file_api.cpp 直接 `extern char gWebArena[]` +
+//    `static char *gApiParent = gWebArena;` 裸用偏移, 依赖"槽位 0 = 300B"的口头约定, 无编译期保证。
+//    file_api_fs.cpp 调整槽位表就会静默串数据）→ 现在唯一合法入口是本文件导出的访问器
+//    webArenaRequestPathSlot() / webArenaStreamSlot()（声明见 file_api_fs.h）。
+//    契约: 三者都返回槽位 0 起点, **同一请求内同一槽位只能有一个活着的使用者**
+//    （请求之间自由复用）:
+//      槽位 0 = "当前请求的路径/流缓冲": /fs 路径类 scratch、/api 父目录暂存(/api 变更端点收尾时用,
+//               此时上传/下载的流缓冲已释放)、/fm 分块发送、/api/download 流式缓冲。
+//    新增使用者前先问: "这个缓冲与同请求内的槽位 0 使用者会同时活着吗?" —— 会 → 另开槽位/共享竞技场扩容。
+char gWebArena[1456];   // P2: 竞技场本体 (访问器之外的裸用一律视为 bug)
 static char *gLsPath = gWebArena + 0;
 char *gOpPath = gWebArena + 0;      // 主路径
 char *gOpA    = gWebArena + 300;    // src / s2
@@ -177,6 +187,25 @@ char *gOpC    = gWebArena + 900;    // 父目录等
 char *gOpLab  = gWebArena + 1200;   // 通知文案
 static char *gOfsFilePath = gWebArena + 0;
 char *ofsUpPath = gWebArena + 0;
+
+// 槽位表编译期自检: 最大布局(A=1452 / B=1420)必须装得进竞技场。
+// 以后谁改了槽位表却忘了扩容, 这里直接编译失败（原先是运行时静默越界）。
+static_assert(1452 <= sizeof(gWebArena), "gWebArena 太小: /fs/list 布局(A) 越界, 请扩容竞技场");
+static_assert(1420 <= sizeof(gWebArena), "gWebArena 太小: /fs/edit 布局(B) 越界, 请扩容竞技场");
+
+// 跨模块访问器（唯一合法入口; 见上文契约）。need 超出容量直接返回 NULL 并打日志,
+// 让调用方自己决定回退（比静默用坏指针强）。容量常量定义在 file_api_fs.h
+// (WEB_ARENA_PATH_CAP/WEB_ARENA_STREAM_CAP), 供调用方复用, 避免两处各写一份数值。
+char *webArenaRequestPathSlot(size_t need) {
+  if (need > WEB_ARENA_PATH_CAP) { Serial.printf(PSTR("ARENA_SLOT_OVER need=%u path_cap=%u\n"),
+                                                 (unsigned)need, (unsigned)WEB_ARENA_PATH_CAP); return NULL; }
+  return gWebArena + 0;
+}
+char *webArenaStreamSlot(size_t need) {
+  if (need > WEB_ARENA_STREAM_CAP) { Serial.printf(PSTR("ARENA_SLOT_OVER need=%u stream_cap=%u\n"),
+                                                   (unsigned)need, (unsigned)WEB_ARENA_STREAM_CAP); return NULL; }
+  return gWebArena + 0;
+}
 
 static void ofsReply(int code, const char *msg) { srv().send(code, "text/plain", msg); }
 static void ofsReplyOKWithMsg(const char *msg)  { srv().send(200, "text/plain", msg); }

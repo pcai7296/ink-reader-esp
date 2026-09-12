@@ -14,6 +14,18 @@
 bool ofsEntryVisibleEx(const char *name, bool isDir, bool hideAuto);
 bool ofsEntryVisible(const char *name, bool isDir);   // 兼容旧名(等价 hideAuto=true)
 bool fileApiFsTryDispatch();
+
+// ---- Web scratch 共享竞技场跨模块访问器（2026-09-12 审查 #4）----
+// 竞技场本体 + 槽位表在 file_api_fs.cpp（1456B; 七组请求缓冲两两跨请求互斥）。
+// ⚠️ 跨模块只能经这两个访问器取缓冲, **禁止再 extern char gWebArena[] 手写偏移**——
+//    槽位表由 file_api_fs.cpp 独占维护, 裸用偏移会在槽位重排时静默串数据。
+// 契约: 两者都指向槽位 0; 同一请求内同一槽位只允许一个活着的使用者（请求之间自由复用）。
+// need 超过容量返回 NULL（并打印 ARENA_SLOT_OVER）: 调用方须自己回退, 不得当非空忽略。
+// 容量: 路径类 300B（/api 父目录暂存等）/ 流类 512B（/fm 分块发送、/api 下载缓冲）。
+#define WEB_ARENA_PATH_CAP 300
+#define WEB_ARENA_STREAM_CAP 512
+char *webArenaRequestPathSlot(size_t need);
+char *webArenaStreamSlot(size_t need);
 // POST /fs/edit 上传是 4 参路由（onNotFound 收不到上传块）: fileApiInit 里调用一次
 void fileApiFsRegisterUploadRoute();
 // 上传墨水屏状态: 0=空闲 1=上传中 2=上传完毕 3=上传失败/中止
