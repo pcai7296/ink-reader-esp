@@ -799,6 +799,65 @@ static void sensorScanProbe() {
 }
 #endif
 
+// ===== 天气页渲染测试钩子 (仅测试固件; 默认 0) =====
+// 目的: 天气页的"中间条"只在 wDataValid 时渲染(否则走错误/获取中分支), 没 WiFi 就测不到。
+// 这里造假一份天气数据, 走完整 `renderWeatherPage` 两遍(全刷+局刷), 并**打印中间条布局数字**:
+//   电量占 [4,56] + InAWord(可选事件图标) 居中于 [64,292] → 断言不重叠/是否被截断。
+// 本模型看不到屏幕, 用数字代替肉眼: `WEATHER_TEST strip battEnd=.. sx=.. tw=.. avail=.. fit=1/0`
+#ifndef WEATHER_RENDER_TEST
+#define WEATHER_RENDER_TEST 0
+#endif
+#if WEATHER_RENDER_TEST
+// 前置声明 (天气页全局实例/渲染函数定义在本文件后部)
+extern ActualWeather wActual;
+extern FutureWeather wFuture;
+extern LifeIndex wLife;
+extern bool wDataValid;
+void renderWeatherPage(bool full);
+static void weatherRenderTest() {
+    wDataValid = true;
+    snprintf(wActual.city, sizeof(wActual.city), PSTR("测试城市"));
+    snprintf(wActual.weatherName, sizeof(wActual.weatherName), PSTR("晴"));
+    snprintf(wActual.weatherCode, sizeof(wActual.weatherCode), PSTR("0"));
+    snprintf(wActual.temp, sizeof(wActual.temp), PSTR("26"));
+    snprintf(wActual.humidity, sizeof(wActual.humidity), PSTR("62"));
+    snprintf(wActual.lastUpdate, sizeof(wActual.lastUpdate), PSTR("2026-09-12T14:30:00+08:00"));
+    static const char *const dts[3] = {"09-12", "09-13", "09-14"};
+    static const char *const dy[3] = {"晴", "多云", "小雨"};
+    static const char *const nt[3] = {"晴", "阴", "中雨"};
+    static const char *const hi[3] = {"28", "27", "24"};
+    static const char *const lo[3] = {"19", "18", "17"};
+    for (int i = 0; i < 3; i++) {
+        snprintf(wFuture.date[i], sizeof(wFuture.date[i]), PSTR("%s"), dts[i]);
+        snprintf(wFuture.textDay[i], sizeof(wFuture.textDay[i]), PSTR("%s"), dy[i]);
+        snprintf(wFuture.textNight[i], sizeof(wFuture.textNight[i]), PSTR("%s"), nt[i]);
+        snprintf(wFuture.high[i], sizeof(wFuture.high[i]), PSTR("%s"), hi[i]);
+        snprintf(wFuture.low[i], sizeof(wFuture.low[i]), PSTR("%s"), lo[i]);
+    }
+    snprintf(wFuture.humidity, sizeof(wFuture.humidity), PSTR("62"));
+    snprintf(wFuture.windScale, sizeof(wFuture.windScale), PSTR("2"));
+    snprintf(wLife.uvi, sizeof(wLife.uvi), PSTR("中等"));
+    // 中间条布局自检 (与 renderWeatherPage 内同一算法)
+    {
+        char sub[96];
+        clockBuildSubText(sub, sizeof(sub), true);
+        if (!sub[0]) snprintf(sub, sizeof(sub), PSTR("测试一言内容"));
+        int si = clockSubIcon();
+        int sw = utf8Width(sub);
+        const int subLeft = 64;
+        int avail = SCR_W - 4 - subLeft;
+        int total = (si >= 0) ? 16 + 6 + sw : sw;
+        int sx = subLeft + (avail - total) / 2;
+        if (sx < subLeft) sx = subLeft;
+        Serial.printf_P(PSTR("WEATHER_TEST strip battEnd=56 subLeft=%d icon=%d tw=%d avail=%d sx=%d end=%d fit=%d\n"),
+                        subLeft, si, sw, avail, sx, sx + total, (total <= avail) ? 1 : 0);
+    }
+    renderWeatherPage(true);
+    renderWeatherPage(false);
+    Serial.printf_P(PSTR("WEATHER_TEST render ok heap=%u\n"), (unsigned)ESP.getFreeHeap());
+}
+#endif
+
 uint8_t batPercent(int v_mV) {
     // 官方 V14 getBatVolBfb 四阶拟合曲线 (A7 同为多项式, 6 阶系数未完全还原, 用已验证的官方 4 阶):
     //   bfb = 497.50976·x⁴ - 7442.07254·x³ + 41515.70648·x² - 102249.34377·x + 93770.99821
@@ -6752,6 +6811,14 @@ void loop() {
     if (!sensorScanDone && millis() > 2500) {
         sensorScanDone = true;
         sensorScanProbe();
+    }
+#endif
+#if WEATHER_RENDER_TEST
+    // 天气页渲染测试 (仅测试固件, 见 weatherRenderTest 注释): 造假数据走完整渲染 + 打印布局数字
+    static bool weatherRenderDone = false;
+    if (!weatherRenderDone && millis() > 2500) {
+        weatherRenderDone = true;
+        weatherRenderTest();
     }
 #endif
     uint32_t loopStarted = millis();
