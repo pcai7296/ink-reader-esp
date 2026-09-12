@@ -7562,7 +7562,14 @@ void loop() {
 
     if (appMode == APP_READER) {
         // P5 兜底断言: 阅读期间绝不允许 RF 处在非 OFF (任何流程漏关都会在此被纠正并留日志)
-        if (WiFi.getMode() != WIFI_OFF) wifiManagerRfOff("reader_assert");
+        // ⚠️ 例外（2026-09-12 用户报"配网页能连 WiFi, 进度同步连不上"的**真正根因**）：
+        //   进度同步是**从阅读界面发起**的（readerSyncOpen），它需要在 SYNC_WIFI/DISCOVER/CONNECT…
+        //   全程保持 RF 开启；本断言原先无条件执行 → 同步刚 WiFi.begin() 就被这里 RF_OFF
+        //   （日志实证：`WIFI try-sta[1] ... ok=1` 紧跟 `RF_OFF reason=reader_assert was=1`）→ 必然超时。
+        //   配网页不受影响是因为它跑在 APP_NETWORK，不在这条分支里。
+        if (!progressSyncActive() && !readerSyncOpen && WiFi.getMode() != WIFI_OFF) {
+            wifiManagerRfOff("reader_assert");
+        }
         if (readerJumpOpen) {
             // 页码跳转弹窗 (数字键盘): 右键下移 1 / 中键上移 2 (与阅读菜单一致的设计),
             // 右长 执行, 中长 取消
