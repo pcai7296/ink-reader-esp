@@ -1526,7 +1526,22 @@ void handleSetStatic() {
 }
 
 bool wifiManagerHasCredentials() {
-  return config.ssid[0] != '\0' && strlen(config.password) >= 8;
+  // ⚠️ 修复（2026-09-12 用户报"配好了网络，进时钟页却显示未配网"）：
+  //   本函数读的是 RAM 里的 `config`，但**没有像 EnsureSta/StartSta 那样先补读 EEPROM**
+  //   （那两处注释已写明"避免误报未配置"）。刚开机时若无人调用过 loadConfig()，config 全 0
+  //   → 必然返回 false → 首页→时钟 走"未配网"分支（renderClockNoWifi 提示后跳过校准）。
+  //   修法：与兄弟函数一致，先补读；并把判定结果打日志（**不打印密码**，只打长度）便于串口定位。
+  if (config.ssid[0] == '\0') {
+    bool loaded = loadConfig();
+    // 一次性诊断: EEPROM 里到底有没有凭据 / magic·version·校验是否对 (绝不打印密码内容)
+    Serial.printf_P(PSTR("WIFI_CFG load=%d magic=%08lX want=%08lX ver=%u ssidlen=%u passlen=%u\n"),
+                    loaded ? 1 : 0, (unsigned long)config.magic, (unsigned long)CONFIG_MAGIC,
+                    (unsigned)config.version, (unsigned)strlen(config.ssid), (unsigned)strlen(config.password));
+  }
+  bool ok = config.ssid[0] != '\0' && strlen(config.password) >= 8;
+  Serial.printf_P(PSTR("WIFI_CRED has=%d ssid=[%s] passlen=%u\n"),
+                  ok ? 1 : 0, config.ssid[0] ? config.ssid : "(空)", (unsigned)strlen(config.password));
+  return ok;
 }
 
 bool wifiManagerEnsureSta(uint32_t timeoutMs) {

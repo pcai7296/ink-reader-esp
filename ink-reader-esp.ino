@@ -821,7 +821,15 @@ static void weatherRenderTest() {
     snprintf(wActual.weatherCode, sizeof(wActual.weatherCode), PSTR("0"));
     snprintf(wActual.temp, sizeof(wActual.temp), PSTR("26"));
     snprintf(wActual.humidity, sizeof(wActual.humidity), PSTR("62"));
-    snprintf(wActual.lastUpdate, sizeof(wActual.lastUpdate), PSTR("2026-09-12T14:30:00+08:00"));
+    // ⚠️ 故意用**空格分隔**的时间（正是用户报 "15::3" 的那种返回形状），验证 formatHhmm 稳健
+    snprintf(wActual.lastUpdate, sizeof(wActual.lastUpdate), PSTR("2026-09-12 15:30:00+08:00"));
+    {   // 提取自检：两种形状都打印出来
+        char a[8], b[8];
+        formatHhmm("2026-09-12T15:30:00+08:00", a, sizeof(a));   // ISO8601 'T'
+        formatHhmm("2026-09-12 15:30:00+08:00", b, sizeof(b));   // 空格分隔（原实现会显示 15::3）
+        Serial.printf_P(PSTR("WEATHER_TEST hhmm T-form=[%s] space-form=[%s] (原实现在 space-form 下显示 15::3)\n"),
+                        a, b);
+    }
     static const char *const dts[3] = {"09-12", "09-13", "09-14"};
     static const char *const dy[3] = {"晴", "多云", "小雨"};
     static const char *const nt[3] = {"晴", "阴", "中雨"};
@@ -2544,6 +2552,25 @@ bool weatherIsNight() {
     return (h >= 22 || h < 6);
 }
 
+// 从更新时间字符串里取 "HH:MM"（找不到合法形状 → "--:--"）
+// ⚠️ 修复（2026-09-12 用户报天气页左上角显示 "15::3"）：原实现硬取 `lastUpdate[11..14]`，
+//    前提是 ISO8601 用 'T' 分隔（"2026-09-12T15:30:00+08:00"，':' 在索引 13）。
+//    实测接口也会返回**空格分隔**的 "2026-09-12 15:30:00+08:00" → 索引整体错位一位，
+//    "%c%c:%c%c" 于 11,12,13,14 取出 "1","5",":","3" → 显示 "15::3"。
+//    改为在串里找**第一个 "dd:dd" 形状**的片段：不假设分隔符、不假设是否补零。
+static void formatHhmm(const char *src, char *out, size_t cap) {
+    snprintf(out, cap, PSTR("--:--"));
+    if (!src) return;
+    for (const char *p = src; p[0] && p[1] && p[2] && p[3]; p++) {
+        if (p[0] >= '0' && p[0] <= '9' && p[1] >= '0' && p[1] <= '9' && p[2] == ':' &&
+            p[3] >= '0' && p[3] <= '9') {
+            if (p[4] >= '0' && p[4] <= '9') snprintf(out, cap, PSTR("%c%c:%c%c"), p[0], p[1], p[3], p[4]);
+            else snprintf(out, cap, PSTR("%c%c:0%c"), p[0], p[1], p[3]);   // 分未补零 → 补上
+            return;
+        }
+    }
+}
+
 void renderWeatherPage(bool full) {
     // 天气壁纸背景（对齐 A7: SD 卡 天气壁纸N.bmp，按天气类型选 2-6；无文件则留空白底）
     fillRect(0, 0, SCR_W, SCR_H, false);
@@ -2559,8 +2586,8 @@ void renderWeatherPage(bool full) {
         // 基线 y=14/33/52（drawTextUTF8 传 y=基线-13=1/20/39），图标 13x13 顶部 y=2/21/40
         // 左列（x=1 图标 / x=16 文字）：更新时间 / 城市 / 天气现象
         drawSmallIcon(1, 2, 0, true);
-        snprintf(line, sizeof(line), PSTR("%c%c:%c%c"), wActual.lastUpdate[11], wActual.lastUpdate[12],
-                 wActual.lastUpdate[13], wActual.lastUpdate[14]);
+        // 更新时间 HH:MM（稳健提取, 见 formatHhmm 注释：不再硬编码 [11..14]）
+        formatHhmm(wActual.lastUpdate, line, sizeof(line));
         drawTextUTF8(16, 1, line, 120, true);
         drawSmallIcon(1, 21, 1, true);
         drawTextUTF8(16, 20, wActual.city, 130, true);
