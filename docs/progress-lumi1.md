@@ -23,7 +23,7 @@ Lumi（手机阅读 App）与 ESP-12F 墨水屏固件之间**双向阅读进度�
 
 | 设备所处模式 | 设备地址 | 说明 |
 |---|---|---|
-| 连接路由器（STA） | **静态 `192.168.0.100`** | `wifiManagerStartSta()` 注入 `WiFi.config()`；默认值来自 `progress_sync.cpp:gSyncDevIp`，可用 SD 根 `/sync_bind.dat` 的 `dev_ip=` 覆盖（设 `dev_ip=` 为空串则回落 DHCP） |
+| 连接路由器（STA） | **静态 `192.168.0.100`** | `wifiManagerStartSta()` 注入 `WiFi.config()`；默认值来自 `progress_sync.cpp:gSyncDevIp`，可用 LittleFS 根 `/sync_bind.dat` 的 `dev_ip=` 覆盖（设 `dev_ip=` 为空串则回落 DHCP） |
 | 配网热点（管理网页） | `192.168.4.1` | `startAp()`，手机端"设备管理"地址默认值就是它 |
 | 同步热点（纯 AP） | softAP `192.168.0.1/24` | `wifiManagerStartApOnly()`，DHCP **固定租约仅 `192.168.0.100`** 给手机 |
 

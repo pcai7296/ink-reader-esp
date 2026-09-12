@@ -6,7 +6,7 @@
 ## 1. 地址与目标解析
 
 - 设备连路由器（STA）时用**静态 IP `192.168.0.100`**：`wifiManagerStartSta()` 注入 `WiFi.config()`，
-  默认值 `progress_sync.cpp:gSyncDevIp`，可用 SD 根 `/sync_bind.dat` 的 `dev_ip=` 覆盖（置空串则回落 DHCP）。
+  默认值 `progress_sync.cpp:gSyncDevIp`，可用 LittleFS 根 `/sync_bind.dat` 的 `dev_ip=` 覆盖（置空串则回落 DHCP）。
 - 三种地址语义别写混：
   | 模式 | 设备地址 | 同伴地址 |
   |---|---|---|

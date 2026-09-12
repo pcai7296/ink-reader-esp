@@ -198,7 +198,7 @@ curl -X POST "http://192.168.4.1/api/mkdir?path=%2Fbooks%2Fnew"
 ## 9. 客户端接入指南（Android / Legado）
 
 1. 发现：**配网/管理热点固定 `http://192.168.4.1`**；STA 模式为设备**静态 `192.168.0.100`**（设备连路由器时；
-   该地址由 `wifiManagerStartSta()` 注入，可用 `/sync_bind.dat:dev_ip=` 覆盖）。
+   该地址由 `wifiManagerStartSta()` 注入，可用 LittleFS 根 `/sync_bind.dat:dev_ip=` 覆盖，`dev_ip=` 置空串回落 DHCP）。
    注：**本项目从未实现 mDNS**（历史文档曾写"经 mDNS/手动 IP"，与实现不符，2026-09-13 修正）；
    进度同步的 UDP 发现（`8390`，`LUMIDISC`/`LUMIWHO`/`LUMIBIND`）是**进度同步专用**，文件管理 API 不走它。
 2. 启动：`GET /api/status` 检查 `apiVersion==1` 与 `sdMounted`

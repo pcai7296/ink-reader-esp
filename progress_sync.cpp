@@ -477,7 +477,10 @@ static void bindLoad() {
       if (eq <= 0) continue;
       String k = line.substring(0, eq), v = line.substring(eq + 1);
       if (k == "port") { long p = v.toInt(); if (p >= 1 && p <= 65535) gBindPort = (uint16_t)p; }
-      else if (k == "dev_ip") { IPAddress chk; if (v.length() && chk.fromString(v.c_str())) snprintf(gSyncDevIp, sizeof(gSyncDevIp), PSTR("%s"), v.c_str()); }
+      else if (k == "dev_ip") {
+        if (v.length() == 0) gSyncDevIp[0] = '\0';   // 空串 = 显式回落 DHCP (规范 §2.1; staStart 见空串跳过 WiFi.config)
+        else { IPAddress chk; if (chk.fromString(v.c_str())) snprintf(gSyncDevIp, sizeof(gSyncDevIp), PSTR("%s"), v.c_str()); }
+      }
       else if (k == "last_ok") snprintf(gBindLastOk, sizeof(gBindLastOk), PSTR("%s"), v.c_str());
     }
     f.close();
@@ -493,9 +496,10 @@ static void bindLoad() {
 static void bindSaveFile() {
   File f = LittleFS.open(SYNC_BIND_FILE, "w");
   if (!f) { syncDbg(PSTR("BIND save fail")); return; }
-  f.printf("port=%u\nlast_ok=%s\n", (unsigned)gBindPort, gBindLastOk);
+  // dev_ip 必须原样写回: 本文件是 dev_ip= 的唯一持久化位置, 回写丢行 = 设备静态 IP 覆盖被静默重置
+  f.printf("port=%u\ndev_ip=%s\nlast_ok=%s\n", (unsigned)gBindPort, gSyncDevIp, gBindLastOk);
   f.close();
-  syncDbg(PSTR("BIND saved port=%u lastOk=[%s]"), (unsigned)gBindPort, gBindLastOk);
+  syncDbg(PSTR("BIND saved port=%u dev_ip=[%s] lastOk=[%s]"), (unsigned)gBindPort, gSyncDevIp, gBindLastOk);
 }
 
 bool syncBindSet(const char *ip, uint16_t port) {
@@ -503,6 +507,9 @@ bool syncBindSet(const char *ip, uint16_t port) {
   if (ip == NULL || ip[0] == '\0') return false;
   IPAddress chk;
   if (!chk.fromString(ip)) return false;
+  // 零变化守卫: 同伴端每 2 分钟无条件重发 LUMIBIND —— 值没变就不写盘
+  // (saveTargetConfig=EEPROM.commit 擦写 4KB 扇区 + bindSaveFile 重写文件, 重复落盘白耗 flash 寿命)
+  if (strcmp(gBindIp, ip) == 0 && (port < 1 || port == gBindPort)) return true;
   snprintf(gBindIp, sizeof(gBindIp), PSTR("%s"), ip);
   if (port >= 1) gBindPort = port;
   TargetConfig t;
