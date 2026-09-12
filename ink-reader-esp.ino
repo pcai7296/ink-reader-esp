@@ -778,6 +778,9 @@ uint32_t gBootHintPage = 0;         // 启动页号提示: setup 恢复阅读器
                                     // startTxtReader 消费后清零 (读走即清零, 同 gRotateResumeOffset 模式)
 bool gBootKey3Window = false;       // 启动 KEY3 检测窗口激活: 窗口并入最近阅读页表扫描 (优化③)
 bool gBootKey3Held = false;         // 窗口内捕获到 KEY3 按下 (重绘后据此全刷回首页)
+// KEY1 复位后的 KEY3 检测窗口长度 (见 setup: 与最近阅读页表扫描重叠, 扫描后补足到此值)。
+// 用户习惯"KEY1 后约 1 秒按 KEY3" → 1.0s 太贴边, 改为 1.5s。
+#define KEY3_WINDOW_MS 1500
 uint8_t gBootKey3PollLow = 0;       // 窗口内连续低采样计数 (≥2 次 ≈ 10ms 防抖, 对齐 KEY_DEBOUNCE_MS 策略)
 bool gBootPartialRefresh = false;   // 启动恢复局刷: setup 按复位原因/模式判定, startTxtReader 消费清零 (优化④)
 String txtLines[18];   // 阅读行缓冲 (横 8 行 / 竖 18 行, 按几何类别参数化)
@@ -6059,8 +6062,11 @@ void setup() {
     bool haveRec = readSleepRecord(bootRec);
     gBootFromSleep = haveRec && bootRec.fromSleep;   // 深睡唤醒: 面板留有右上角"休眠中", 恢复后需局刷擦除
 
-    // 窗口补足: 扫描未覆盖满 1s 时继续轮询, 保证最短检测期
-    while (millis() - keyWindow < 1000) {
+    // 窗口补足: 扫描未覆盖满 KEY3_WINDOW_MS 时继续轮询, 保证最短检测期。
+    // ⚠️ 2026-09-12: 原为 1 秒 —— 用户习惯"KEY1 后约 1 秒按 KEY3", 落在窗口边缘易错过
+    //   (错过在普通模式下只是没回首页, 在伪装模式下等于出不来, 见下方 DISGUISE_EXIT 宽限)。
+    //   大书的页表扫描本身就 ~1s+, 窗口与扫描重叠, 所以加长到 1.5s 对启动耗时几乎无影响。
+    while (millis() - keyWindow < KEY3_WINDOW_MS) {
         if (!gBootKey3Held) {
             if (readKey3() == 0) {
                 gBootKey3Held = true;   // 任一 LOW 采样即计按下 (点按也能触发)
@@ -6115,6 +6121,22 @@ void setup() {
             lastClockDisplayedMinute = clockManagerNow() / 60;
             renderClockPage(false);
             debugLine(PSTR("WAKE route=sleep-disguise"));
+            // ⚠️ 2026-09-12 (用户报"复位后按 KEY3 回不了首页"的根因之一):
+            //   伪装模式按设计停用**全部**按键, 唯一出口是"KEY1 复位 + 开机 KEY3 窗口" —— 而那个窗口
+            //   只有 KEY3_WINDOW_MS 且在界面重绘之前, 稍早(ESP 还没启动)/稍晚(窗口已过)就错过,
+            //   错过即永远卡在伪装时钟页(用户实测)。这里在**伪装页已显示**之后再给 3 秒宽限:
+            //   期间按下 KEY3 立即全刷回首页。只影响伪装这一条启动路径, 不影响其他启动时序。
+            for (uint16_t i = 0; i < 300; i++) {
+                if (readKey3() == 0) {
+                    traceFmt(PSTR("DISGUISE_EXIT key3 grace=%ums"), (unsigned)(i * 10));
+                    appMode = APP_HOME;
+                    renderHome(true);
+                    saveSleepRecord();     // 覆盖记录为首页 (下次复位不再回伪装)
+                    break;
+                }
+                delay(10);
+                ESP.wdtFeed();
+            }
         } else if (bootRec.mode == APP_READER && recentReadValid) {
             // 休眠前在阅读页 → 继续恢复最近阅读 (重绘当前进度页)
             gBootHintPage = recentReadPage;   // 优化②: 复用最近阅读页号, 跳过重复二分
