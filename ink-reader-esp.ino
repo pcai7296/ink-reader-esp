@@ -105,6 +105,13 @@ EPD_290A epd;
 #ifndef CHAPTER_AUTOJUMP_TEST
 #define CHAPTER_AUTOJUMP_TEST 0
 #endif
+// ===== 跳转进度 + 硬复位 验收钩子 (仅测试固件; 默认 0) =====
+// 复现用户真实退出方式: 菜单"章节"跳转 → **KEY1 硬复位 + KEY3 回首页** → 重新进书。
+// 硬复位用 ESP.restart() 等价(不经过 closeTxtReader/休眠收尾); 跨复位状态放 RTC 块 8
+// (时钟用块 0..2, 不冲突)。判据: 复位后重新进书的页 == 跳转目标页。
+#ifndef PROGRESS_RESET_TEST
+#define PROGRESS_RESET_TEST 0
+#endif
 // 调试行缓冲: DIAG_LINE_MAX 供 diagLog 栈上格式化 (P0 内存审计: 原常驻 diagRing[2][128]
 // 只写不读, 已删——静态 BSS 每减 1B 可用堆增 1B, 省下的 RAM 全部让给堆)
 #define DIAG_LINE_MAX 128
@@ -3555,8 +3562,14 @@ uint32_t parsePageRecord(uint32_t page) {
 
 // ---- P6 (2026-09): 进度节流 ----
 // 目标: 不再"每翻一页写 Flash"。RAM 保存实时 offset, 满足任一条件才落盘:
-//   ① 每 50 页  ② 每 5 分钟  ③ 退出阅读  ④ 换书/休眠
-// 断电最多丢 ≤50 页或 ≤5 分钟进度 (验收 D 允许)。构建中同样节流(sidecar)。
+//   ① 每 N 页  ② 每 T 秒  ③ 退出阅读  ④ 换书/休眠
+// ⚠️ 2026-09-12 修正 (用户报"跳转后回首页进度消失"): 用户回首页的习惯是
+//   **KEY1 硬复位 + KEY3**(boot 的 key3Held 分支直接回首页) —— 硬复位不经过
+//   closeTxtReader/enterSleepMode, 所以 ③④ 永不执行, 损失上限 = ①② 的阈值。
+//   原 50 页/5 分钟 → 最多丢 8 分钟阅读进度; 现收紧为 10 页/60 秒,
+//   并把"显式跳转"改为**立即落盘**(见 writeProgressNow)。
+#define PROG_FLUSH_PAGES 10
+#define PROG_FLUSH_MS    60000UL
 static bool progressWriteToDisk(uint32_t offset) {
     // 防御: 页 >1 的进度偏移不可能为 0 (0=第 1 页)。写入 0 会把"当前阅读位置"打回开头
     // (原 parsePageRecord 失败返回 0 时曾把进度写成 0)。
@@ -3624,10 +3637,10 @@ bool progressFlushForce(const char *reason) {
     return ok;
 }
 
-// 每圈调用: 满足"50 页 / 5 分钟"任一条件即落盘
+// 每圈调用: 满足"N 页 / T 秒"任一条件即落盘
 void progressTick() {
     if (!gProgDirty) return;
-    if (gProgPagesSince >= 50 || (millis() - gProgLastFlushMs) >= 300000UL) {
+    if (gProgPagesSince >= PROG_FLUSH_PAGES || (millis() - gProgLastFlushMs) >= PROG_FLUSH_MS) {
         progressFlushForce("auto");
     }
 }
@@ -3644,10 +3657,20 @@ bool writeProgress(uint32_t offset) {
     gProgPendingBuilding = txtIndexBuilding;
     gProgPagesSince++;
     if (gProgLastFlushMs == 0) gProgLastFlushMs = millis();
-    if (gProgPagesSince >= 50 || (millis() - gProgLastFlushMs) >= 300000UL) {
+    if (gProgPagesSince >= PROG_FLUSH_PAGES || (millis() - gProgLastFlushMs) >= PROG_FLUSH_MS) {
         return progressFlushForce("threshold");
     }
     return true;   // 已登记待写
+}
+
+// 显式跳转(章节跳转/跳转键盘/标签跳转/同步应用)后**立即落盘**。
+// ⚠️ 为什么必须立即: 用户"回首页"的习惯是 **KEY1 硬复位 + KEY3**(boot key3Held 分支直接回首页),
+//    硬复位不经过 closeTxtReader/enterSleepMode → progressFlushForce 永远不跑, 只登记在 RAM 的
+//    待写偏移随之消失 → 重进书回到跳转前的页 (用户实测: 菜单"章节"/"跳转"跳到新页后按 KEY1+KEY3
+//    回首页再进书, 进度丢失)。跳转是低频且刻意的导航, 一次 8 字节记录写代价可忽略。
+static void writeProgressNow(uint32_t offset, const char *reason) {
+    writeProgress(offset);
+    progressFlushForce(reason);
 }
 
 // 读取当前阅读字节偏移 (.i1 记录[0]); 构建中/构建中断优先读 sidecar (txtIndexPath+"p")。
@@ -3997,7 +4020,7 @@ void jumpToPage() {
     }
     txtPage = jumpPage;
     txtPageStart = off;
-    writeProgress(txtPageStart);
+    writeProgressNow(txtPageStart, "jump");   // 跳转键盘: 立即落盘 (硬复位回首页也不丢)
     renderTxtPage(true);
 }
 
@@ -4419,7 +4442,9 @@ bool progressSyncApplyRemote(uint32_t offset) {
         }
         if (ps <= offset) pageStart = ps;   // 页首 ≤ offset 才采用 (向下取整, 保留所在页完整内容)
     }
-    if (!writeProgress(pageStart)) return false;   // 持久化 .i1[0] 失败 → 如实报错, 不假装成功
+    // 同步应用 = 显式跳转: 登记 + 立即落盘 (原注释写"持久化"但只登记, 阈值前硬复位会丢)
+    writeProgress(pageStart);
+    if (!progressFlushForce("sync_apply")) return false;
     txtPage = page;
     txtPageStart = pageStart;
     readTxtPage(pageStart);     // 从页首读, 保证分页排版对齐(不破坏页表一致性)
@@ -5824,7 +5849,7 @@ void jumpToMark(uint32_t off) {
     }
     txtPage = page;
     txtPageStart = pageOff;
-    writeProgress(txtPageStart);
+    writeProgressNow(txtPageStart, "jump_mark");   // 标签跳转: 立即落盘
     appMode = APP_READER;
     renderTxtPage(true);
 }
@@ -6522,6 +6547,73 @@ void loop() {
         jt = 3;
     }
 #endif
+#if PROGRESS_RESET_TEST
+    // ---- 跳转进度 + 硬复位 验收钩子 (见文件头说明) ----
+    // 无跨复位状态: 用复位原因区分两段 —— 烧录/上电(REASON_DEFAULT_RST) = 跳转段;
+    // ESP.restart()(REASON_SOFT_RESTART) = "复位回首页后再进书" 段。每次烧录即自动重跑。
+    static uint8_t prt = 0;
+    static uint32_t prtMs = 0;
+    static uint32_t prtWant = 0;
+    static int8_t prtSoft = -1;                 // -1=未判定 1=软件复位(=复位后段) 0=上电(=跳转段)
+    if (prtSoft < 0) {
+        uint32_t why = (uint32_t)ESP.getResetInfoPtr()->reason;
+        prtSoft = (why == (uint32_t)REASON_SOFT_RESTART) ? 1 : 0;
+        Serial.printf_P(PSTR("PRT_BOOT reason=%u soft=%d\n"), (unsigned)why, (int)prtSoft);
+    }
+    if (prtSoft == 0) {
+        if (prt == 0 && millis() > 4000) {
+            if (appMode != APP_READER) {
+                if ((millis() - prtMs) > 4000) { prtMs = millis(); openRecentRead(); }
+            } else if (!txtIndexBuilding) {
+                Serial.printf_P(PSTR("PRT_BEGIN page=%lu off=%lu\n"),
+                                (unsigned long)txtPage, (unsigned long)txtPageStart);
+                openReaderMenu();
+                readerMenuSel = 6;              // 章节
+                execReaderMenu();
+                if (appMode == APP_CHAPTERS) {
+                    prtWant = (chapterCountLoaded > 3) ? (uint32_t)chapterRows[3].page : 0;
+                    Serial.printf_P(PSTR("PRT_IN_CHAPTERS row3page=%lu loaded=%d\n"),
+                                    (unsigned long)prtWant, chapterCountLoaded);
+                    prt = 1; prtMs = millis();
+                }
+            }
+        } else if (prt >= 1 && prt <= 3 && (millis() - prtMs) > 1200) {
+            gInjR3 = 1;                          // 右短 ×3 → 光标到第 4 行
+            prt++; prtMs = millis();
+        } else if (prt == 4 && (millis() - prtMs) > 1500) {
+            gInjR3 = 2;                          // 右长 → 跳转到该章 (真实按键处理)
+            prt = 5; prtMs = millis();
+        } else if (prt == 5 && (millis() - prtMs) > 3000) {
+            uint32_t disk = 0;
+            File rf = readerFs().open(txtIndexPath.c_str(), "r");
+            if (rf) { char r[9]; for (int i = 0; i < 8; i++) r[i] = (char)rf.read(); r[8] = '\0'; disk = strtoul(r, nullptr, 10); rf.close(); }
+            Serial.printf_P(PSTR("PRT_JUMPED want=%lu page=%lu off=%lu mode=%d idisk=%lu\n"),
+                            (unsigned long)prtWant, (unsigned long)txtPage, (unsigned long)txtPageStart,
+                            appMode, (unsigned long)disk);
+            Serial.printf_P(PSTR("PRT_HARD_RESET\n"));
+            delay(200);
+            ESP.restart();                        // 硬复位: RAM 待写进度丢失 (复现点)
+        }
+    } else {
+        if (prt == 0 && millis() > 4000) {
+            if (appMode == APP_HOME) {
+                Serial.printf_P(PSTR("PRT_POST_HOME cardPage=%lu\n"), (unsigned long)recentReadPage);
+                homeSel = 0;
+                gInjR3 = 2;                       // 首页主卡: 续读
+                prt = 1; prtMs = millis();
+            } else if (appMode == APP_READER) {
+                prt = 1; prtMs = millis();        // sleep 记录已恢复阅读页 → 直接采样
+            }
+        } else if (prt == 1 && (millis() - prtMs) > 8000) {
+            uint32_t disk = 0;
+            File rf = readerFs().open(txtIndexPath.c_str(), "r");
+            if (rf) { char r[9]; for (int i = 0; i < 8; i++) r[i] = (char)rf.read(); r[8] = '\0'; disk = strtoul(r, nullptr, 10); rf.close(); }
+            Serial.printf_P(PSTR("PRT_POST_RESET mode=%d page=%lu idisk=%lu (对比上面 PRT_JUMPED want)\n"),
+                            appMode, (unsigned long)txtPage, (unsigned long)disk);
+            prt = 2;
+        }
+    }
+#endif
     if (gInjR2) { r2 = gInjR2; traceFmt(PSTR("REMOTE_INJ key2=%d"), gInjR2); gInjR2 = 0; }
     if (gInjR3) { r3 = gInjR3; traceFmt(PSTR("REMOTE_INJ key3=%d"), gInjR3); gInjR3 = 0; }
 #endif
@@ -6919,7 +7011,7 @@ void loop() {
                     } else {
                         txtPage = wantPage;
                         txtPageStart = off;
-                        writeProgress(txtPageStart);
+                        writeProgressNow(txtPageStart, "jump_chapter");   // 章节跳转: 立即落盘
                         appMode = APP_READER;
                         renderTxtPage(true);
                         chapterFreeBuffers();   // P1: 回正文, 章节缓冲归还堆 (渲染已完成)
