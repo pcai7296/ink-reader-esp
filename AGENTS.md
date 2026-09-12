@@ -179,6 +179,18 @@ python esp_dev.py --dry-run --boot-ap      # 打印命令不执行
   → 全部 `drawTextUTF8(..., PSTR(..))` / `showMsg(PSTR(..))` 站点一次性安全；`showMsg` 的 `msg2[0]` 改
   `flashCharAt`；`Serial.println(PSTR(..))` ×2 改 `F(..)`。新文案优先用普通字面量（DRAM 天然安全），
   确要省 RAM 再用 PSTR 且只走安全通道。
+- **⛔ 伪装模式是"出不来"的高危状态（2026-09-12 用户报"KEY1 后按 KEY3 回不了首页"，已加固）**：
+  `APP_CLOCK_DISGUISE`(11) 由**阅读界面中长**(老板快捷键 `enterClockDisguise()`)进入，并经
+  `saveSleepRecord()` 写进睡眠记录 → **跨复位/跨固件烧录保留**。该模式**按设计停用全部按键**（含组合键），
+  唯一出口 = "KEY1 复位 + 开机 KEY3 窗口"；而窗口原本只有 1 秒且早于界面重绘，**稍早(ESP 未启动)/
+  稍晚(窗口已过)即错过，错过没有第二次机会** —— 用户观感就是"按不回来"。
+  加固：① 伪装恢复路径在时钟页显示完成后追加 **3 秒 KEY3 宽限**（按下即回首页 + 覆盖记录为首页，
+  trace `DISGUISE_EXIT key3 grace=`）；② 开机 KEY3 窗口 1.0s → **1.5s**（`#define KEY3_WINDOW_MS`，
+  用户习惯"KEY1 后约 1 秒按"，原值贴边；窗口与页表扫描重叠，对启动耗时几乎无影响）。
+  **测试纪律（踩过）**：自动化脚本/测试钩子**禁止**在阅读界面注入"中键长按"(=进伪装，会把设备锁进
+  只能靠按键逃生的状态，且状态持久化)——需要"取消/返回"语义时用中键短按或组合键。
+  另外 PC 侧**无法**模拟 KEY3（=GPIO3=RX；实测 pyserial `send_break`/`break_condition` 都不能让固件
+  `readKey3()` 读到低电平）→ 涉及 KEY3 的验收必须由用户在设备上按。
 - **⛔ 进度落盘与"KEY1 硬复位回首页"的冲突（2026-09-12 用户报 bug，已修）**：用户回首页的习惯是
   **KEY1 硬复位 + 1 秒内按 KEY3**（boot `key3Held` 分支直接回首页）——硬复位**不经过**
   `closeTxtReader`/`enterSleepMode`/`saveSleepRecord`，所以 `progressFlushForce()`（退出/换书/休眠落盘）
