@@ -895,6 +895,43 @@ static void weatherRenderTest() {
 }
 #endif
 
+// ===== B粉接口实测钩子 (仅测试固件; 默认 0) =====
+// 目的: 在**设备真实网络路径**上验证 B站粉丝数接口 (DNS/HTTP/重定向/解析)。PC 侧实测已发现
+// `api.bilibili.com` 明文 HTTP 返回 307(强制 HTTPS) → 原实现必然失败; 改 `api.biliapi.net` 镜像。
+// 本钩子: 开机 2.5s → 拉起 STA → 用 InAWord 里配置的 UID(非 B粉模式则用 "2") 打一次 → 打印结果。
+#ifndef BILI_FANS_TEST
+#define BILI_FANS_TEST 0
+#endif
+#if BILI_FANS_TEST
+static void biliFansTestRun() {
+    char uid[24] = "2";
+    const char *t = settingsGetInAWord();
+    static const char UTF8_FEN_LOCAL[] = "\xE7\xB2\x89";   // 粉
+    if (t && t[0] == 'B' && memcmp(t + 1, UTF8_FEN_LOCAL, 3) == 0 && t[4]) {
+        snprintf(uid, sizeof(uid), PSTR("%s"), t + 4);      // "B粉<uid>" → <uid>
+    }
+    Serial.printf_P(PSTR("BILI_TEST begin uid=[%s] inaword_mode=%d\n"), uid,
+                    classifyInAWord(settingsGetInAWord()));
+    bool sta = wifiManagerEnsureSta(15000);
+    Serial.printf_P(PSTR("BILI_TEST sta=%d ip=%s heap=%u\n"), sta ? 1 : 0,
+                    WiFi.localIP().toString().c_str(), (unsigned)ESP.getFreeHeap());
+    if (!sta) { Serial.printf_P(PSTR("BILI_TEST FAIL no-wifi\n")); return; }
+    uint32_t v = 0;
+    char err[16];
+    bool ok = fetchBiliFollower(uid, &v, err, sizeof(err));
+    Serial.printf_P(PSTR("BILI_TEST result ok=%d val=%lu err=[%s] heap=%u\n"),
+                    ok ? 1 : 0, (unsigned long)v, err, (unsigned)ESP.getFreeHeap());
+    // 顺带实测一言 (用户 InAWord 实际是"一言"; 明文 HTTP 200 已在 PC 侧确认, 这里验设备端真实链路)
+    {
+        char ht[64] = "";
+        char herr[16] = "";
+        bool hok = fetchHitokoto(ht, sizeof(ht), herr, sizeof(herr));
+        Serial.printf_P(PSTR("HITOKOTO_TEST ok=%d err=[%s] text=[%s]\n"), hok ? 1 : 0, herr, ht);
+    }
+    wifiManagerRfOff("bili_test");
+}
+#endif
+
 uint8_t batPercent(int v_mV) {
     // 官方 V14 getBatVolBfb 四阶拟合曲线 (A7 同为多项式, 6 阶系数未完全还原, 用已验证的官方 4 阶):
     //   bfb = 497.50976·x⁴ - 7442.07254·x³ + 41515.70648·x² - 102249.34377·x + 93770.99821
@@ -6890,6 +6927,14 @@ void loop() {
     if (!weatherRenderDone && millis() > 2500) {
         weatherRenderDone = true;
         weatherRenderTest();
+    }
+#endif
+#if BILI_FANS_TEST
+    // B粉接口实测 (仅测试固件, 见 biliFansTestRun 注释): 拉起 WiFi 真打一次接口
+    static bool biliTestDone = false;
+    if (!biliTestDone && millis() > 4000) {
+        biliTestDone = true;
+        biliFansTestRun();
     }
 #endif
     uint32_t loopStarted = millis();
