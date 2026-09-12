@@ -932,6 +932,8 @@ static void biliFansTestRun() {
 }
 #endif
 
+// (文件夹递归删除自检钩子 FOLDER_DEL_TEST 见文件后部 deleteFolderNow 之后 —— 需要 browseFs/deleteFolderNow 已声明)
+
 uint8_t batPercent(int v_mV) {
     // 官方 V14 getBatVolBfb 四阶拟合曲线 (A7 同为多项式, 6 阶系数未完全还原, 用已验证的官方 4 阶):
     //   bfb = 497.50976·x⁴ - 7442.07254·x³ + 41515.70648·x² - 102249.34377·x + 93770.99821
@@ -3218,6 +3220,95 @@ int menuSel = 0;         // 功能框选中项 0..MENU_CNT-1
 #define MENU_CNT 4        // 返回/打开/删除/重建
 const char *menuLabels[MENU_CNT] = {"返回", "打开", "删除", "重建"};
 String rebuildConfirmPath = "";   // 非空 = 重建确认框打开 (长按重建, 短按退出)
+String folderDelConfirmPath = ""; // 非空 = 文件夹删除确认框打开 (长按删除, 短按退出)
+
+// ---- 屏幕端文件夹递归删除 (2026-09-12 补 A1: 原先只提示"暂不支持") ----
+// 与 Web 侧 ofsDeleteRecursive 同款安全要点: 深度上限 + **每层路径缓冲走堆**(栈上 420B×17 层会爆 4KB 栈)
+// + 每 64 项喂狗; 用 Dir API 枚举(File::openNextFile 在大目录会 O(n²))。
+#define FOLDER_DEL_MAX_DEPTH 10          // 与文件管理器 10 层目录上限一致
+static bool fsDeleteRecursiveScreen(const char *path, int depth, int *count) {
+    if (depth > FOLDER_DEL_MAX_DEPTH) return false;
+    File probe = browseFs().open(path, "r");
+    if (!probe) return false;
+    bool isDir = probe.isDirectory();
+    probe.close();
+    if (!isDir) return browseFs().remove(path);
+    Dir d = browseFs().openDir(path);
+    bool ok = true;
+    int sinceFeed = 0;
+    while (d.next()) {
+        if (++sinceFeed >= 64) { sinceFeed = 0; ESP.wdtFeed(); }
+        String nm = d.fileName();
+        if (nm.length() == 0) continue;
+        char *full = (char *)malloc(320);
+        if (!full) { ok = false; break; }
+        if (nm[0] == '/') snprintf(full, 320, PSTR("%s%s"), path, nm.c_str());
+        else if (strcmp(path, "/") == 0) snprintf(full, 320, PSTR("/%s"), nm.c_str());
+        else snprintf(full, 320, PSTR("%s/%s"), path, nm.c_str());
+        bool childOk = fsDeleteRecursiveScreen(full, depth + 1, count);
+        free(full);
+        if (!childOk) { ok = false; break; }
+        (*count)++;
+    }
+    if (!ok) return false;
+    return browseFs().rmdir(path);
+}
+
+// 删除文件夹前的联动清理 + 执行; 返回删除的条目数 (-1 = 失败)
+static int deleteFolderNow(const String &path) {
+    if (!readerBusReady("folder_del")) { traceFmt(PSTR("FOLDER_DEL nobus path=%s"), path.c_str()); return -1; }
+    // ① 后台索引构建若正在删的目标内 → 先中断(否则句柄被删、块读缓冲残留)
+    if (txtIndexBuilding && txtPath.startsWith(path + "/")) {
+        traceFmt(PSTR("FOLDER_DEL abort-build %s"), txtPath.c_str());
+        abortIndexBuild();
+    }
+    // ② 最近阅读记录在目标内 → 清记录(否则主页主卡指向已删文件)
+    if (recentReadPath.length() && recentReadPath.startsWith(path + "/")) {
+        readerFs().remove(RECENT_READ_PATH);
+        recentReadPath = "";
+        recentReadValid = false;
+        traceFmt(PSTR("FOLDER_DEL clear-recent"));
+    }
+    int count = 0;
+    bool ok = fsDeleteRecursiveScreen(path.c_str(), 0, &count);
+    traceFmt(PSTR("FOLDER_DEL path=%s ok=%d entries=%d heap=%u"),
+             path.c_str(), ok ? 1 : 0, count, (unsigned)ESP.getFreeHeap());
+    return ok ? count : -1;
+}
+
+void renderConfirmFolderDel(const String &path);   // 前置声明(定义在 renderConfirmRebuild 之后)
+
+// ===== 文件夹递归删除 设备端自检钩子 (仅测试固件; 默认 0) =====
+// 建一棵测试树 (/TESTDEL/{a.txt, sub/{b.txt,c.txt}}) → 递归删除 → 校验目录消失且条目计数正确。
+// 目的: 不用按键就能确定性验证 A1 的递归删除(含子目录、喂狗、堆路径缓冲)。
+#ifndef FOLDER_DEL_TEST
+#define FOLDER_DEL_TEST 0
+#endif
+#if FOLDER_DEL_TEST
+static void folderDelTestRun() {
+    const char *root = "/TESTDEL";
+    // ⚠️ 必须先把共享 SPI 总线交还 SD（EPD/电池采样与 SD 共用 13/14/5/15）——
+    //    漏这句会卡死在 SPIClass::transfer 里被软件看门狗复位（2026-09-12 实测踩坑，
+    //    addr2line 定位 epc1 → SPI.cpp:311）。
+    reinitSdBus("folder_del_test");
+    // 清理上次残留 + 建树
+    if (browseFs().exists(root)) deleteFolderNow(String(root));
+    browseFs().mkdir(root);
+    browseFs().mkdir("/TESTDEL/sub");
+    { File f = browseFs().open("/TESTDEL/a.txt", "w"); if (f) { f.print("aaa"); f.close(); } }
+    { File f = browseFs().open("/TESTDEL/sub/b.txt", "w"); if (f) { f.print("bbb"); f.close(); } }
+    { File f = browseFs().open("/TESTDEL/sub/c.txt", "w"); if (f) { f.print("ccc"); f.close(); } }
+    bool built = browseFs().exists("/TESTDEL/sub/c.txt");
+    Serial.printf_P(PSTR("FOLDER_DEL_TEST built=%d root=%d sub=%d heap=%u\n"),
+                    built ? 1 : 0, browseFs().exists(root) ? 1 : 0,
+                    browseFs().exists("/TESTDEL/sub") ? 1 : 0, (unsigned)ESP.getFreeHeap());
+    int n = deleteFolderNow(String(root));
+    bool gone = !browseFs().exists(root);
+    Serial.printf_P(PSTR("FOLDER_DEL_TEST delete n=%d gone=%d heap=%u -> %s\n"),
+                    n, gone ? 1 : 0, (unsigned)ESP.getFreeHeap(), (n >= 3 && gone) ? "PASS" : "FAIL");
+}
+#endif
+
 
 // 判断文件名是否为 BMP 图片（不区分大小写）
 bool isBmpFile(const char *name) {
@@ -3309,6 +3400,21 @@ void renderConfirmRebuild() {
     refresh(false);
 }
 
+// 文件夹删除确认框 (递归删除不可逆 → 必须二次确认; 与重建确认框同款交互)
+void renderConfirmFolderDel(const String &path) {
+    const int x = 24, y = 24, w = SCR_W - 48, h = 80;
+    fillRect(x, y, w, h, false);
+    drawRect(x, y, w, h, true);
+    const char *nm = strrchr(path.c_str(), '/');
+    nm = nm ? nm + 1 : path.c_str();
+    char line[64];
+    snprintf(line, sizeof(line), PSTR("删除 %s ？"), nm);
+    drawTextUTF8(x + 4, y + 6, line, w - 8, true);
+    drawTextUTF8(x + 4, y + 28, PSTR("内含文件将一并删除！"), w - 8, true);
+    drawTextUTF8(x + 4, y + 52, PSTR("长按删除，短按退出"), w - 8, true);
+    refresh(false);
+}
+
 // 执行功能框选中项
 void execMenu() {
     switch (menuSel) {
@@ -3345,8 +3451,10 @@ void execMenu() {
             if (itemCount > 0 && selIndex < itemCount) {
                 FileItem *it = itemAt(selIndex);
                 if (it && it->isDir) {
+                    // A1: 文件夹改为"确认后递归删除"(原实现直接提示"暂不支持")
                     hideMenu();
-                    showMsg(PSTR("文件夹删除"), "暂不支持");
+                    folderDelConfirmPath = currentPath + it->name;
+                    renderConfirmFolderDel(folderDelConfirmPath);
                 } else if (it) {
                     String path = currentPath + it->name;
                     if (browseFs().remove(path.c_str())) {
@@ -6937,6 +7045,14 @@ void loop() {
         biliFansTestRun();
     }
 #endif
+#if FOLDER_DEL_TEST
+    // 文件夹递归删除自检 (仅测试固件, 见 folderDelTestRun 注释)
+    static bool folderDelTestDone = false;
+    if (!folderDelTestDone && millis() > 2500) {
+        folderDelTestDone = true;
+        folderDelTestRun();
+    }
+#endif
     uint32_t loopStarted = millis();
     clockManagerCompTick();   // 时钟手动补偿结算 (内部按分钟闸门, 芯片在场改写芯片秒)
     progressTick();           // P6: 阅读进度节流落盘 (10 页 / 60 秒)
@@ -7614,7 +7730,28 @@ void loop() {
         return;
     }
 
-    if (rebuildConfirmPath.length() > 0) {
+    if (folderDelConfirmPath.length() > 0) {
+        // ===== 文件夹删除确认框 (长按删除, 任意短按/中长退出) =====
+        if (r3 == 2) {            // 长按右键 = 确认删除
+            String path = folderDelConfirmPath;
+            folderDelConfirmPath = "";
+            int n = deleteFolderNow(path);
+            if (n < 0) {
+                showMsg(PSTR("删除失败"), "请重试");
+            } else {
+                listDir(currentPath.c_str());
+                if (selIndex >= itemCount) selIndex = itemCount - 1;
+                if (selIndex < 0) selIndex = 0;
+                if (topIndex > selIndex) topIndex = selIndex;
+                renderAll();
+                refresh(true);
+            }
+        } else if (r2 == 2 || r3 == 1 || r2 == 1) {   // 中长/任意短按 = 退出
+            folderDelConfirmPath = "";
+            renderAll();
+            refresh(false);
+        }
+    } else if (rebuildConfirmPath.length() > 0) {
         // ===== 重建确认框 (长按重建, 短按退出) =====
         if (r3 == 2) {            // 长按右键 = 确认重建
             String path = rebuildConfirmPath;
