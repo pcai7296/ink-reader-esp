@@ -837,20 +837,31 @@ static void weatherRenderTest() {
     snprintf(wFuture.humidity, sizeof(wFuture.humidity), PSTR("62"));
     snprintf(wFuture.windScale, sizeof(wFuture.windScale), PSTR("2"));
     snprintf(wLife.uvi, sizeof(wLife.uvi), PSTR("中等"));
-    // 中间条布局自检 (与 renderWeatherPage 内同一算法)
+    // 中间条布局自检 (与 renderWeatherPage 内同一算法: 室内温湿度优先 / 缺失回落 InAWord)
     {
-        char sub[96];
-        clockBuildSubText(sub, sizeof(sub), true);
-        if (!sub[0]) snprintf(sub, sizeof(sub), PSTR("测试一言内容"));
-        int si = clockSubIcon();
-        int sw = utf8Width(sub);
         const int subLeft = 64;
         int avail = SCR_W - 4 - subLeft;
-        int total = (si >= 0) ? 16 + 6 + sw : sw;
-        int sx = subLeft + (avail - total) / 2;
-        if (sx < subLeft) sx = subLeft;
-        Serial.printf_P(PSTR("WEATHER_TEST strip battEnd=56 subLeft=%d icon=%d tw=%d avail=%d sx=%d end=%d fit=%d\n"),
-                        subLeft, si, sw, avail, sx, sx + total, (total <= avail) ? 1 : 0);
+        if (gIndoorValid) {
+            char n1[12], n2[12];
+            snprintf(n1, sizeof(n1), PSTR("%d℃"), indoorTempInt());
+            snprintf(n2, sizeof(n2), PSTR("%u%%"), indoorHumiInt());
+            int total = 20 + 20 + utf8Width(n1) + 10 + 20 + utf8Width(n2);
+            int sx = subLeft + (avail - total) / 2;
+            if (sx < subLeft) sx = subLeft;
+            Serial.printf_P(PSTR("WEATHER_TEST strip indoor battEnd=56 avail=%d total=%d sx=%d end=%d fit=%d\n"),
+                            avail, total, sx, sx + total, (total <= avail) ? 1 : 0);
+        } else {
+            char sub[96];
+            clockBuildSubText(sub, sizeof(sub), true);
+            if (!sub[0]) snprintf(sub, sizeof(sub), PSTR("测试一言内容"));
+            int si = clockSubIcon();
+            int sw = utf8Width(sub);
+            int total = (si >= 0) ? 16 + 6 + sw : sw;
+            int sx = subLeft + (avail - total) / 2;
+            if (sx < subLeft) sx = subLeft;
+            Serial.printf_P(PSTR("WEATHER_TEST strip inaword battEnd=56 avail=%d icon=%d tw=%d total=%d sx=%d end=%d fit=%d\n"),
+                            avail, si, sw, total, sx, sx + total, (total <= avail) ? 1 : 0);
+        }
     }
     renderWeatherPage(true);
     renderWeatherPage(false);
@@ -2594,21 +2605,38 @@ void renderWeatherPage(bool full) {
             drawTextUTF8(24, 58, bbuf, 34, true);
             subLeft = 64;
         }
-        // 正中: 一言 / 自定义句 / 倒计时 / B粉 —— 对齐官方 V14 DisplayMain.ino:259-301(该处即 InAWord);
-        //        事件类型用图标(旗子/B站)表意, 内容仍是文本。夜间跳过且无文案时提示"夜间不更新"。
+        // 正中: 优先 **室内温湿度(板载 SHT30)** —— 与天气/气候相关, 且不与本页已有字段重复
+        //       (大号 7 段数字=室外温度, 右上角=室外湿度)。用户明确要求正中别放电量, 由我选内容;
+        //       无传感器时回落 InAWord(一言/自定义句/倒计时/B粉, 与官方 V14 该处一致)。
+        //       布局: [房子][温度计]29℃ [水滴]59% , 整体在 [subLeft(64), 292] 内居中。
         {
-            char sub[96];
-            clockBuildSubText(sub, sizeof(sub), true);
-            if (!sub[0] && wNightSkip) snprintf(sub, sizeof(sub), PSTR("夜间不更新"));
-            if (sub[0]) {
-                int si = clockSubIcon();
-                int sw = utf8Width(sub);
+            if (gIndoorValid) {
+                char n1[12], n2[12];
+                snprintf(n1, sizeof(n1), PSTR("%d℃"), indoorTempInt());
+                snprintf(n2, sizeof(n2), PSTR("%u%%"), indoorHumiInt());
+                int total = 20 + 20 + utf8Width(n1) + 10 + 20 + utf8Width(n2);
                 int avail = SCR_W - 4 - subLeft;
-                int total = (si >= 0) ? 16 + 6 + sw : sw;
                 int sx = subLeft + (avail - total) / 2;
                 if (sx < subLeft) sx = subLeft;
-                if (si >= 0) { drawClockIcon(sx, 58, si, true); sx += 16 + 6; }
-                drawTextUTF8(sx, 58, sub, SCR_W - 4 - sx, true);
+                drawClockIcon(sx, 58, CK_ICON_HOUSE, true); sx += 20;
+                drawClockIcon(sx, 58, CK_ICON_TEMP, true); sx += 20;
+                drawTextUTF8(sx, 58, n1, 60, true); sx += utf8Width(n1) + 10;
+                drawClockIcon(sx, 58, CK_ICON_HUMI, true); sx += 20;
+                drawTextUTF8(sx, 58, n2, 40, true);
+            } else {
+                char sub[96];
+                clockBuildSubText(sub, sizeof(sub), true);
+                if (!sub[0] && wNightSkip) snprintf(sub, sizeof(sub), PSTR("夜间不更新"));
+                if (sub[0]) {
+                    int si = clockSubIcon();
+                    int sw = utf8Width(sub);
+                    int avail = SCR_W - 4 - subLeft;
+                    int total = (si >= 0) ? 16 + 6 + sw : sw;
+                    int sx = subLeft + (avail - total) / 2;
+                    if (sx < subLeft) sx = subLeft;
+                    if (si >= 0) { drawClockIcon(sx, 58, si, true); sx += 16 + 6; }
+                    drawTextUTF8(sx, 58, sub, SCR_W - 4 - sx, true);
+                }
             }
         }
         // ===== 底部 3 天预报：三列对齐（今/明/后 + MM-DD | 星期+天气 | 高/低）=====
