@@ -45,3 +45,9 @@ __pycache__/
 # ===== 工具/agent 工作区（非固件产物; 审查 #3: 曾误提交 .zcode/plans/*.md）=====
 .zcode/
 .omo/
+
+# ===== 一次性联调脚本（个人本地用，不入库）=====
+esp_alive_probe.py
+esp_proto_probe.py
+esp_sync_e2e.py
+phone_sim_server.py
