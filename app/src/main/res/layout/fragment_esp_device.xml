@@ -1,0 +1,231 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/scroll_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <!--
+        设备页：圆角卡片分组（软件风格）。
+        卡片底色/圆角/透明度、文字颜色均由 EspDeviceFragment.applyTheme() 按 App 主题运行期设置；
+        XML 内只留结构，Text 用 android:tag 标记着色角色：
+          esp_primary   主文字（标题/分区标题/选项）
+          esp_secondary 次要文字（说明/状态/提示）
+          esp_edit      输入框（textColor + hintColor）
+          esp_divider   分隔线
+    -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingLeft="16dp"
+        android:paddingTop="16dp"
+        android:paddingRight="16dp"
+        android:paddingBottom="24dp">
+
+        <TextView
+            android:id="@+id/tv_title"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:tag="esp_primary"
+            android:text="@string/esp_device_title"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:tag="esp_secondary"
+            android:text="@string/esp_device_hint"
+            android:textSize="12sp" />
+
+        <!-- ==================== Sync ==================== -->
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:layout_marginBottom="8dp"
+            android:tag="esp_primary"
+            android:text="@string/esp_sync_section"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+        <LinearLayout
+            android:id="@+id/card_sync"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingLeft="16dp"
+                android:paddingTop="10dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="10dp">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:tag="esp_primary"
+                        android:text="@string/esp_sync_enable_title"
+                        android:textSize="16sp" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:tag="esp_secondary"
+                        android:text="@string/esp_sync_enable_summary"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <androidx.appcompat.widget.SwitchCompat
+                    android:id="@+id/switch_sync_enable"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp" />
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="0.5dp"
+                android:tag="esp_divider" />
+
+            <TextView
+                android:id="@+id/tv_sync_status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingLeft="16dp"
+                android:paddingTop="10dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="10dp"
+                android:tag="esp_secondary"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/tv_sync_last"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:paddingLeft="16dp"
+                android:paddingTop="2dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="10dp"
+                android:tag="esp_secondary"
+                android:textSize="13sp" />
+
+            <!-- 方案 D-1: 墨水屏绑定状态（只暴露既有能力, 不加新页面） -->
+            <TextView
+                android:id="@+id/tv_bind_status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingLeft="16dp"
+                android:paddingTop="2dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="4dp"
+                android:textSize="13sp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:paddingLeft="16dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="8dp">
+
+                <EditText
+                    android:id="@+id/edit_dev_ip"
+                    android:layout_width="0dp"
+                    android:layout_weight="2"
+                    android:layout_height="wrap_content"
+                    android:hint="192.168.0.100"
+                    android:importantForAutofill="no"
+                    android:inputType="textUri"
+                    android:maxLines="1"
+                    android:minHeight="48dp"
+                    android:textSize="15sp" />
+
+                <Button
+                    android:id="@+id/btn_dev_ip_confirm"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:text="@string/esp_dev_ip_confirm" />
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="0.5dp"
+                android:tag="esp_divider" />
+
+            <!-- 2026-09-12 用户拍板: "同步服务"按钮移除（服务由开关 + START_STICKY + 看门狗保证常驻） -->
+
+            <View
+                android:id="@+id/divider_battery"
+                android:layout_width="match_parent"
+                android:layout_height="0.5dp"
+                android:tag="esp_divider" />
+
+            <Button
+                android:id="@+id/btn_battery_whitelist"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginLeft="16dp"
+                android:layout_marginTop="6dp"
+                android:layout_marginRight="16dp"
+                android:layout_marginBottom="6dp"
+                android:text="@string/esp_battery_whitelist_button" />
+
+            <TextView
+                android:id="@+id/tv_battery_oem_hint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingLeft="16dp"
+                android:paddingTop="2dp"
+                android:paddingRight="16dp"
+                android:paddingBottom="10dp"
+                android:tag="esp_secondary"
+                android:text="@string/esp_battery_oem_hint"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <!-- ==================== 前往水墨屏管理 ==================== -->
+
+        <Button
+            android:id="@+id/btn_open_manage"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:layout_marginTop="24dp"
+            android:text="@string/esp_open_manage" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:gravity="center"
+            android:tag="esp_secondary"
+            android:text="@string/esp_open_manage_hint"
+            android:textSize="11sp" />
+
+        <!-- 电池白名单按钮移到底部后的落点（初始为空，见 EspDeviceFragment.moveBatterySectionToBottom） -->
+        <LinearLayout
+            android:id="@+id/ll_battery_bottom"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+
+    </LinearLayout>
+</ScrollView>

@@ -1,0 +1,75 @@
+pluginManagement {
+    buildscript {
+        repositories {
+            mavenCentral()
+            // ★ 本机私有镜像（勿提交）：storage.googleapis.com/r8-releases 在本网络下会 Connection reset，
+            //   这里放一份手工下载的 r8-9.1.29（pom+jar），位置 J:\code\Android\m2local。
+            maven {
+                url = uri("file:///J:/code/Android/m2local")
+            }
+            maven {
+                url = uri("https://storage.googleapis.com/r8-releases/raw")
+            }
+        }
+        dependencies {
+            // Kotlin 2.4 metadata requires R8 9.1.29 or newer.
+            classpath("com.android.tools:r8:9.1.29")
+        }
+    }
+    repositories {
+        google {
+            content {
+                includeGroupByRegex("com\\.android.*")
+                includeGroupByRegex("com\\.google.*")
+                includeGroupByRegex("androidx.*")
+            }
+        }
+        //原仓库
+        gradlePluginPortal()
+        mavenCentral()
+        //镜像仓库,无法连接源仓库自行启用镜像仓库,不要提交修改
+        //maven { url "https://maven-central-asia.storage-download.googleapis.com/maven2/" }
+        //maven { url 'https://maven.aliyun.com/repository/google' }
+        //maven { url 'https://maven.aliyun.com/repository/public' }
+        //maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+        //maven { url 'https://repo.huaweicloud.com/repository/maven/' }
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        maven {
+            url = uri("$rootDir/third_party/maven")
+            content {
+                includeModule("org.htmlunit", "htmlunit-core-js")
+            }
+        }
+        //原仓库
+        google {
+            content {
+                includeGroupByRegex("com\\.android.*")
+                includeGroupByRegex("com\\.google.*")
+                includeGroupByRegex("androidx.*")
+            }
+        }
+        maven {
+            url = 'https://jitpack.io'
+            content {
+                includeGroupByRegex("com\\.github.*")
+            }
+        }
+        mavenCentral()
+
+        //镜像仓库,无法连接源仓库自行启用镜像仓库,不要提交修改
+        //maven { url "https://maven-central-asia.storage-download.googleapis.com/maven2/" }
+        //maven { url 'https://maven.aliyun.com/repository/google' }
+        //maven { url 'https://maven.aliyun.com/repository/public' }
+        //maven { url 'https://repo.huaweicloud.com/repository/maven/' }
+    }
+}
+rootProject.name = 'legado'
+
+include ':app'
+include ':modules:book'
+include ':modules:rhino'
